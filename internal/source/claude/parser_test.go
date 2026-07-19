@@ -398,6 +398,210 @@ func TestClaudeToolInputSummarizesEditDiff(t *testing.T) {
 	}
 }
 
+func TestLoadEventsExtractsClaudeEditDetail(t *testing.T) {
+	session := &model.Session{Path: filepath.Join("testdata", "tool-detail", "subagents", "session-tool-detail.jsonl"), Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	call := session.Events[0]
+	if call.ToolInput != "/workspace/lunar-lab/route.txt · +2 −2" {
+		t.Fatalf("ToolInput = %q, want unchanged collapsed summary", call.ToolInput)
+	}
+	if call.Detail == nil || call.Detail.Diff != "-ridge one\n-ridge two\n+valley one\n+valley two" {
+		t.Fatalf("Detail = %#v, want old-to-new replace block", call.Detail)
+	}
+}
+
+func TestLoadEventsExtractsClaudeMultiEditDetail(t *testing.T) {
+	session := &model.Session{Path: filepath.Join("testdata", "tool-detail", "subagents", "session-tool-detail.jsonl"), Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	want := "-scan ridge\n+scan valley\n\n-mark north\n-mark south\n+mark east\n+mark west"
+	if detail := session.Events[2].Detail; detail == nil || detail.Diff != want {
+		t.Fatalf("Detail = %#v, want separated replace blocks", detail)
+	}
+}
+
+func TestLoadEventsExtractsClaudeWriteDetail(t *testing.T) {
+	session := &model.Session{Path: filepath.Join("testdata", "tool-detail", "subagents", "session-tool-detail.jsonl"), Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	call := session.Events[4]
+	if call.ToolInput != "/workspace/lunar-lab/beacon.txt" {
+		t.Fatalf("ToolInput = %q, want unchanged file path", call.ToolInput)
+	}
+	if call.Detail == nil || call.Detail.Diff != "+beacon alpha\n+beacon beta" {
+		t.Fatalf("Detail = %#v, want all-added block", call.Detail)
+	}
+}
+
+func TestLoadEventsPreservesClaudeBashInputDetail(t *testing.T) {
+	session := &model.Session{Path: filepath.Join("testdata", "tool-detail", "subagents", "session-tool-detail.jsonl"), Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	want := "survey-route --all\nprintf 'done\\n'"
+	call := session.Events[6]
+	if call.ToolInput != want {
+		t.Fatalf("ToolInput = %q, want existing command", call.ToolInput)
+	}
+	if call.Detail == nil || call.Detail.Input != want {
+		t.Fatalf("Detail = %#v, want multiline command", call.Detail)
+	}
+}
+
+func TestLoadEventsPreservesClaudeBashOutputDetail(t *testing.T) {
+	session := &model.Session{Path: filepath.Join("testdata", "tool-detail", "subagents", "session-tool-detail.jsonl"), Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	call := session.Events[6]
+	if call.ResultSummary != "exit 7" {
+		t.Fatalf("ResultSummary = %q, want unchanged exit summary", call.ResultSummary)
+	}
+	want := "Error: Exit code 7\nroute blocked\nretry advised"
+	if call.Detail == nil || call.Detail.Output != want {
+		t.Fatalf("Detail = %#v, want newline-preserving output", call.Detail)
+	}
+}
+
+func TestClaudeResultTextJoinsTextBlocksWithNewlines(t *testing.T) {
+	content := json.RawMessage(`[{"type":"text","text":"first line\nsecond line"},{"type":"text","text":"third line"}]`)
+	if got := claudeResultText(content); got != "first line\nsecond line\nthird line" {
+		t.Fatalf("claudeResultText() = %q, want joined text blocks", got)
+	}
+}
+
+func TestLoadEventsExtractsClaudeReadDetail(t *testing.T) {
+	session := &model.Session{Path: filepath.Join("testdata", "tool-detail", "subagents", "session-tool-detail.jsonl"), Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	call := session.Events[8]
+	if call.ToolInput != "/workspace/lunar-lab/map.txt" {
+		t.Fatalf("ToolInput = %q, want unchanged file path", call.ToolInput)
+	}
+	want := "/workspace/lunar-lab/map.txt · offset 4 · limit 8"
+	if call.Detail == nil || call.Detail.Input != want {
+		t.Fatalf("Detail = %#v, want bounded read range", call.Detail)
+	}
+}
+
+func TestClaudeToolDetailPrettyPrintsOtherInputs(t *testing.T) {
+	input := json.RawMessage(`{"query":"ridge","limit":2}`)
+	detail := claudeToolDetail("Grep", input)
+	want := "{\n  \"query\": \"ridge\",\n  \"limit\": 2\n}"
+	if detail == nil || detail.Input != want {
+		t.Fatalf("claudeToolDetail() = %#v, want pretty multiline input", detail)
+	}
+}
+
+func TestClaudeToolDetailLeavesDeepJSONRaw(t *testing.T) {
+	input := `{"query":` + strings.Repeat("[", 100) + "0" + strings.Repeat("]", 100) + "}"
+	detail := claudeToolDetail("Grep", json.RawMessage(input))
+	if detail == nil || detail.Input != input {
+		t.Fatalf("claudeToolDetail() expanded deeply nested input to %d bytes", len(detail.Input))
+	}
+}
+
+func TestClaudeToolDetailOmitsSubagentTools(t *testing.T) {
+	for _, name := range []string{"Agent", "Task"} {
+		if detail := claudeToolDetail(name, json.RawMessage(`{"description":"Survey the ridge"}`)); detail != nil {
+			t.Errorf("claudeToolDetail(%q) = %#v, want nil", name, detail)
+		}
+	}
+}
+
+func TestClaudeDetailCollectorMatchesModelBound(t *testing.T) {
+	for _, size := range []int{0, 2047, 2048, 4095, 4096, 4097, 10_000} {
+		value := "start\n" + strings.Repeat("界", size) + "\nend"
+		var collector claudeDetailCollector
+		collector.WriteString(value)
+		if got, want := collector.String(), model.BoundedDetailText(value); got != want {
+			t.Errorf("collector with %d body runes differs: got %d runes, want %d", size, len([]rune(got)), len([]rune(want)))
+		}
+	}
+}
+
+func TestClaudeToolDetailBoundsEveryField(t *testing.T) {
+	value := "start\n" + strings.Repeat("界", 5000) + "\nend"
+	bashInput, err := json.Marshal(map[string]string{"command": value})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeInput, err := json.Marshal(map[string]string{"content": value})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := claudeToolDetail("Bash", bashInput).Input, model.BoundedDetailText(value); got != want {
+		t.Fatalf("bounded Input has %d runes, want %d", len([]rune(got)), len([]rune(want)))
+	}
+	unboundedDiff := "+" + strings.ReplaceAll(value, "\n", "\n+")
+	if got, want := claudeToolDetail("Write", writeInput).Diff, model.BoundedDetailText(unboundedDiff); got != want {
+		t.Fatalf("bounded Diff has %d runes, want %d", len([]rune(got)), len([]rune(want)))
+	}
+
+	path := filepath.Join(t.TempDir(), "session-bounded-output.jsonl")
+	call := map[string]any{
+		"type": "assistant",
+		"message": map[string]any{"content": []any{map[string]any{
+			"type": "tool_use", "id": "tool-read", "name": "Read",
+			"input": map[string]any{"file_path": "/workspace/lunar-lab/map.txt"},
+		}}},
+	}
+	result := map[string]any{
+		"type": "user",
+		"message": map[string]any{"content": []any{map[string]any{
+			"type": "tool_result", "tool_use_id": "tool-read", "content": value,
+		}}},
+	}
+	callLine, err := json.Marshal(call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultLine, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(append(callLine, '\n'), append(resultLine, '\n')...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentClaude}
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := session.Events[0].Detail.Output, model.BoundedDetailText(value); got != want {
+		t.Fatalf("bounded Output has %d runes, want %d", len([]rune(got)), len([]rune(want)))
+	}
+}
+
+func TestLoadEventsDoesNotAttachClaudeDetailWithoutCallID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-missing-call-id.jsonl")
+	content := strings.Join([]string{
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:01Z","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"survey-route"}}]}}`,
+		`{"type":"user","timestamp":"2026-01-02T03:00:02Z","message":{"content":[{"type":"tool_result","content":"unrelated output"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if output := session.Events[0].Detail.Output; output != "" {
+		t.Fatalf("Detail.Output = %q, want unlinked result", output)
+	}
+}
+
 func TestLoadEventsSummarizesBashExit(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session-bash.jsonl")
 	content := strings.Join([]string{

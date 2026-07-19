@@ -160,6 +160,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 				}
 				event.Kind, event.CallID, event.ToolName = model.EventToolCall, block.ID, block.Name
 				event.ToolInput = model.BoundedDetailText(claudeToolInput(block.Name, block.Input))
+				event.Detail = claudeToolDetail(block.Name, block.Input)
 				if block.Name == "Agent" || block.Name == "Task" {
 					event.Kind = model.EventSubagent
 					event.Subagent = matchClaudeSubagent(session.Subagents, block.Input, linkedSubagents)
@@ -174,6 +175,9 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 				event.Text = rawText(block.Content)
 				if index, ok := calls[block.ToolUseID]; ok {
 					call := &session.Events[index]
+					if call.Detail != nil && block.ToolUseID != "" {
+						call.Detail.Output = model.BoundedDetailText(claudeResultText(block.Content))
+					}
 					if agentID := toolResultAgentID(record.ToolUseResult); call.Kind == model.EventSubagent && agentID != "" {
 						if subagent := subagentByID(session.Subagents, agentID); subagent != nil {
 							delete(linkedSubagents, call.Subagent)
@@ -293,6 +297,228 @@ func claudeToolInput(name string, input json.RawMessage) string {
 	return rawText(input)
 }
 
+func claudeToolDetail(name string, input json.RawMessage) *model.ToolDetail {
+	if name == "Agent" || name == "Task" {
+		return nil
+	}
+	detail := &model.ToolDetail{}
+	switch name {
+	case "Edit":
+		var fields struct {
+			Old string `json:"old_string"`
+			New string `json:"new_string"`
+		}
+		if json.Unmarshal(input, &fields) != nil {
+			detail.Input = model.BoundedDetailText(string(input))
+			return detail
+		}
+		detail.Diff = model.BoundedDetailText(claudeReplaceBlock(fields.Old, fields.New))
+	case "MultiEdit":
+		var fields struct {
+			Edits json.RawMessage `json:"edits"`
+		}
+		if json.Unmarshal(input, &fields) != nil {
+			detail.Input = model.BoundedDetailText(string(input))
+			return detail
+		}
+		diff, ok := claudeMultiEditDiff(fields.Edits)
+		if !ok {
+			detail.Input = model.BoundedDetailText(string(input))
+			return detail
+		}
+		detail.Diff = model.BoundedDetailText(diff)
+	case "Write":
+		var fields struct {
+			Content string `json:"content"`
+		}
+		if json.Unmarshal(input, &fields) != nil {
+			detail.Input = model.BoundedDetailText(string(input))
+			return detail
+		}
+		detail.Diff = model.BoundedDetailText(claudeReplaceBlock("", fields.Content))
+	case "Bash":
+		var fields struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal(input, &fields) != nil {
+			detail.Input = model.BoundedDetailText(string(input))
+			return detail
+		}
+		detail.Input = model.BoundedDetailText(fields.Command)
+	case "Read":
+		var fields struct {
+			FilePath string `json:"file_path"`
+			Offset   *int   `json:"offset"`
+			Limit    *int   `json:"limit"`
+		}
+		if json.Unmarshal(input, &fields) != nil {
+			detail.Input = model.BoundedDetailText(string(input))
+			return detail
+		}
+		parts := []string{fields.FilePath}
+		if fields.Offset != nil {
+			parts = append(parts, fmt.Sprintf("offset %d", *fields.Offset))
+		}
+		if fields.Limit != nil {
+			parts = append(parts, fmt.Sprintf("limit %d", *fields.Limit))
+		}
+		detail.Input = model.BoundedDetailText(strings.Join(parts, " · "))
+	default:
+		detail.Input = model.BoundedDetailText(claudePrettyInput(input))
+	}
+	return detail
+}
+
+func claudePrettyInput(input json.RawMessage) string {
+	raw := string(input)
+	if bounded := model.BoundedDetailText(raw); bounded != raw {
+		return bounded
+	}
+	input = bytes.TrimSpace(input)
+	if !claudeJSONNestingWithin(input, 32) {
+		return raw
+	}
+	var formatted bytes.Buffer
+	if json.Indent(&formatted, input, "", "  ") == nil {
+		return formatted.String()
+	}
+	return raw
+}
+
+func claudeJSONNestingWithin(input []byte, limit int) bool {
+	depth := 0
+	inString := false
+	escaped := false
+	for _, char := range input {
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if char == '\\' {
+				escaped = true
+			} else if char == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch char {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+			if depth > limit {
+				return false
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return true
+}
+
+func claudeReplaceBlock(oldText, newText string) string {
+	var output claudeDetailCollector
+	output.writeReplaceBlock(oldText, newText)
+	return output.String()
+}
+
+func claudeMultiEditDiff(edits json.RawMessage) (string, bool) {
+	if len(bytes.TrimSpace(edits)) == 0 || bytes.Equal(bytes.TrimSpace(edits), []byte("null")) {
+		return "", true
+	}
+	decoder := json.NewDecoder(bytes.NewReader(edits))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('[') {
+		return "", false
+	}
+	var output claudeDetailCollector
+	index := 0
+	for decoder.More() {
+		var edit struct {
+			Old string `json:"old_string"`
+			New string `json:"new_string"`
+		}
+		if decoder.Decode(&edit) != nil {
+			return "", false
+		}
+		if index > 0 {
+			output.WriteString("\n\n")
+		}
+		output.writeReplaceBlock(edit.Old, edit.New)
+		index++
+	}
+	if _, err := decoder.Token(); err != nil {
+		return "", false
+	}
+	return output.String(), true
+}
+
+const claudeDetailRuneLimit = 4096
+
+type claudeDetailCollector struct {
+	head      []rune
+	tail      []rune
+	tailStart int
+	total     int
+}
+
+func (c *claudeDetailCollector) WriteString(value string) {
+	for _, char := range value {
+		c.writeRune(char)
+	}
+}
+
+func (c *claudeDetailCollector) writeRune(char rune) {
+	const headLimit = (claudeDetailRuneLimit - 1) / 2
+	const tailCapacity = claudeDetailRuneLimit - headLimit
+	c.total++
+	if len(c.head) < headLimit {
+		c.head = append(c.head, char)
+		return
+	}
+	if len(c.tail) < tailCapacity {
+		c.tail = append(c.tail, char)
+		return
+	}
+	c.tail[c.tailStart] = char
+	c.tailStart = (c.tailStart + 1) % tailCapacity
+}
+
+func (c *claudeDetailCollector) writeReplaceBlock(oldText, newText string) {
+	// Whole-block output is not a minimal diff; add a line-level LCS if noisy replacements make that ceiling limiting.
+	if oldText != "" {
+		c.writePrefixedLines('-', oldText)
+	}
+	if newText != "" {
+		if oldText != "" {
+			c.writeRune('\n')
+		}
+		c.writePrefixedLines('+', newText)
+	}
+}
+
+func (c *claudeDetailCollector) writePrefixedLines(prefix rune, text string) {
+	c.writeRune(prefix)
+	for _, char := range text {
+		c.writeRune(char)
+		if char == '\n' {
+			c.writeRune(prefix)
+		}
+	}
+}
+
+func (c *claudeDetailCollector) String() string {
+	orderedTail := make([]rune, 0, len(c.tail))
+	orderedTail = append(orderedTail, c.tail[c.tailStart:]...)
+	orderedTail = append(orderedTail, c.tail[:c.tailStart]...)
+	if c.total <= claudeDetailRuneLimit {
+		return string(c.head) + string(orderedTail)
+	}
+	const keptTail = claudeDetailRuneLimit - 1 - (claudeDetailRuneLimit-1)/2
+	return string(c.head) + "…" + string(orderedTail[len(orderedTail)-keptTail:])
+}
+
 func textLineCount(text string) int {
 	if text == "" {
 		return 0
@@ -306,6 +532,51 @@ func rawText(value json.RawMessage) string {
 		return strings.Join(strings.Fields(text), " ")
 	}
 	return strings.Join(strings.Fields(string(value)), " ")
+}
+
+func claudeResultText(content json.RawMessage) string {
+	raw := bytes.TrimSpace(content)
+	if len(raw) == 0 {
+		return ""
+	}
+	var output claudeDetailCollector
+	if raw[0] == '"' {
+		var text string
+		if json.Unmarshal(raw, &text) != nil {
+			return model.BoundedDetailText(string(content))
+		}
+		output.WriteString(text)
+		return output.String()
+	}
+	if raw[0] != '[' {
+		return model.BoundedDetailText(string(content))
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if _, err := decoder.Token(); err != nil {
+		return model.BoundedDetailText(string(content))
+	}
+	first := true
+	for decoder.More() {
+		var block struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if decoder.Decode(&block) != nil {
+			return model.BoundedDetailText(string(content))
+		}
+		if block.Type != "text" {
+			continue
+		}
+		if !first {
+			output.writeRune('\n')
+		}
+		output.WriteString(block.Text)
+		first = false
+	}
+	if _, err := decoder.Token(); err != nil {
+		return model.BoundedDetailText(string(content))
+	}
+	return output.String()
 }
 
 const maxSubagentDepth = 64
