@@ -694,7 +694,7 @@ func (d *detailState) toolEventLines(event model.Event, indent int, key string) 
 	for _, section := range []struct {
 		label string
 		text  string
-	}{{label: "output:", text: event.Detail.Output}, {label: "input:", text: detailInputBody(event)}} {
+	}{{label: "input:", text: detailInputBody(event)}, {label: "output:", text: event.Detail.Output}} {
 		if section.text == "" {
 			continue
 		}
@@ -760,7 +760,7 @@ func toolLine(event model.Event) string {
 
 func toolDisplayName(name string) string {
 	name = terminalText(name, 96)
-	if name == "exec_command" {
+	if name == "exec_command" || name == "exec" {
 		return "Bash"
 	}
 	if name == "apply_patch" {

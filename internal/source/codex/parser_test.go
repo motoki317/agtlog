@@ -25,6 +25,12 @@ func testParser() Parser {
 	}), "gpt-5")
 }
 
+func TestParserFingerprintInvalidatesOlderTitleMetadata(t *testing.T) {
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v8:") {
+		t.Fatalf("CacheFingerprint() = %q, want v8 metadata schema", got)
+	}
+}
+
 func fixture(name string) string {
 	return filepath.Join("testdata", "sessions", "2026", "01", "02", name)
 }
@@ -153,6 +159,16 @@ func TestTitleSkipsPlainDelegationBoilerplate(t *testing.T) {
 	}, "\n")
 	if got := titleFromUserMessage(message); got != "Stabilize lunar telemetry without losing samples." {
 		t.Fatalf("titleFromUserMessage() = %q, want first meaningful task line", got)
+	}
+}
+
+func TestParseTitlesDelegatedSubagentFromTaskName(t *testing.T) {
+	session, err := testParser().Parse(filepath.Join("testdata", "rollout-subagent-title.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Title != "review_x" {
+		t.Fatalf("Parse().Title = %q, want delegated role leaf review_x", session.Title)
 	}
 }
 
@@ -590,6 +606,69 @@ func TestLoadEventsPreservesCodexExecInputDetail(t *testing.T) {
 	}
 }
 
+func TestLoadEventsExtractsCommandFromCodexExecTool(t *testing.T) {
+	path := filepath.Join("testdata", "tool-detail", "rollout-exec-tool.jsonl")
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Events) != 1 {
+		t.Fatalf("events = %#v, want one exec call", session.Events)
+	}
+	call := session.Events[0]
+	if call.ToolName != "exec" || call.ToolInput != "make build" {
+		t.Fatalf("tool call = %#v, want exec summarized as make build", call)
+	}
+	if call.Detail == nil || call.Detail.Input != "make build" {
+		t.Fatalf("Detail = %#v, want extracted command", call.Detail)
+	}
+}
+
+func TestCodexExecToolKeepsFullMultilineCommandDetail(t *testing.T) {
+	input := `const r = await tools.exec_command({"cmd":"make build\nprintf '}'","workdir":"/x","env":{"MODE":"test"}}); text(r.output);`
+	if got := codexToolInput("exec", input); got != "make build" {
+		t.Fatalf("codexToolInput() = %q, want first command line", got)
+	}
+	if got := codexToolDetail("exec", input).Input; got != "make build\nprintf '}'" {
+		t.Fatalf("Detail.Input = %q, want full multiline command", got)
+	}
+}
+
+func TestCodexExecToolFallsBackForMalformedWrapper(t *testing.T) {
+	input := `const r = await tools.exec_command({"cmd":); text(r.output);`
+	if got := codexToolInput("exec", input); got != input {
+		t.Fatalf("codexToolInput() = %q, want compact raw fallback", got)
+	}
+	if got := codexToolDetail("exec", input).Input; got != input {
+		t.Fatalf("Detail.Input = %q, want pretty-input fallback", got)
+	}
+}
+
+func TestCodexExecToolFallsBackWithoutStringCommand(t *testing.T) {
+	input := `const r = await tools.exec_command({}); text(r.output);`
+	if got := codexToolInput("exec", input); got != input {
+		t.Fatalf("codexToolInput() = %q, want raw fallback without cmd", got)
+	}
+	if got := codexToolDetail("exec", input).Input; got != input {
+		t.Fatalf("Detail.Input = %q, want raw fallback without cmd", got)
+	}
+}
+
+func TestCodexExecToolFallsBackForNullOrEmptyCommand(t *testing.T) {
+	for _, input := range []string{
+		`const r = await tools.exec_command({"cmd":null}); text(r.output);`,
+		`const r = await tools.exec_command({"cmd":""}); text(r.output);`,
+	} {
+		if got := codexToolInput("exec", input); got != input {
+			t.Errorf("codexToolInput(%q) = %q, want raw fallback", input, got)
+		}
+		if got := codexToolDetail("exec", input).Input; got != input {
+			t.Errorf("Detail.Input for %q = %q, want raw fallback", input, got)
+		}
+	}
+}
+
 func TestLoadEventsPreservesCodexExecOutputDetail(t *testing.T) {
 	path := filepath.Join("testdata", "tool-detail", "rollout-tool-detail.jsonl")
 	session := &model.Session{Path: path, Agent: model.AgentCodex}
@@ -604,6 +683,110 @@ func TestLoadEventsPreservesCodexExecOutputDetail(t *testing.T) {
 	want := "Process exited with code 3\nFinal output:\nroute blocked\nretry advised"
 	if call.Detail == nil || call.Detail.Output != want {
 		t.Fatalf("Detail = %#v, want newline-preserving output", call.Detail)
+	}
+}
+
+func TestLoadEventsStripsCodexExecCompletedPreamble(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-exec-output.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-exec","name":"exec","input":"const r = await tools.exec_command({\"cmd\":\"make build\"}); text(r.output);"}}`,
+		`{"timestamp":"2026-01-02T03:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-exec","output":"Script completed\nWall time 2.1 seconds\nOutput:\nroute clear\nretry advised"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	call := session.Events[0]
+	if call.Detail == nil || call.Detail.Output != "route clear\nretry advised" {
+		t.Fatalf("Detail.Output = %q, want preamble-free body", call.Detail.Output)
+	}
+	if call.ResultSummary != "route clear retry advised" {
+		t.Fatalf("ResultSummary = %q, want body summary", call.ResultSummary)
+	}
+}
+
+func TestLoadEventsPreservesCodexExecPreambleExit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-exec-failure.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-exec","name":"exec","input":"const r = await tools.exec_command({\"cmd\":\"make build\"}); text(r.output);"}}`,
+		`{"timestamp":"2026-01-02T03:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-exec","output":"Process exited with code 2\nWall time 0.2 seconds\nFinal output:\nbuild failed\nretry advised"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	call := session.Events[0]
+	if call.Detail == nil || call.Detail.Output != "build failed\nretry advised" {
+		t.Fatalf("Detail.Output = %q, want preamble-free failure body", call.Detail.Output)
+	}
+	if call.ResultSummary != "exit 2" {
+		t.Fatalf("ResultSummary = %q, want preserved preamble exit", call.ResultSummary)
+	}
+}
+
+func TestLoadEventsStripsCodexWaitRunningPreamble(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-wait-output.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-wait","name":"wait","input":"{\"cell_id\":\"17\"}"}}`,
+		`{"timestamp":"2026-01-02T03:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-wait","output":"Script running with cell ID 17\nWall time 30 seconds\nOutput:\nstill running"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	call := session.Events[0]
+	if call.Detail == nil || call.Detail.Output != "still running" || call.ResultSummary != "still running" {
+		t.Fatalf("wait call = %#v, want preamble-free output and summary", call)
+	}
+}
+
+func TestCodexStripExecPreambleLeavesOrdinaryOutputUnchanged(t *testing.T) {
+	output := "route clear\n  retry advised  "
+	if got := codexStripExecPreamble(output); got != output {
+		t.Fatalf("codexStripExecPreamble() = %q, want exact ordinary output", got)
+	}
+}
+
+func TestCodexStripExecPreambleKeepsHeaderLikeOutputWithoutWallTime(t *testing.T) {
+	output := "Script completed\nimportant diagnostic\nOutput:\nroute clear"
+	if got := codexStripExecPreamble(output); got != output {
+		t.Fatalf("codexStripExecPreamble() = %q, want non-preamble output unchanged", got)
+	}
+}
+
+func TestCodexStripExecPreambleRequiresRunningCellID(t *testing.T) {
+	output := "Script running with cell ID \nWall time 2.1 seconds\nOutput:\nroute clear"
+	if got := codexStripExecPreamble(output); got != output {
+		t.Fatalf("codexStripExecPreamble() = %q, want invalid running header unchanged", got)
+	}
+}
+
+func TestCodexStripExecPreambleAcceptsOpaqueRunningCellID(t *testing.T) {
+	output := "Script running with cell ID cell-alpha-17\nWall time 2.1 seconds\nOutput:\nroute clear"
+	if got := codexStripExecPreamble(output); got != "route clear" {
+		t.Fatalf("codexStripExecPreamble() = %q, want body for opaque cell ID", got)
+	}
+}
+
+func TestCodexStripExecPreambleHandlesImmediateProcessOutput(t *testing.T) {
+	output := "Process exited with code 2\nFinal output:\nbuild failed"
+	if got := codexStripExecPreamble(output); got != "build failed" {
+		t.Fatalf("codexStripExecPreamble() = %q, want failure body", got)
+	}
+	if code, ok := codexExecPreambleExit(output); !ok || code != "2" {
+		t.Fatalf("codexExecPreambleExit() = %q, %v, want 2, true", code, ok)
 	}
 }
 

@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-02T03:00:00Z","type":"session_meta","payload":{"id":"thread-review","session_id":"thread-root","cwd":"/workspace/lunar-lab","thread_source":"subagent","agent_path":"/root/review_x"}}
+{"timestamp":"2026-01-02T03:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"Message Type: NEW_TASK\nTask name: /root/review_x\nSender: /root\nPayload:\n# Brief — Calibrate the parent telemetry\nKeep every sample."}}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -143,14 +144,28 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 			if input == "" {
 				input = record.Payload.Input
 			}
-			event.ToolInput = codexToolInput(record.Payload.Name, input)
-			event.Detail = codexToolDetail(record.Payload.Name, input)
+			event.ToolInput, event.Detail = codexToolPresentation(record.Payload.Name, input)
 			calls[event.CallID] = len(session.Events)
 		case "function_call_output", "custom_tool_call_output":
 			event.Kind, event.CallID = model.EventToolResult, record.Payload.CallID
 			output := codexOutputText(record.Payload.Output)
-			event.Text = model.BoundedDetailText(codexResultSummary(output))
-			if index, ok := calls[event.CallID]; ok {
+			index, linked := calls[event.CallID]
+			summary := ""
+			if linked {
+				call := &session.Events[index]
+				if call.ToolName == "exec" || call.ToolName == "wait" {
+					var exitCode string
+					output, exitCode = codexNormalizeExecOutput(output)
+					if exitCode != "" {
+						summary = "exit " + exitCode
+					}
+				}
+			}
+			if summary == "" {
+				summary = codexResultSummary(output)
+			}
+			event.Text = model.BoundedDetailText(summary)
+			if linked {
 				call := &session.Events[index]
 				if call.Detail != nil && event.CallID != "" {
 					call.Detail.Output = model.BoundedDetailText(output)
@@ -307,6 +322,10 @@ func codexOutputText(output json.RawMessage) string {
 }
 
 func codexToolInput(name, input string) string {
+	if name == "exec" {
+		toolInput, _ := codexExecToolPresentation(input)
+		return toolInput
+	}
 	if name == "apply_patch" {
 		added, removed := 0, 0
 		for _, line := range strings.Split(input, "\n") {
@@ -338,6 +357,10 @@ func codexToolInput(name, input string) string {
 }
 
 func codexToolDetail(name, input string) *model.ToolDetail {
+	if name == "exec" {
+		_, detail := codexExecToolPresentation(input)
+		return detail
+	}
 	detail := &model.ToolDetail{}
 	switch name {
 	case "apply_patch":
@@ -357,6 +380,49 @@ func codexToolDetail(name, input string) *model.ToolDetail {
 	return detail
 }
 
+func codexToolPresentation(name, input string) (string, *model.ToolDetail) {
+	if name == "exec" {
+		return codexExecToolPresentation(input)
+	}
+	return codexToolInput(name, input), codexToolDetail(name, input)
+}
+
+func codexExecToolPresentation(input string) (string, *model.ToolDetail) {
+	command, ok := codexExecCommand(input)
+	if !ok {
+		return strings.Join(strings.Fields(input), " "), &model.ToolDetail{Input: model.BoundedDetailText(codexPrettyInput(input))}
+	}
+	return strings.SplitN(command, "\n", 2)[0], &model.ToolDetail{Input: model.BoundedDetailText(command)}
+}
+
+func codexExecCommand(input string) (string, bool) {
+	const marker = "exec_command("
+	markerIndex := strings.Index(input, marker)
+	if markerIndex < 0 {
+		return "", false
+	}
+	objectOffset := strings.Index(input[markerIndex+len(marker):], "{")
+	if objectOffset < 0 {
+		return "", false
+	}
+	objectStart := markerIndex + len(marker) + objectOffset
+	var state codexJSONNesting
+	for index := objectStart; index < len(input); index++ {
+		state.advance(input[index])
+		if input[index] == '}' && state.depth == 0 && !state.inString {
+			var fields struct {
+				Command *string `json:"cmd"`
+				Workdir string  `json:"workdir"`
+			}
+			if json.Unmarshal([]byte(input[objectStart:index+1]), &fields) != nil || fields.Command == nil || *fields.Command == "" {
+				return "", false
+			}
+			return *fields.Command, true
+		}
+	}
+	return "", false
+}
+
 func codexPrettyInput(input string) string {
 	if bounded := model.BoundedDetailText(input); bounded != input {
 		return bounded
@@ -373,35 +439,104 @@ func codexPrettyInput(input string) string {
 }
 
 func codexJSONNestingWithin(input []byte, limit int) bool {
-	depth := 0
-	inString := false
-	escaped := false
+	var state codexJSONNesting
 	for _, char := range input {
-		if inString {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if char == '\\' {
-				escaped = true
-			} else if char == '"' {
-				inString = false
-			}
-			continue
-		}
-		switch char {
-		case '"':
-			inString = true
-		case '{', '[':
-			depth++
-			if depth > limit {
-				return false
-			}
-		case '}', ']':
-			depth--
+		state.advance(char)
+		if state.depth > limit {
+			return false
 		}
 	}
 	return true
+}
+
+type codexJSONNesting struct {
+	depth    int
+	inString bool
+	escaped  bool
+}
+
+func (state *codexJSONNesting) advance(char byte) {
+	if state.inString {
+		if state.escaped {
+			state.escaped = false
+			return
+		}
+		if char == '\\' {
+			state.escaped = true
+		} else if char == '"' {
+			state.inString = false
+		}
+		return
+	}
+	switch char {
+	case '"':
+		state.inString = true
+	case '{', '[':
+		state.depth++
+	case '}', ']':
+		state.depth--
+	}
+}
+
+func codexStripExecPreamble(output string) string {
+	body, _ := codexNormalizeExecOutput(output)
+	return body
+}
+
+func codexNormalizeExecOutput(output string) (string, string) {
+	header, rest, _ := strings.Cut(output, "\n")
+	header = strings.TrimSpace(header)
+	exitCode, processExit := codexExecPreambleExit(output)
+	if header != "Script completed" && !codexExecRunningHeader(header) && !processExit {
+		return output, ""
+	}
+	line, remaining, found := strings.Cut(rest, "\n")
+	if codexExecWallTime(line) {
+		if !found {
+			return output, exitCode
+		}
+		line, remaining, _ = strings.Cut(remaining, "\n")
+	} else if !processExit {
+		return output, ""
+	}
+	line = strings.TrimSpace(line)
+	if line != "Output:" && line != "Final output:" {
+		return output, exitCode
+	}
+	return strings.TrimSpace(remaining), exitCode
+}
+
+func codexExecRunningHeader(header string) bool {
+	const marker = "Script running with cell ID "
+	id, ok := strings.CutPrefix(header, marker)
+	return ok && id != "" && len(id) <= 256 && !strings.ContainsAny(id, " \t\r\n")
+}
+
+func codexExecWallTime(line string) bool {
+	value, ok := strings.CutPrefix(strings.TrimSpace(line), "Wall time ")
+	if !ok {
+		return false
+	}
+	value, ok = strings.CutSuffix(value, " seconds")
+	if !ok {
+		return false
+	}
+	duration, err := strconv.ParseFloat(value, 64)
+	return err == nil && duration >= 0
+}
+
+func codexExecPreambleExit(output string) (string, bool) {
+	const marker = "Process exited with code "
+	header, _, _ := strings.Cut(output, "\n")
+	code, ok := strings.CutPrefix(strings.TrimSpace(header), marker)
+	if !ok {
+		return "", false
+	}
+	value, err := strconv.Atoi(code)
+	if err != nil || value < 0 {
+		return "", false
+	}
+	return code, true
 }
 
 func codexResultSummary(output string) string {

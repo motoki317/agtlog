@@ -1946,6 +1946,12 @@ func TestToolExpansionShowsMutedOutputSection(t *testing.T) {
 	}
 }
 
+func TestCodexExecToolDisplaysAsBash(t *testing.T) {
+	if got := toolDisplayName("exec"); got != "Bash" {
+		t.Fatalf("toolDisplayName(exec) = %q, want Bash", got)
+	}
+}
+
 func TestToolExpansionShowsNonFileInputSection(t *testing.T) {
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Find the route"},
@@ -1968,6 +1974,29 @@ func TestToolExpansionShowsNonFileInputSection(t *testing.T) {
 		if !found {
 			t.Errorf("expanded tool missing %q", text)
 		}
+	}
+}
+
+func TestToolExpansionShowsInputBeforeOutput(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Check the route"},
+		{Kind: model.EventToolCall, ToolName: "exec", ToolInput: "make build", Detail: &model.ToolDetail{
+			Input: "make build\nmake test", Output: "build ready",
+		}},
+	}}
+	detail := newDetailState(session, 80, 14, newStyles())
+
+	inputIndex, outputIndex := -1, -1
+	for index, line := range detail.lines {
+		switch strings.TrimSpace(line.text) {
+		case "input:":
+			inputIndex = index
+		case "output:":
+			outputIndex = index
+		}
+	}
+	if inputIndex < 0 || outputIndex < 0 || inputIndex >= outputIndex {
+		t.Fatalf("section indexes input=%d output=%d, want input before output", inputIndex, outputIndex)
 	}
 }
 
@@ -2091,6 +2120,24 @@ func TestItemToolLinesUseFallbacksAndDiffRoles(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestItemToolLinesShowInputAndDiffBeforeOutput(t *testing.T) {
+	lines := itemEventLines(model.Event{
+		Kind: model.EventToolCall, ToolName: "exec", ToolInput: "make build", Detail: &model.ToolDetail{
+			Input: "make build\nmake test", Diff: "+build target", Output: "build ready",
+		},
+	}, model.AgentCodex)
+	indexes := map[string]int{"input:": -1, "+build target": -1, "output:": -1}
+	for index, line := range lines {
+		if _, ok := indexes[line.text]; ok {
+			indexes[line.text] = index
+		}
+	}
+	if indexes["input:"] < 0 || indexes["+build target"] < 0 || indexes["output:"] < 0 ||
+		indexes["input:"] >= indexes["output:"] || indexes["+build target"] >= indexes["output:"] {
+		t.Fatalf("section indexes = %#v, want input and diff before output", indexes)
 	}
 }
 

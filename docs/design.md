@@ -141,9 +141,9 @@ The timeline is chronological and expanded by default:
 Expanding an assistant turn reveals thinking summaries, tool calls and linked results, compaction
 events, and focusable subagent spawns. A tool call with a diff, output, or multiline input has its
 own `▸`/`▾` marker. Expanding that tool reveals a second level at two more spaces of indentation:
-diff rows first, then a muted `output:` section, then a muted `input:` section for non-file tools or
-multiline commands. Each section keeps its head and tail when it exceeds the preview line cap and
-inserts one `… N lines hidden …` row.
+diff rows or a muted `input:` section first, followed by a muted `output:` section. Non-file tools
+and multiline commands show their input. Each section keeps its head and tail when it exceeds the
+preview line cap and inserts one `… N lines hidden …` row.
 
 A subagent never expands inline. `enter`, `→`, or `l` on its row pushes the current detail state and
 opens the child on its Timeline tab. The `Session` title carries the project and ancestor session

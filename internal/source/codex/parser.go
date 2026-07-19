@@ -24,7 +24,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v7:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
+	return "codex-parser-v8:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
 }
 
 type tokenUsage struct {
@@ -208,6 +208,9 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 }
 
 func titleFromUserMessage(message string) string {
+	if title := codexDelegatedTaskTitle(message); title != "" {
+		return title
+	}
 	var fallback, skippedTag string
 	for _, line := range strings.Split(message, "\n") {
 		line = strings.TrimSpace(line)
@@ -243,6 +246,34 @@ func titleFromUserMessage(message string) string {
 		}
 	}
 	return fallback
+}
+
+func codexDelegatedTaskTitle(message string) string {
+	delegation := false
+	for {
+		line, rest, found := strings.Cut(message, "\n")
+		line = strings.TrimSpace(line)
+		if !delegation {
+			if line != "" {
+				if !strings.EqualFold(line, "Message Type: NEW_TASK") {
+					return ""
+				}
+				delegation = true
+			}
+		} else if line == "Payload:" {
+			return ""
+		} else if key, value, hasValue := strings.Cut(line, ":"); hasValue && strings.EqualFold(strings.TrimSpace(key), "Task name") {
+			parts := agentPathParts(strings.TrimSpace(value))
+			if len(parts) > 0 {
+				return model.CleanTitle(parts[len(parts)-1])
+			}
+			return ""
+		}
+		if !found {
+			return ""
+		}
+		message = rest
+	}
 }
 
 func codexPreambleTag(line string) string {
