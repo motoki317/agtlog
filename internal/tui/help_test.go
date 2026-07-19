@@ -22,7 +22,7 @@ func TestDetailHelpIncludesEveryRequiredBinding(t *testing.T) {
 	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
 	m.screen = screenDetail
 	view := m.helpView()
-	for _, want := range []string{"j/k scroll", "g/G edge", "space expand", "enter expand", "w wrap", "J/K subagent", "esc/h back", "? help", "ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "space expand", "enter drill", "tab tabs", "w wrap", "J/K subagent", "esc/h back", "? help", "ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("detail help missing %q:\n%s", want, view)
 		}
@@ -34,7 +34,7 @@ func TestDetailHelpKeepsBindingsVisibleAtFortyColumns(t *testing.T) {
 	m.width = 40
 	m.screen = screenDetail
 	view := ansi.Strip(m.helpView())
-	for _, want := range []string{"j/k scroll", "g/G edge", "space expand", "enter expand", "w wrap", "J/K subagent", "esc/h back", "? help", "q/ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "space expand", "enter drill", "tab tabs", "w wrap", "J/K subagent", "esc/h back", "? help", "q/ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("40-column detail help missing %q:\n%s", want, view)
 		}

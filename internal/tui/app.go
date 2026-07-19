@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/motoki317/agtlog/internal/model"
 	"github.com/motoki317/agtlog/internal/source"
 	"github.com/sahilm/fuzzy"
@@ -26,6 +27,7 @@ type Model struct {
 	agent             agentFilter
 	screen            screen
 	detail            *detailState
+	detailStack       []*detailState
 	cursor            int
 	listOffset        int
 	filterSelection   string
@@ -140,25 +142,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if loaded.generation != m.detailGeneration {
 			return m, nil
 		}
-		if m.detail != nil && sessionIdentity(m.detail.session) == loaded.identity {
+		if root := m.detailRoot(); root != nil && sessionIdentity(root.session) == loaded.identity {
 			if loaded.err != nil {
 				m.detail.err = loaded.err
 				m.detail.loading = false
 				m.detail.rebuild()
 				return m, nil
 			}
-			m.replaceDetail(loaded.session)
+			m.replaceDetailTree(loaded.session)
 		}
 		return m, nil
 	}
 	if update, ok := msg.(source.SessionUpdate); ok {
 		m.refreshGeneration++
 		openIdentity := ""
+		openPath := ""
 		openChanged := false
-		if m.detail != nil {
-			openIdentity = sessionIdentity(m.detail.session)
+		if root := m.detailRoot(); root != nil {
+			openIdentity = sessionIdentity(root.session)
+			openPath = root.session.Path
 			for _, path := range update.RemovedPaths {
-				openChanged = openChanged || path == m.detail.session.Path
+				openChanged = openChanged || path == openPath
 			}
 			for _, session := range update.Sessions {
 				openChanged = openChanged || sessionIdentity(session) == openIdentity
@@ -174,10 +178,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.detailGeneration++
 					return m, loadDetail(m.ctx, m.registry, session, m.detailGeneration)
 				}
-				m.replaceDetail(session)
+				m.replaceDetailTree(session)
 				return m, nil
 			}
 			m.screen, m.detail = screenList, nil
+			m.detailStack = nil
 		}
 		return m, nil
 	}
@@ -187,6 +192,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncList(selected)
 		if m.detail != nil {
 			m.detail.resize(m.width, m.height)
+		}
+		for index, detail := range m.detailStack {
+			m.detailStack[index] = detail.clone()
+			m.detailStack[index].resize(m.width, m.height)
 		}
 		return m, nil
 	}
@@ -210,10 +219,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cycleTheme()
 			return m, nil
 		}
-		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "h") {
-			m.screen = screenList
-			m.detail = nil
+		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "left" || key.String() == "h") {
+			if last := len(m.detailStack) - 1; last >= 0 {
+				m.detail = m.detailStack[last]
+				m.detailStack = m.detailStack[:last]
+			} else {
+				m.screen = screenList
+				m.detail = nil
+			}
 			return m, nil
+		}
+		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "enter" || key.String() == "right" || key.String() == "l") {
+			if subagent := m.detail.focusedSubagent(); subagent != nil {
+				wrap := m.detail.wrap
+				crumbs := append([]string(nil), m.detail.crumbs...)
+				if label := detailCrumbLabel(m.detail.session); label != "" {
+					crumbs = append(crumbs, label)
+				}
+				if m.detail.tab == tabSubagents {
+					crumbs = append(crumbs, subagentCrumbLabels(m.detail.session, subagent)...)
+				}
+				m.detailStack = append(m.detailStack, m.detail)
+				m.detail = newDetailState(subagent, m.width, m.height, m.styles)
+				m.detail.wrap = wrap
+				m.detail.crumbs = crumbs
+				m.detail.rebuild()
+				return m, nil
+			}
 		}
 		return m, m.detail.update(msg)
 	}
@@ -254,6 +286,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if key, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.String() == "enter" && len(m.visible) > 0 {
 		index := min(m.cursor, len(m.visible)-1)
 		m.screen = screenDetail
+		m.detailStack = nil
 		m.detail = newDetailState(m.visible[index], m.width, m.height, m.styles)
 		if m.registry != nil {
 			m.detail.loading = true
@@ -309,25 +342,144 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) replaceDetail(session *model.Session) {
-	if m.detail == nil {
-		m.detail = newDetailState(session, m.width, m.height, m.styles)
+func detailCrumbLabel(session *model.Session) string {
+	if title := firstLine(session.Title); title != "" {
+		return ansi.Truncate(title, 48, "…")
+	}
+	return terminalText(session.ID, 48)
+}
+
+func subagentCrumbLabels(root, target *model.Session) []string {
+	path := sessionPath(root, target)
+	if len(path) < 2 {
+		return nil
+	}
+	labels := make([]string, 0, len(path)-2)
+	for _, session := range path[1 : len(path)-1] {
+		if label := detailCrumbLabel(session); label != "" {
+			labels = append(labels, label)
+		}
+	}
+	return labels
+}
+
+func sessionPath(root, target *model.Session) []*model.Session {
+	var path []*model.Session
+	var find func(*model.Session) bool
+	find = func(session *model.Session) bool {
+		path = append(path, session)
+		if session == target {
+			return true
+		}
+		for _, child := range session.Subagents {
+			if find(child) {
+				return true
+			}
+		}
+		path = path[:len(path)-1]
+		return false
+	}
+	if !find(root) {
+		return nil
+	}
+	return path
+}
+
+func detailBreadcrumbs(root, target *model.Session) []string {
+	path := sessionPath(root, target)
+	if len(path) == 0 {
+		return nil
+	}
+	crumbs := make([]string, 0, len(path))
+	if project := terminalText(root.Project, 96); project != "" {
+		crumbs = append(crumbs, project)
+	}
+	for _, ancestor := range path[:len(path)-1] {
+		if label := detailCrumbLabel(ancestor); label != "" {
+			crumbs = append(crumbs, label)
+		}
+	}
+	return crumbs
+}
+
+func (m Model) detailRoot() *detailState {
+	if len(m.detailStack) > 0 {
+		return m.detailStack[0]
+	}
+	return m.detail
+}
+
+func (m *Model) replaceDetailTree(root *model.Session) {
+	states := append(append([]*detailState(nil), m.detailStack...), m.detail)
+	sessions := make(map[string]*model.Session)
+	var indexSessions func(*model.Session)
+	indexSessions = func(session *model.Session) {
+		sessions[sessionIdentity(session)] = session
+		for _, child := range session.Subagents {
+			indexSessions(child)
+		}
+	}
+	indexSessions(root)
+	replacements := make([]*detailState, 0, len(states))
+	for _, state := range states {
+		session := sessions[sessionIdentity(state.session)]
+		if session == nil {
+			break
+		}
+		replacements = append(replacements, m.replacementDetailState(state, session, root))
+	}
+	if len(replacements) == 0 {
+		m.screen, m.detail, m.detailStack = screenList, nil, nil
 		return
 	}
-	previous := m.detail
+	last := len(replacements) - 1
+	m.detail = replacements[last]
+	m.detailStack = replacements[:last]
+}
+
+func (m *Model) replacementDetailState(previous *detailState, session, root *model.Session) *detailState {
 	offset := previous.viewport.YOffset
 	focusKey := ""
 	if len(previous.focusables) > 0 {
 		focusKey = previous.focusables[previous.focus].key
 	}
-	replacement := newDetailState(session, m.width, m.height, m.styles)
+	selectedSubagent := ""
+	if previous.tab == tabSubagents {
+		if session := previous.focusedSubagent(); session != nil {
+			selectedSubagent = sessionIdentity(session)
+		}
+	}
+	replacement := newDetailStateBase(session, m.width, m.height, m.styles)
 	replacement.wrap = previous.wrap
+	replacement.crumbs = detailBreadcrumbs(root, session)
+	replacement.tab = previous.tab
+	replacement.subagentSelection = previous.subagentSelection
+	replacement.focus = previous.focus
 	for key, expanded := range previous.expanded {
 		replacement.expanded[key] = expanded
 	}
-	replacement.rebuildKeeping(focusKey)
+	replacement.resize(m.width, m.height)
+	if replacement.tab == tabSubagents && selectedSubagent != "" {
+		for index, item := range replacement.subagents {
+			if sessionIdentity(item.s) == selectedSubagent {
+				replacement.subagentSelection = index
+				replacement.selectedLine = index
+				replacement.rebuildRendered()
+				break
+			}
+		}
+	} else if replacement.tab == tabTimeline {
+		for index, item := range replacement.focusables {
+			if item.key == focusKey && index != replacement.focus {
+				oldLine := replacement.selectedLine
+				replacement.focus = index
+				replacement.updateSelection(oldLine, item.line)
+				break
+			}
+		}
+	}
 	replacement.viewport.SetYOffset(offset)
-	m.detail = replacement
+	return replacement
 }
 
 func (m *Model) cycleTheme() {
@@ -336,6 +488,11 @@ func (m *Model) cycleTheme() {
 	if m.detail != nil {
 		m.detail.styles = m.styles
 		m.detail.rebuild()
+	}
+	for index, detail := range m.detailStack {
+		m.detailStack[index] = detail.clone()
+		m.detailStack[index].styles = m.styles
+		m.detailStack[index].rebuild()
 	}
 }
 

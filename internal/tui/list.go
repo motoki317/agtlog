@@ -641,18 +641,27 @@ type panelLine struct {
 	styled string
 }
 
+type panelLabel struct {
+	plain  string
+	styled string
+}
+
 func renderPanel(title, bottomHint string, content []panelLine, width, height int, styles styles) string {
+	return renderPanelWithLabel(panelLabel{plain: title}, bottomHint, content, width, height, styles)
+}
+
+func renderPanelWithLabel(title panelLabel, bottomHint string, content []panelLine, width, height int, styles styles) string {
 	width, height = max(1, width), max(1, height)
 	if width == 1 {
 		return strings.TrimSuffix(strings.Repeat("|\n", height), "\n")
 	}
 	if height == 1 {
-		return ansi.Truncate(title, width, "…")
+		return ansi.Truncate(title.plain, width, "…")
 	}
 	border := widthSafeBorder(lipgloss.RoundedBorder())
 	innerWidth := width - 2
 	lines := make([]string, 0, height)
-	lines = append(lines, styles.border.Render(border.TopLeft)+panelRule(border.Top, title, innerWidth, false, styles)+styles.border.Render(border.TopRight))
+	lines = append(lines, styles.border.Render(border.TopLeft)+panelRuleLabel(border.Top, title, innerWidth, false, styles)+styles.border.Render(border.TopRight))
 	for index := 0; index < height-2; index++ {
 		line := panelLine{}
 		if index < len(content) {
@@ -687,16 +696,25 @@ func widthSafeBorder(candidate lipgloss.Border) lipgloss.Border {
 }
 
 func panelRule(rule, label string, width int, right bool, styles styles) string {
-	if label == "" || width < 4 {
+	return panelRuleLabel(rule, panelLabel{plain: label}, width, right, styles)
+}
+
+func panelRuleLabel(rule string, label panelLabel, width int, right bool, styles styles) string {
+	if label.plain == "" || width < 4 {
 		return styles.border.Render(strings.Repeat(rule, width))
 	}
-	label = ansi.Truncate(terminalText(label, 256), max(1, width-3), "…")
-	decorated := " " + label + " "
-	remaining := max(0, width-ansi.StringWidth(decorated))
-	if right {
-		return styles.border.Render(strings.Repeat(rule, remaining)) + styles.title.Render(decorated)
+	plain := ansi.Truncate(terminalText(label.plain, 256), max(1, width-3), "…")
+	styled := styles.title.Render(plain)
+	if plain == label.plain && label.styled != "" {
+		styled = label.styled
 	}
-	return styles.border.Render(rule) + styles.title.Render(decorated) + styles.border.Render(strings.Repeat(rule, max(0, remaining-1)))
+	decorated := " " + plain + " "
+	remaining := max(0, width-ansi.StringWidth(decorated))
+	decoratedStyled := styles.title.Render(" ") + styled + styles.title.Render(" ")
+	if right {
+		return styles.border.Render(strings.Repeat(rule, remaining)) + decoratedStyled
+	}
+	return styles.border.Render(rule) + decoratedStyled + styles.border.Render(strings.Repeat(rule, max(0, remaining-1)))
 }
 
 func fitPlain(value string, width int, right bool) string {

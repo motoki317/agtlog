@@ -14,20 +14,24 @@ import (
 )
 
 type detailState struct {
-	session      *model.Session
-	viewport     viewport.Model
-	expanded     map[string]bool
-	focus        int
-	focusables   []detailFocus
-	width        int
-	height       int
-	loading      bool
-	err          error
-	styles       styles
-	wrap         bool
-	lines        []detailLine
-	rendered     []renderedRow
-	selectedLine int
+	session           *model.Session
+	crumbs            []string
+	viewport          viewport.Model
+	expanded          map[string]bool
+	focus             int
+	focusables        []detailFocus
+	width             int
+	height            int
+	loading           bool
+	err               error
+	styles            styles
+	wrap              bool
+	tab               detailTab
+	subagentSelection int
+	subagents         []flattenedSubagent
+	lines             []detailLine
+	rendered          []renderedRow
+	selectedLine      int
 }
 
 type renderedRow struct {
@@ -56,26 +60,40 @@ func newDetailLayout(height int) detailLayout {
 }
 
 type detailFocus struct {
-	key              string
-	line             int
-	expandable       bool
-	subagent         bool
-	containsSubagent bool
+	key             string
+	line            int
+	expandable      bool
+	subagent        bool
+	subagentSession *model.Session
 }
 
 type detailLine struct {
-	text             string
-	key              string
-	expandable       bool
-	subagent         bool
-	containsSubagent bool
-	role             detailRole
-	agent            model.AgentKind
+	text            string
+	key             string
+	expandable      bool
+	subagent        bool
+	subagentSession *model.Session
+	subagentTokens  string
+	subagentCost    string
+	role            detailRole
+	agent           model.AgentKind
 }
 
 type detailRole int
 
+type detailTab int
+
+type flattenedSubagent struct {
+	depth int
+	s     *model.Session
+}
+
 const detailPreviewLineCap = 40
+
+const (
+	tabTimeline detailTab = iota
+	tabSubagents
+)
 
 const (
 	detailRow detailRole = iota
@@ -90,9 +108,17 @@ const (
 )
 
 func newDetailState(session *model.Session, width, height int, styles styles) *detailState {
-	state := &detailState{session: session, expanded: make(map[string]bool), styles: styles}
-	state.viewport = viewport.New(max(1, width-2), max(1, height-8))
+	state := newDetailStateBase(session, width, height, styles)
 	state.resize(width, height)
+	return state
+}
+
+func newDetailStateBase(session *model.Session, width, height int, styles styles) *detailState {
+	state := &detailState{session: session, expanded: make(map[string]bool), styles: styles}
+	if project := terminalText(session.Project, 96); project != "" {
+		state.crumbs = []string{project}
+	}
+	state.viewport = viewport.New(max(1, width-2), max(1, height-8))
 	return state
 }
 
@@ -103,6 +129,7 @@ func (d *detailState) clone() *detailState {
 		copy.expanded[key] = expanded
 	}
 	copy.focusables = append([]detailFocus(nil), d.focusables...)
+	copy.crumbs = append([]string(nil), d.crumbs...)
 	copy.lines = append([]detailLine(nil), d.lines...)
 	copy.rendered = append([]renderedRow(nil), d.rendered...)
 	return &copy
@@ -128,28 +155,56 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		return cmd
 	}
 	switch key.String() {
+	case "tab", "shift+tab":
+		d.tab = (d.tab + 1) % 2
+		d.viewport.SetYOffset(0)
+		d.rebuild()
 	case "j", "down":
-		d.moveFocus(1, false)
+		if d.tab == tabSubagents {
+			d.moveSubagentSelection(1)
+		} else {
+			d.moveFocus(1, false)
+		}
 	case "k", "up":
-		d.moveFocus(-1, false)
+		if d.tab == tabSubagents {
+			d.moveSubagentSelection(-1)
+		} else {
+			d.moveFocus(-1, false)
+		}
 	case "g":
-		if len(d.focusables) > 0 {
+		if d.tab == tabSubagents {
+			if len(d.subagents) > 0 {
+				d.subagentSelection = 0
+				d.selectedLine = 0
+				d.rebuildRendered()
+			}
+		} else if len(d.focusables) > 0 {
 			oldLine := d.focusables[d.focus].line
 			d.focus = 0
 			d.updateSelection(oldLine, d.focusables[d.focus].line)
 		}
 	case "G":
-		if len(d.focusables) > 0 {
+		if d.tab == tabSubagents {
+			if len(d.subagents) > 0 {
+				d.subagentSelection = len(d.subagents) - 1
+				d.selectedLine = d.subagentSelection
+				d.rebuildRendered()
+			}
+		} else if len(d.focusables) > 0 {
 			oldLine := d.focusables[d.focus].line
 			d.focus = len(d.focusables) - 1
 			d.updateSelection(oldLine, d.focusables[d.focus].line)
 		}
 	case "J":
-		d.moveFocus(1, true)
+		if d.tab == tabTimeline {
+			d.moveFocus(1, true)
+		}
 	case "K":
-		d.moveFocus(-1, true)
+		if d.tab == tabTimeline {
+			d.moveFocus(-1, true)
+		}
 	case " ", "enter":
-		if len(d.focusables) > 0 && d.focusables[d.focus].expandable {
+		if d.tab == tabTimeline && len(d.focusables) > 0 && d.focusables[d.focus].expandable {
 			item := d.focusables[d.focus]
 			d.expanded[item.key] = !d.expanded[item.key]
 			d.rebuildKeeping(item.key)
@@ -165,6 +220,15 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
+func (d *detailState) moveSubagentSelection(delta int) {
+	if len(d.subagents) == 0 {
+		return
+	}
+	d.subagentSelection = max(0, min(d.subagentSelection+delta, len(d.subagents)-1))
+	d.selectedLine = d.subagentSelection
+	d.rebuildRendered()
+}
+
 func (d *detailState) moveFocus(direction int, subagentsOnly bool) {
 	if len(d.focusables) == 0 {
 		return
@@ -175,25 +239,6 @@ func (d *detailState) moveFocus(direction int, subagentsOnly bool) {
 			oldLine := d.focusables[d.focus].line
 			d.focus = next
 			d.updateSelection(oldLine, d.focusables[d.focus].line)
-			return
-		}
-	}
-	if subagentsOnly {
-		for next := start + direction; next >= 0 && next < len(d.focusables); next += direction {
-			item := d.focusables[next]
-			if !item.containsSubagent {
-				continue
-			}
-			d.expanded[item.key] = true
-			d.rebuildKeeping(item.key)
-			for child := d.focus + 1; child < len(d.focusables); child++ {
-				if d.focusables[child].subagent {
-					oldLine := d.focusables[d.focus].line
-					d.focus = child
-					d.updateSelection(oldLine, d.focusables[child].line)
-					return
-				}
-			}
 			return
 		}
 	}
@@ -214,9 +259,16 @@ func (d *detailState) rebuildKeeping(key string) {
 func (d *detailState) rebuild() {
 	var lines []detailLine
 	if d.err != nil {
+		d.subagents = nil
+		d.subagentSelection = 0
 		lines = []detailLine{{text: "detail error: " + terminalText(d.err.Error(), 512), role: detailWarning}}
 	} else if d.loading {
+		d.subagents = nil
+		d.subagentSelection = 0
 		lines = []detailLine{{text: "Loading timeline…", role: detailSecondary}}
+	} else if d.tab == tabSubagents {
+		d.rebuildSubagents()
+		return
 	} else {
 		lines = d.sessionLines(d.session, 0, sessionIdentity(d.session))
 	}
@@ -224,7 +276,7 @@ func (d *detailState) rebuild() {
 	d.focusables = d.focusables[:0]
 	for index, line := range lines {
 		if line.key != "" {
-			d.focusables = append(d.focusables, detailFocus{key: line.key, line: index, expandable: line.expandable, subagent: line.subagent, containsSubagent: line.containsSubagent})
+			d.focusables = append(d.focusables, detailFocus{key: line.key, line: index, expandable: line.expandable, subagent: line.subagent, subagentSession: line.subagentSession})
 		}
 	}
 	if len(d.focusables) == 0 {
@@ -238,6 +290,41 @@ func (d *detailState) rebuild() {
 	}
 	d.selectedLine = selectedLine
 	d.rebuildRendered()
+}
+
+func (d *detailState) rebuildSubagents() {
+	d.subagents = flattenSubagents(d.session)
+	if len(d.subagents) == 0 {
+		d.lines = []detailLine{{text: "No subagents", role: detailSecondary}}
+		d.selectedLine = -1
+	} else {
+		d.subagentSelection = max(0, min(d.subagentSelection, len(d.subagents)-1))
+		d.lines = make([]detailLine, len(d.subagents))
+		for index, item := range d.subagents {
+			session := item.s
+			tokens := humanTokens(session.TotalUsage().TotalTokens())
+			cost := formatCost(session.TotalCost())
+			d.lines[index] = detailLine{
+				text: strings.Repeat("  ", item.depth) + terminalText(string(session.Agent), 32) + " " + firstLine(session.Title) + "  " + terminalText(shortModels(session), 96) + " · " + tokens + " · " + cost,
+				key:  sessionIdentity(session), subagent: true, subagentSession: session, subagentTokens: tokens, subagentCost: cost, role: detailRow, agent: session.Agent,
+			}
+		}
+		d.selectedLine = d.subagentSelection
+	}
+	d.rebuildRendered()
+}
+
+func flattenSubagents(session *model.Session) []flattenedSubagent {
+	var flattened []flattenedSubagent
+	var appendChildren func(*model.Session, int)
+	appendChildren = func(parent *model.Session, depth int) {
+		for _, child := range parent.Subagents {
+			flattened = append(flattened, flattenedSubagent{depth: depth, s: child})
+			appendChildren(child, depth+1)
+		}
+	}
+	appendChildren(session, 0)
+	return flattened
 }
 
 func (d *detailState) updateSelection(oldLine, newLine int) {
@@ -302,7 +389,7 @@ func (d *detailState) sessionLines(session *model.Session, indent int, path stri
 		}
 		turn := session.Events[start:index]
 		key := fmt.Sprintf("%s/turn/%d", path, start)
-		lines = append(lines, detailLine{text: d.turnSummary(session, turn, indent, d.expanded[key]), key: key, expandable: turnExpandable(turn), containsSubagent: turnContainsSubagent(turn), role: detailAssistant, agent: session.Agent})
+		lines = append(lines, detailLine{text: d.turnSummary(session, turn, indent, d.expanded[key]), key: key, expandable: turnExpandable(turn), role: detailAssistant, agent: session.Agent})
 		if d.expanded[key] {
 			for eventIndex, item := range turn {
 				lines = append(lines, d.eventLines(session, item, indent+2, fmt.Sprintf("%s/event/%d", key, eventIndex))...)
@@ -364,21 +451,12 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 			return []detailLine{{text: padding + glyphSubagent + " subagent unavailable", key: key, role: detailWarning}}
 		}
 		childKey := key + "/subagent/" + sessionIdentity(event.Subagent)
-		marker := glyphCollapsed
-		if d.expanded[childKey] {
-			marker = glyphExpanded
-		}
 		label := firstLine(event.ToolInput)
 		if label == "" {
 			label = firstLine(event.Subagent.Title)
 		}
 		label = ansi.Truncate(label, 28, "…")
-		line := detailLine{text: padding + glyphSubagent + " Task(" + label + ") " + marker + " " + terminalText(shortModels(event.Subagent), 96) + " · " + humanTokens(event.Subagent.TotalUsage().TotalTokens()) + " · " + formatCost(event.Subagent.TotalCost()), key: childKey, expandable: true, subagent: true, role: detailAccent}
-		lines := []detailLine{line}
-		if d.expanded[childKey] {
-			lines = append(lines, d.sessionLines(event.Subagent, indent+2, childKey)...)
-		}
-		return lines
+		return []detailLine{{text: padding + glyphSubagent + " Task(" + label + ") " + terminalText(shortModels(event.Subagent), 96) + " · " + humanTokens(event.Subagent.TotalUsage().TotalTokens()) + " · " + formatCost(event.Subagent.TotalCost()), key: childKey, subagent: true, subagentSession: event.Subagent, role: detailAccent}}
 	case model.EventCompact:
 		return []detailLine{{text: padding + glyphSecondary + " compact: " + firstLine(event.Text), key: key, role: detailSecondary}}
 	case model.EventSystem:
@@ -386,6 +464,19 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 	default:
 		return nil
 	}
+}
+
+func (d *detailState) focusedSubagent() *model.Session {
+	if d.tab == tabSubagents {
+		if len(d.subagents) == 0 {
+			return nil
+		}
+		return d.subagents[d.subagentSelection].s
+	}
+	if len(d.focusables) == 0 {
+		return nil
+	}
+	return d.focusables[d.focus].subagentSession
 }
 
 func (d *detailState) toolEventLines(event model.Event, indent int, key string) []detailLine {
@@ -462,15 +553,6 @@ func detailHasBody(detail *model.ToolDetail) bool {
 func turnExpandable(events []model.Event) bool {
 	for _, event := range events {
 		if event.Kind == model.EventThinking || event.Kind == model.EventToolCall || event.Kind == model.EventSubagent || event.Kind == model.EventCompact {
-			return true
-		}
-	}
-	return false
-}
-
-func turnContainsSubagent(events []model.Event) bool {
-	for _, event := range events {
-		if event.Kind == model.EventSubagent {
 			return true
 		}
 	}
@@ -569,8 +651,8 @@ func (d *detailState) view() string {
 	if len(d.rendered) > d.viewport.Height {
 		hint = fmt.Sprintf("%d/%d", min(len(d.rendered), d.viewport.YOffset+1), len(d.rendered))
 	}
-	timeline := renderPanel("Timeline", hint, visible, d.width, timelineHeight, d.styles)
-	keyText := detailKeyText(d.width, d.styles.mono)
+	timeline := renderPanelWithLabel(d.tabPanelLabel(), hint, visible, d.width, timelineHeight, d.styles)
+	keyText := detailKeyText(d.width, d.styles.mono, d.tab)
 	keyBar := d.styles.keyHint.Render(fitPlain(keyText, d.width, false))
 	return strings.Join([]string{header, timeline, keyBar}, "\n")
 }
@@ -594,16 +676,62 @@ func (d *detailState) compactView(layout detailLayout) string {
 		plain := strings.Repeat(" ", max(0, d.width-2))
 		content = append(content, panelLine{plain: plain, styled: d.styles.row.Render(plain)})
 	}
-	panel := renderPanel("Session · Timeline", "", content, d.width, layout.compactPanelHeight, d.styles)
+	panel := renderPanelWithLabel(d.compactPanelLabel(), "", content, d.width, layout.compactPanelHeight, d.styles)
 	if layout.keyBarHeight == 0 {
 		return panel
 	}
-	keyBar := d.styles.keyHint.Render(fitPlain(detailKeyText(d.width, d.styles.mono), d.width, false))
+	keyBar := d.styles.keyHint.Render(fitPlain(detailKeyText(d.width, d.styles.mono, d.tab), d.width, false))
 	return panel + "\n" + keyBar
 }
 
-func detailKeyText(width int, mono bool) string {
-	hints := []string{"j/k scroll", "↵ expand", "J/K subagent", "w wrap", "esc back"}
+func (t detailTab) title() string {
+	if t == tabSubagents {
+		return "Subagents"
+	}
+	return "Timeline"
+}
+
+func (d *detailState) tabPanelLabel() panelLabel {
+	label := d.tabLabel()
+	plain := label.plain
+	if ansi.StringWidth(plain) > max(1, d.width-5) {
+		return panelLabel{plain: d.tab.title()}
+	}
+	return label
+}
+
+func (d *detailState) compactPanelLabel() panelLabel {
+	label := d.tabLabel()
+	plain, styled := label.plain, label.styled
+	if len(d.crumbs) > 0 {
+		crumbs := terminalText(strings.Join(d.crumbs, " › "), 256)
+		plain += " · " + crumbs
+		styled += d.styles.title.Render(" · " + crumbs)
+	}
+	if ansi.StringWidth(plain) <= max(1, d.width-5) {
+		return panelLabel{plain: plain, styled: styled}
+	}
+	return panelLabel{plain: d.panelTitle(d.tab.title())}
+}
+
+func (d *detailState) tabLabel() panelLabel {
+	active := d.tab.title()
+	inactive := tabSubagents.title()
+	if d.tab == tabSubagents {
+		inactive = tabTimeline.title()
+	}
+	return panelLabel{
+		plain:  active + " · " + inactive,
+		styled: d.styles.title.Render(active) + d.styles.title.Render(" · ") + d.styles.muted.Render(inactive),
+	}
+}
+
+func detailKeyText(width int, mono bool, tab detailTab) string {
+	hints := []string{"j/k scroll", "tab tabs", "↵ drill"}
+	if tab == tabTimeline {
+		hints = append(hints, "J/K subagent")
+	}
+	hints = append(hints, "w wrap", "esc back")
 	if !mono {
 		hints = append(hints, "t theme")
 	}
@@ -623,7 +751,15 @@ func detailKeyText(width int, mono bool) string {
 }
 
 func (d *detailState) header() string {
-	return renderPanel("Session", "", d.headerPanelLines(), d.width, 5, d.styles)
+	return renderPanel(d.panelTitle("Session"), "", d.headerPanelLines(), d.width, 5, d.styles)
+}
+
+func (d *detailState) panelTitle(name string) string {
+	title := name
+	if len(d.crumbs) > 0 {
+		title += " · " + strings.Join(d.crumbs, " › ")
+	}
+	return ansi.Truncate(terminalText(title, 256), max(1, d.width-5), "…")
 }
 
 func (d *detailState) headerPanelLines() []panelLine {
@@ -670,6 +806,9 @@ func (d *detailState) styleLine(line string, detail detailLine, selected bool) s
 	if selected {
 		return d.styles.selected.Render(line)
 	}
+	if detail.role == detailRow && detail.subagentSession != nil {
+		return d.styleSubagentLine(line, detail)
+	}
 	switch detail.role {
 	case detailAccent, detailTool:
 		return d.styles.accent.Render(line)
@@ -688,6 +827,48 @@ func (d *detailState) styleLine(line string, detail detailLine, selected bool) s
 	default:
 		return d.styles.row.Render(line)
 	}
+}
+
+func (d *detailState) styleSubagentLine(line string, detail detailLine) string {
+	session := detail.subagentSession
+	tokens, cost := detail.subagentTokens, detail.subagentCost
+	type cell struct {
+		start int
+		end   int
+		style lipgloss.Style
+	}
+	var cells []cell
+	agent := terminalText(string(session.Agent), 32)
+	if start := strings.Index(line, agent); start >= 0 {
+		cells = append(cells, cell{start: start, end: start + len(agent), style: d.agentStyle(session.Agent)})
+	}
+	if marker := strings.LastIndex(line, " · "+tokens+" · "); marker >= 0 {
+		start := marker + len(" · ")
+		cells = append(cells, cell{start: start, end: start + len(tokens), style: d.styles.accent})
+	}
+	if marker := strings.LastIndex(line, " · "+cost); marker >= 0 {
+		start := marker + len(" · ")
+		style := d.styles.row
+		if strings.HasPrefix(cost, "~$") {
+			style = d.styles.estimated
+		}
+		cells = append(cells, cell{start: start, end: start + len(cost), style: style})
+	}
+	if len(cells) == 0 {
+		return d.styles.row.Render(line)
+	}
+	var styled strings.Builder
+	position := 0
+	for _, item := range cells {
+		if item.start < position || item.end > len(line) {
+			continue
+		}
+		styled.WriteString(d.styles.row.Render(line[position:item.start]))
+		styled.WriteString(item.style.Render(line[item.start:item.end]))
+		position = item.end
+	}
+	styled.WriteString(d.styles.row.Render(line[position:]))
+	return styled.String()
 }
 
 func (d *detailState) agentStyle(agent model.AgentKind) lipgloss.Style {

@@ -68,11 +68,39 @@ func TestGoldenDetailFrame(t *testing.T) {
 		{Type: tea.KeyDown},
 		{Type: tea.KeySpace},
 		{Type: tea.KeyRunes, Runes: []rune{'J'}},
-		{Type: tea.KeySpace},
+		{Type: tea.KeyEnter},
 	} {
 		tm.Send(key)
 	}
 	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "Inspect the ridge") }, teatest.WithDuration(time.Second))
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second)).(Model)
+
+	teatest.RequireEqualOutput(t, []byte(normalizeGolden(final.View())))
+}
+
+func TestGoldenSubagentsFrame(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	mapper := &model.Session{
+		ID: "mapper", Agent: model.AgentCodex, Title: "Map the cavern", Models: []string{"gpt-5.6-sol"},
+		Usage: []model.Usage{{InputTokens: 8_000, OutputTokens: 2_000}}, Cost: model.Cost{USD: 0.12, Estimated: true},
+	}
+	scout := &model.Session{
+		ID: "scout", Agent: model.AgentClaude, Title: "Scout the ridge", Models: []string{"claude-opus-4-8"},
+		Usage: []model.Usage{{InputTokens: 40_000, OutputTokens: 5_000}}, Cost: model.Cost{USD: 0.32}, Subagents: []*model.Session{mapper},
+	}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/starship/route.jsonl", CWD: "/workspace/starship", Project: "starship", Title: "Plan route",
+		Models: []string{"claude-opus-4-8"}, GitBranch: "orbit/alpha", StartedAt: goldenNow.Add(-20 * time.Minute), UpdatedAt: goldenNow,
+		Usage: []model.Usage{{InputTokens: 120_000, OutputTokens: 8_000}}, Cost: model.Cost{USD: 0.84}, Subagents: []*model.Session{scout},
+	}
+	m := newModelWithClock([]*model.Session{root}, nil, func() time.Time { return goldenNow })
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(90, 18))
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
+	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "Map the cavern") }, teatest.WithDuration(time.Second))
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}

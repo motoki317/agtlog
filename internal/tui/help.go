@@ -14,12 +14,13 @@ func (m Model) helpView() string {
 	if m.screen == screenDetail {
 		lines = []string{
 			"j/k scroll · g/G edge",
-			"space expand · enter expand · w wrap",
+			"space expand · enter drill",
+			"tab tabs · w wrap",
 			"J/K subagent · esc/h back",
 			"? help · q/ctrl-c quit",
 		}
 		if !m.styles.mono {
-			lines[2] += " · t theme"
+			lines[3] += " · t theme"
 		}
 	}
 	innerWidth := max(0, m.width-2)
