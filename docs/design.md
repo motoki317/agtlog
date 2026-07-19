@@ -23,9 +23,11 @@ The list fills the terminal with three stacked regions:
    ```
 
 The detail screen uses the same structure. A rounded `Session` panel contains three metadata
-lines, a rounded `Timeline` panel consumes the remaining height, and an unbordered detail key bar
-sits at the bottom. The help view is a full-width rounded panel. Every view recomputes its panel,
-viewport, and column geometry after a terminal resize.
+lines, a rounded tab panel consumes the remaining height, and an unbordered detail key bar sits at
+the bottom. The tab panel leads with the active `Timeline` or `Subagents` name and shows the
+inactive name faint when space permits. The help view is a full-width rounded panel. Every view
+recomputes its panel, viewport, and column geometry after a terminal resize, including detail
+screens stored beneath a drilled child.
 
 When the terminal is too short to hold complete stacked regions, list and detail switch to one
 rounded compact panel (plus a key line when it fits). This preserves both borders and the
@@ -92,12 +94,12 @@ All interface glyphs are tested as one display column, including the rounded bor
 If the active terminal width rules do not report every rounded-border glyph as one cell, panels
 fall back to `+`, `-`, and `|` rather than risking drift.
 The warning marker is ASCII `!`; `⚠` was rejected because emoji-capable terminals may render it as
-two columns. `⑃` remains the folded-subagent marker only in the detail timeline; it measures and
-renders as one column in the supported terminal path.
+two columns. `⑃` remains the subagent marker only in the detail timeline; it measures and renders
+as one column in the supported terminal path.
 
 | Glyph | Meaning |
 | --- | --- |
-| `⑃N` | Marks a folded subagent in the detail timeline |
+| `⑃` | Marks a subagent that opens as its own detail screen |
 | `~$` | API-equivalent estimate; a subscription user normally pays less |
 | `!` | Session error or missing pricing, depending on the cell |
 | `▸` / `▾` | Collapsed / expanded item |
@@ -121,17 +123,27 @@ The timeline is chronological and collapsed by default:
 ▸ you: Investigate the failing watcher
 ▸ ● claude: The race is fixed · 2 thinking · 4 tools · 1 subagents
   ⚙ Edit(watch.go) → updated · 0.4s
-  ⑃ Task(inspect watcher) ▸ opus-4.8 · 420k · $1.02
+  ⑃ Task(inspect watcher) opus-4.8 · 420k · $1.02
 ```
 
 Expanding an assistant turn reveals thinking summaries, tool calls and linked results, compaction
-events, and subagent spawns. A tool call with a diff, output, or multiline input has its own
-`▸`/`▾` marker. Expanding that tool reveals a second level at two more spaces of indentation: diff
-rows first, then a muted `output:` section, then a muted `input:` section for non-file tools or
+events, and focusable subagent spawns. A tool call with a diff, output, or multiline input has its
+own `▸`/`▾` marker. Expanding that tool reveals a second level at two more spaces of indentation:
+diff rows first, then a muted `output:` section, then a muted `input:` section for non-file tools or
 multiline commands. Each section keeps its head and tail when it exceeds the preview line cap and
 inserts one `… N lines hidden …` row.
-Expanding a subagent continues to insert its timeline at the next indentation level. The same rule
-applies recursively.
+
+A subagent never expands inline. `enter`, `→`, or `l` on its row pushes the current detail state and
+opens the child on its Timeline tab. The `Session` title carries the project and ancestor session
+labels as a `›`-separated breadcrumb. `esc`, `←`, or `h` restores the nearest stored parent; the
+same key at the root returns to the session list. Each child inherits its parent's wrap setting,
+while later wrap changes affect only the active screen.
+
+The Subagents tab lists every descendant in pre-order. Nested descendants are indented by depth;
+each row shows the agent, title, costliest model, recursive tokens, and recursive cost. Agent,
+token, and estimated-cost cells receive their semantic styles only after the plain row is fitted.
+The tab has its own selection, supports step and edge movement, and drills into the selected
+session on Timeline. A session without descendants shows `No subagents`.
 
 Timeline rows truncate by default. `w` switches the current detail screen between truncation and
 hard wrapping. Wrapping operates on plain text before color is applied; every visual row retains
@@ -152,10 +164,12 @@ Bindings stay single-key and follow terminal and Vim conventions:
 | List | `enter` | Open detail |
 | List | `r` | Rediscover sessions |
 | Detail | `j`/`k`, `↑`/`↓`, `g`/`G` | Move and scroll; `g`/`G` jumps to top or bottom |
-| Detail | `space`/`enter` | Expand or collapse the selected turn, tool, or subagent |
+| Detail | `space` | Expand or collapse the selected turn or tool; no-op on subagents |
+| Detail | `enter`, `→`, `l` | Drill into a focused subagent; `enter` otherwise expands a turn or tool in place |
+| Detail | `tab`/`shift+tab` | Cycle Timeline and Subagents |
 | Detail | `w` | Toggle timeline wrapping; truncation is the default |
 | Detail | `J`/`K` | Next or previous subagent |
-| Detail | `esc`/`h` | Return to the list |
+| Detail | `esc`/`←`/`h` | Pop the current detail screen; return to the list at the root |
 | Both | `t` | Cycle color themes; no-op in mono |
 | Both | `?` | Toggle full help |
 | Both | `q`/`ctrl-c` | Quit |
@@ -163,7 +177,7 @@ Bindings stay single-key and follow terminal and Vim conventions:
 ## Terseness rules
 
 1. Each screen answers one question without opening another view.
-2. Turns and subagents start collapsed and expand with one key.
+2. Turns and tools start collapsed and expand in place; subagents open as focused screens.
 3. Lists use human-scale numbers and relative time, not raw counters or timestamps.
 4. Parent rows show recursive totals; detail shows the breakdown.
 5. Hard noise such as permission preambles and synthetic reminders does not enter the timeline.
