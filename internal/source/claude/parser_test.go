@@ -2,8 +2,10 @@ package claude
 
 import (
 	"math"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,5 +128,108 @@ func TestParseLinksSubagentFiles(t *testing.T) {
 	}
 	if session.Subagents[0].Title != "Prepare the vehicle" || session.Subagents[1].Title != "Inspect telemetry" {
 		t.Errorf("subagent titles = %q, %q", session.Subagents[0].Title, session.Subagents[1].Title)
+	}
+}
+
+func TestParsePropagatesSubagentUpdateTime(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session-main.jsonl")
+	subagentDir := filepath.Join(dir, "session-main", "subagents")
+	if err := os.MkdirAll(subagentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"type":"user","timestamp":"2026-01-02T03:00:00Z","sessionId":"session-main","message":{"content":"Start"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subagentDir, "agent-scout.jsonl"), []byte(`{"type":"user","timestamp":"2026-01-02T04:00:00Z","agentId":"scout","message":{"content":"Scout"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	want := time.Date(2026, 1, 2, 4, 0, 0, 0, time.UTC)
+	if !session.UpdatedAt.Equal(want) {
+		t.Fatalf("Parse().UpdatedAt = %v, want %v", session.UpdatedAt, want)
+	}
+}
+
+func TestParseDoesNotFollowSymlinkedSubagentDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session-main.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"user","sessionId":"session-main","message":{"content":"Start"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(dir, "external")
+	if err := os.MkdirAll(external, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(external, "agent-linked.jsonl"), []byte(`{"type":"user","agentId":"linked","message":{"content":"Linked"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	companion := filepath.Join(dir, "session-main")
+	if err := os.MkdirAll(companion, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, filepath.Join(companion, "subagents")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(session.Subagents) != 0 {
+		t.Fatalf("Parse().Subagents = %#v, want symlink ignored", session.Subagents)
+	}
+}
+
+func TestParseSkipsOversizedRecordAndContinues(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-oversized.jsonl")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{
+		`{"type":"user","timestamp":"2026-01-02T03:00:00Z","sessionId":"session-main","message":{"content":"Start"}}` + "\n",
+		`{"type":"progress","data":"` + strings.Repeat("x", 17*1024*1024) + `"}` + "\n",
+		`{"type":"assistant","timestamp":"2026-01-02T03:01:00Z","sessionId":"session-main","requestId":"request-a","message":{"id":"message-a","model":"claude-opus-4-8","usage":{"input_tokens":3}}}` + "\n",
+	}
+	for _, line := range lines {
+		if _, err := file.WriteString(line); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(session.Usage) != 1 || session.Usage[0].InputTokens != 3 {
+		t.Fatalf("Parse().Usage = %#v, want later usage record", session.Usage)
+	}
+}
+
+func TestParseSkipsNegativeUsageRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-negative.jsonl")
+	content := strings.Join([]string{
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:00Z","requestId":"request-bad","message":{"id":"message-bad","model":"claude-opus-4-8","usage":{"input_tokens":-1}}}`,
+		`{"type":"assistant","timestamp":"2026-01-02T03:01:00Z","requestId":"request-good","message":{"id":"message-good","model":"claude-opus-4-8","usage":{"input_tokens":3}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if len(session.Usage) != 1 || session.Usage[0].InputTokens != 3 {
+		t.Fatalf("Parse().Usage = %#v, want only valid usage", session.Usage)
 	}
 }

@@ -87,6 +87,20 @@ func TestCalculateAppliesMarginalRatesAbove200K(t *testing.T) {
 	}
 }
 
+func TestCalculateAppliesMarginalRatesAbove272K(t *testing.T) {
+	above := 2.0
+	pricing := Pricing{Input: 1, InputAbove272K: &above}
+	got := NewCalculator(Table{"gpt-5.6": pricing}).CalculateCodex(model.Usage{
+		Model:       "gpt-5.6-sol",
+		InputTokens: 300_000,
+	}, "gpt-5")
+
+	want := 328_000.0
+	if math.Abs(got.USD-want) > 1e-12 {
+		t.Fatalf("CalculateCodex().USD = %v, want %v", got.USD, want)
+	}
+}
+
 func TestCalculateUsesFastModelAndMultiplier(t *testing.T) {
 	pricing := Pricing{Input: 1}
 	pricing.ProviderSpecificEntry.Fast = 3

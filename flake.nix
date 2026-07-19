@@ -61,8 +61,7 @@
             inherit version;
             src = ./.;
             proxyVendor = true;
-            # Replace with the hash reported by `nix build` after dependencies settle.
-            vendorHash = pkgs.lib.fakeHash;
+            vendorHash = "sha256-c2fm0haUcHMrXwb/BnvWVw1IJsfElfuzD1S18vyz0vk=";
             subPackages = [ "cmd/agtlog" ];
             ldflags = [ "-s" "-w" "-X main.version=${version}" ];
             env.CGO_ENABLED = 0;

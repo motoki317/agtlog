@@ -1,8 +1,11 @@
 package claude
 
 import (
-	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +13,7 @@ import (
 
 	"github.com/motoki317/agtlog/internal/cost"
 	"github.com/motoki317/agtlog/internal/model"
+	"github.com/motoki317/agtlog/internal/source/jsonl"
 )
 
 type Parser struct {
@@ -29,10 +33,9 @@ type logRecord struct {
 	Speed       string   `json:"speed"`
 	CostUSD     *float64 `json:"costUSD"`
 	Message     struct {
-		ID      string          `json:"id"`
-		Model   string          `json:"model"`
-		Content json.RawMessage `json:"content"`
-		Usage   struct {
+		ID    string `json:"id"`
+		Model string `json:"model"`
+		Usage struct {
 			InputTokens              int64 `json:"input_tokens"`
 			OutputTokens             int64 `json:"output_tokens"`
 			CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
@@ -45,28 +48,107 @@ type logRecord struct {
 	} `json:"message"`
 }
 
+type userContentRecord struct {
+	Message struct {
+		Content json.RawMessage `json:"content"`
+	} `json:"message"`
+}
+
 func NewParser(calculator cost.Calculator) Parser {
 	return Parser{calculator: calculator}
 }
 
+func (p Parser) CacheFingerprint() string {
+	return "claude-parser-v3:" + p.calculator.Fingerprint()
+}
+
 func (p Parser) Parse(path string) (*model.Session, error) {
+	return p.parse(path, 0, make(map[string]bool))
+}
+
+const maxSubagentDepth = 64
+
+func (p Parser) parse(path string, depth int, visited map[string]bool) (*model.Session, error) {
+	if depth > maxSubagentDepth {
+		return nil, fmt.Errorf("subagent nesting exceeds %d levels", maxSubagentDepth)
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, errors.New("session path is not a regular file")
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	if visited[absolute] {
+		return nil, errors.New("subagent cycle detected")
+	}
+	visited[absolute] = true
+	defer delete(visited, absolute)
+
 	session, err := p.parseFile(path)
 	if err != nil {
 		return nil, err
 	}
-	subagentPattern := filepath.Join(strings.TrimSuffix(path, filepath.Ext(path)), "subagents", "*.jsonl")
-	subagentPaths, err := filepath.Glob(subagentPattern)
-	if err != nil {
-		return nil, err
-	}
-	for _, subagentPath := range subagentPaths {
-		subagent, err := p.Parse(subagentPath)
-		if err != nil {
-			return nil, err
+	subagentDir := filepath.Join(strings.TrimSuffix(path, filepath.Ext(path)), "subagents")
+	if info, statErr := os.Lstat(subagentDir); statErr == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+		subagentPattern := filepath.Join(subagentDir, "*.jsonl")
+		subagentPaths, globErr := filepath.Glob(subagentPattern)
+		if globErr != nil {
+			return nil, globErr
 		}
-		session.Subagents = append(session.Subagents, subagent)
+		for _, subagentPath := range subagentPaths {
+			subagent, parseErr := p.parse(subagentPath, depth+1, visited)
+			if parseErr != nil {
+				continue
+			}
+			attachSubagent(session, subagent)
+		}
+	}
+	if depth == 0 {
+		legacyPaths, _ := filepath.Glob(filepath.Join(filepath.Dir(path), "agent-*.jsonl"))
+		for _, legacyPath := range legacyPaths {
+			if sessionIDFromFile(legacyPath) != session.ID {
+				continue
+			}
+			subagent, parseErr := p.parse(legacyPath, depth+1, visited)
+			if parseErr == nil {
+				attachSubagent(session, subagent)
+			}
+		}
 	}
 	return session, nil
+}
+
+func attachSubagent(parent, subagent *model.Session) {
+	parent.Subagents = append(parent.Subagents, subagent)
+	if subagent.UpdatedAt.After(parent.UpdatedAt) {
+		parent.UpdatedAt = subagent.UpdatedAt
+	}
+}
+
+func sessionIDFromFile(path string) string {
+	file, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	var sessionID string
+	_ = jsonl.ForEach(file, func(line []byte) {
+		if sessionID != "" {
+			return
+		}
+		var envelope struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(line, &envelope) == nil {
+			sessionID = envelope.SessionID
+		}
+	})
+	return sessionID
 }
 
 func (p Parser) parseFile(path string) (*model.Session, error) {
@@ -77,19 +159,39 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 	defer file.Close()
 
 	session := &model.Session{Agent: model.AgentClaude, Path: path}
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	var usageRecords []usageRecord
 	userMessages := 0
-	for scanner.Scan() {
+	err = jsonl.ForEach(file, func(line []byte) {
+		var envelope struct {
+			Type      string `json:"type"`
+			Timestamp string `json:"timestamp"`
+		}
+		if json.Unmarshal(line, &envelope) != nil {
+			return
+		}
+		if timestamp, parseErr := time.Parse(time.RFC3339Nano, envelope.Timestamp); parseErr == nil {
+			if session.StartedAt.IsZero() {
+				session.StartedAt = timestamp
+			}
+			if session.UpdatedAt.IsZero() || timestamp.After(session.UpdatedAt) {
+				session.UpdatedAt = timestamp
+			}
+		}
+		if envelope.Type != "user" && envelope.Type != "ai-title" &&
+			!(envelope.Type == "assistant" && bytes.Contains(line, []byte(`"usage"`))) {
+			return
+		}
 		var record logRecord
-		if json.Unmarshal(scanner.Bytes(), &record) != nil {
-			continue
+		if json.Unmarshal(line, &record) != nil {
+			return
 		}
 		if record.Type == "ai-title" {
 			session.Title = record.AITitle
 		} else if record.Type == "user" && session.Title == "" {
-			session.Title = userText(record.Message.Content)
+			var content userContentRecord
+			if json.Unmarshal(line, &content) == nil {
+				session.Title = userText(content.Message.Content)
+			}
 		}
 		if record.Type == "user" {
 			userMessages++
@@ -108,14 +210,6 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 		if session.GitBranch == "" {
 			session.GitBranch = record.GitBranch
 		}
-		if timestamp, err := time.Parse(time.RFC3339Nano, record.Timestamp); err == nil {
-			if session.StartedAt.IsZero() {
-				session.StartedAt = timestamp
-			}
-			if session.UpdatedAt.IsZero() || timestamp.After(session.UpdatedAt) {
-				session.UpdatedAt = timestamp
-			}
-		}
 		if record.Type == "assistant" && record.Message.Model != "" && record.Message.Model != "<synthetic>" {
 			usage := model.Usage{
 				Model:           record.Message.Model,
@@ -131,6 +225,9 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 			} else {
 				usage.CacheCreation5mTokens = record.Message.Usage.CacheCreationInputTokens
 			}
+			if !validUsage(usage) {
+				return
+			}
 			usageRecords = append(usageRecords, usageRecord{
 				MessageID:   record.Message.ID,
 				RequestID:   record.RequestID,
@@ -138,8 +235,8 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 				Usage:       usage,
 			})
 		}
-	}
-	if err := scanner.Err(); err != nil {
+	})
+	if err != nil {
 		return nil, err
 	}
 	seenModels := make(map[string]bool)
@@ -162,6 +259,14 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 	}
 	session.Messages = userMessages + len(session.Usage)
 	return session, nil
+}
+
+func validUsage(usage model.Usage) bool {
+	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.CacheCreation5mTokens < 0 ||
+		usage.CacheCreation1hTokens < 0 || usage.CacheReadTokens < 0 {
+		return false
+	}
+	return usage.CostUSD == nil || (*usage.CostUSD >= 0 && !math.IsInf(*usage.CostUSD, 0) && !math.IsNaN(*usage.CostUSD))
 }
 
 func userText(content json.RawMessage) string {

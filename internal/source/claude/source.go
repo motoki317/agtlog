@@ -21,7 +21,7 @@ type Source struct {
 }
 
 func NewSource(parser Parser, roots []string) Source {
-	return Source{parser: parser, roots: roots}
+	return Source{parser: parser, roots: normalizeRoots(roots)}
 }
 
 func DefaultRoots(home, configDirs string) []string {
@@ -37,7 +37,7 @@ func DefaultRoots(home, configDirs string) []string {
 			filepath.Join(home, ".claude", "projects"),
 		}
 	}
-	return roots
+	return normalizeRoots(roots)
 }
 
 func (s Source) Agent() model.AgentKind {
@@ -49,7 +49,7 @@ func (s Source) Roots() []string {
 }
 
 func (s Source) Discover(ctx context.Context) ([]string, error) {
-	var paths []string
+	seen := make(map[string]bool)
 	for _, root := range s.roots {
 		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
@@ -61,8 +61,14 @@ func (s Source) Discover(ctx context.Context) ([]string, error) {
 			if entry.IsDir() && entry.Name() == "subagents" {
 				return filepath.SkipDir
 			}
-			if !entry.IsDir() && filepath.Ext(path) == ".jsonl" {
-				paths = append(paths, path)
+			if !entry.IsDir() && filepath.Ext(path) == ".jsonl" && !isLegacyAgentFile(path) {
+				info, infoErr := entry.Info()
+				if infoErr != nil {
+					return infoErr
+				}
+				if info.Mode().IsRegular() {
+					seen[path] = true
+				}
 			}
 			return nil
 		})
@@ -70,8 +76,28 @@ func (s Source) Discover(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 	}
+	paths := make([]string, 0, len(seen))
+	for path := range seen {
+		paths = append(paths, path)
+	}
 	sort.Strings(paths)
 	return paths, nil
+}
+
+func normalizeRoots(roots []string) []string {
+	seen := make(map[string]bool)
+	normalized := make([]string, 0, len(roots))
+	for _, root := range roots {
+		root = filepath.Clean(root)
+		if canonical, err := filepath.EvalSymlinks(root); err == nil {
+			root = canonical
+		}
+		if !seen[root] {
+			seen[root] = true
+			normalized = append(normalized, root)
+		}
+	}
+	return normalized
 }
 
 func (s Source) Parse(path string) (*model.Session, error) {
@@ -80,7 +106,10 @@ func (s Source) Parse(path string) (*model.Session, error) {
 
 func (s Source) Fingerprint(path string) (string, error) {
 	hash := sha256.New()
+	_, _ = fmt.Fprintln(hash, s.parser.CacheFingerprint())
 	paths := []string{path, strings.TrimSuffix(path, filepath.Ext(path))}
+	legacyPaths, _ := filepath.Glob(filepath.Join(filepath.Dir(path), "agent-*.jsonl"))
+	paths = append(paths, legacyPaths...)
 	for _, candidate := range paths {
 		err := filepath.Walk(candidate, func(current string, info os.FileInfo, err error) error {
 			if err != nil {
@@ -102,5 +131,19 @@ func (s Source) AffectedPath(path string) string {
 			return filepath.Dir(dir) + ".jsonl"
 		}
 	}
+	if isLegacyAgentFile(path) {
+		parentID := sessionIDFromFile(path)
+		candidates, _ := filepath.Glob(filepath.Join(filepath.Dir(path), "*.jsonl"))
+		for _, candidate := range candidates {
+			if !isLegacyAgentFile(candidate) && sessionIDFromFile(candidate) == parentID {
+				return candidate
+			}
+		}
+	}
 	return path
+}
+
+func isLegacyAgentFile(path string) bool {
+	base := filepath.Base(path)
+	return strings.HasPrefix(base, "agent-") && filepath.Ext(base) == ".jsonl"
 }

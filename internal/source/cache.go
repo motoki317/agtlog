@@ -13,42 +13,35 @@ import (
 )
 
 type cacheEntry struct {
-	Fingerprint string         `json:"fingerprint"`
-	Session     *model.Session `json:"session"`
+	Version     int             `json:"version"`
+	Agent       model.AgentKind `json:"agent"`
+	Fingerprint string          `json:"fingerprint"`
+	Session     *model.Session  `json:"session"`
 }
+
+const cacheVersion = 2
 
 type fingerprinter interface {
 	Fingerprint(string) (string, error)
 }
 
-func (r *Registry) loadCached(adapter Source, path string) (*model.Session, bool) {
-	if r.options.CacheDir == "" {
-		return nil, false
-	}
-	fingerprint, err := sourceFingerprint(adapter, path)
-	if err != nil {
-		return nil, false
-	}
-	data, err := os.ReadFile(r.cachePath(path))
+func (r *Registry) loadCached(adapter Source, path, fingerprint string) (*model.Session, bool) {
+	data, err := os.ReadFile(r.cachePath(adapter, path))
 	if err != nil {
 		return nil, false
 	}
 	var entry cacheEntry
-	if json.Unmarshal(data, &entry) != nil || entry.Fingerprint != fingerprint || entry.Session == nil {
+	if json.Unmarshal(data, &entry) != nil || entry.Version != cacheVersion || entry.Agent != adapter.Agent() || entry.Fingerprint != fingerprint || entry.Session == nil {
 		return nil, false
 	}
 	return entry.Session, true
 }
 
-func (r *Registry) storeCached(adapter Source, path string, session *model.Session) {
+func (r *Registry) storeCached(adapter Source, path, fingerprint string, session *model.Session) {
 	if r.options.CacheDir == "" {
 		return
 	}
-	fingerprint, err := sourceFingerprint(adapter, path)
-	if err != nil {
-		return
-	}
-	data, err := json.Marshal(cacheEntry{Fingerprint: fingerprint, Session: session})
+	data, err := json.Marshal(cacheEntry{Version: cacheVersion, Agent: adapter.Agent(), Fingerprint: fingerprint, Session: session})
 	if err != nil || os.MkdirAll(r.options.CacheDir, 0o700) != nil {
 		return
 	}
@@ -69,7 +62,34 @@ func (r *Registry) storeCached(adapter Source, path string, session *model.Sessi
 	if err := temporary.Close(); err != nil {
 		return
 	}
-	_ = os.Rename(temporaryPath, r.cachePath(path))
+	_ = os.Rename(temporaryPath, r.cachePath(adapter, path))
+}
+
+func (r *Registry) discoverSession(adapter Source, path string) (*model.Session, error) {
+	if r.options.CacheDir == "" {
+		return adapter.Parse(path)
+	}
+	fingerprint, err := sourceFingerprint(adapter, path)
+	if err == nil {
+		if session, ok := r.loadCached(adapter, path, fingerprint); ok {
+			return session, nil
+		}
+	}
+	return r.parseAndCache(adapter, path, fingerprint, err == nil)
+}
+
+func (r *Registry) parseAndCache(adapter Source, path, before string, cacheable bool) (*model.Session, error) {
+	session, err := adapter.Parse(path)
+	if err != nil {
+		return nil, err
+	}
+	if cacheable {
+		after, fingerprintErr := sourceFingerprint(adapter, path)
+		if fingerprintErr == nil && before == after {
+			r.storeCached(adapter, path, after, session)
+		}
+	}
+	return session, nil
 }
 
 func sourceFingerprint(adapter Source, path string) (string, error) {
@@ -79,8 +99,8 @@ func sourceFingerprint(adapter Source, path string) (string, error) {
 	return fileFingerprint(path)
 }
 
-func (r *Registry) cachePath(path string) string {
-	hash := sha256.Sum256([]byte(path))
+func (r *Registry) cachePath(adapter Source, path string) string {
+	hash := sha256.Sum256([]byte(string(adapter.Agent()) + "\x00" + path))
 	return filepath.Join(r.options.CacheDir, hex.EncodeToString(hash[:])+".json")
 }
 

@@ -87,3 +87,30 @@ func TestRegistryInvalidatesClaudeCacheForSubagentChange(t *testing.T) {
 		t.Fatalf("TotalUsage().InputTokens = %d, want 30 after subagent append", got)
 	}
 }
+
+func TestRegistryInvalidatesCacheWhenPricingChanges(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session-main.jsonl")
+	line := `{"type":"assistant","timestamp":"2026-01-02T00:00:00Z","sessionId":"session-main","requestId":"request-a","message":{"id":"message-a","model":"claude-opus-4-8","usage":{"input_tokens":10}}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := filepath.Join(root, "cache")
+	discoverCost := func(inputRate float64) float64 {
+		calculator := cost.NewCalculator(cost.Table{"claude-opus-4-8": {Input: inputRate}})
+		adapter := claude.NewSource(claude.NewParser(calculator), []string{root})
+		registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1, CacheDir: cacheDir})
+		sessions, err := registry.Discover(context.Background())
+		if err != nil {
+			t.Fatalf("Discover() error = %v", err)
+		}
+		return sessions[0].Cost.USD
+	}
+
+	if got := discoverCost(1); got != 10 {
+		t.Fatalf("first cost = %v, want 10", got)
+	}
+	if got := discoverCost(2); got != 20 {
+		t.Fatalf("cost after pricing change = %v, want 20", got)
+	}
+}

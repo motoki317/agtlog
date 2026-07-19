@@ -16,6 +16,7 @@ type usageRecord struct {
 func deduplicate(records []usageRecord) []usageRecord {
 	out := make([]usageRecord, 0, len(records))
 	indices := make(map[[32]byte]int)
+	firstByMessage := make(map[string]int)
 	for _, record := range records {
 		if record.MessageID == "" {
 			out = append(out, record)
@@ -23,14 +24,26 @@ func deduplicate(records []usageRecord) []usageRecord {
 		}
 		key := sha256.Sum256([]byte(record.MessageID + "\x00" + record.RequestID))
 		index, exists := indices[key]
+		if !exists && record.RequestID == "" {
+			index, exists = firstByMessage[record.MessageID]
+		}
+		if !exists && record.RequestID != "" {
+			if candidate, ok := firstByMessage[record.MessageID]; ok && out[candidate].RequestID == "" {
+				index, exists = candidate, true
+			}
+		}
 		if !exists {
 			indices[key] = len(out)
+			if _, ok := firstByMessage[record.MessageID]; !ok {
+				firstByMessage[record.MessageID] = len(out)
+			}
 			out = append(out, record)
 			continue
 		}
 		if betterRecord(record, out[index]) {
 			out[index] = record
 		}
+		indices[key] = index
 	}
 	return out
 }

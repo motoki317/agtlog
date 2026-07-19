@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 type AgentKind string
 
@@ -23,21 +26,33 @@ type Usage struct {
 
 func (u Usage) Add(other Usage) Usage {
 	return Usage{
-		InputTokens:            u.InputTokens + other.InputTokens,
-		OutputTokens:           u.OutputTokens + other.OutputTokens,
-		CacheCreation5mTokens:  u.CacheCreation5mTokens + other.CacheCreation5mTokens,
-		CacheCreation1hTokens:  u.CacheCreation1hTokens + other.CacheCreation1hTokens,
-		CacheReadTokens:        u.CacheReadTokens + other.CacheReadTokens,
+		InputTokens:            saturatingAdd(u.InputTokens, other.InputTokens),
+		OutputTokens:           saturatingAdd(u.OutputTokens, other.OutputTokens),
+		CacheCreation5mTokens:  saturatingAdd(u.CacheCreation5mTokens, other.CacheCreation5mTokens),
+		CacheCreation1hTokens:  saturatingAdd(u.CacheCreation1hTokens, other.CacheCreation1hTokens),
+		CacheReadTokens:        saturatingAdd(u.CacheReadTokens, other.CacheReadTokens),
 		InputIncludesCacheRead: u.InputIncludesCacheRead || other.InputIncludesCacheRead,
 	}
 }
 
 func (u Usage) TotalTokens() int64 {
-	total := u.InputTokens + u.OutputTokens + u.CacheCreation5mTokens + u.CacheCreation1hTokens
+	total := saturatingAdd(u.InputTokens, u.OutputTokens)
+	total = saturatingAdd(total, u.CacheCreation5mTokens)
+	total = saturatingAdd(total, u.CacheCreation1hTokens)
 	if !u.InputIncludesCacheRead {
-		total += u.CacheReadTokens
+		total = saturatingAdd(total, u.CacheReadTokens)
 	}
 	return total
+}
+
+func saturatingAdd(left, right int64) int64 {
+	if right > 0 && left > math.MaxInt64-right {
+		return math.MaxInt64
+	}
+	if right < 0 && left < math.MinInt64-right {
+		return math.MinInt64
+	}
+	return left + right
 }
 
 type Cost struct {

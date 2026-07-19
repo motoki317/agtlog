@@ -1,6 +1,7 @@
 package model
 
 import (
+	"math"
 	"reflect"
 	"testing"
 )
@@ -24,6 +25,16 @@ func TestSessionTotalUsageIncludesNestedSubagents(t *testing.T) {
 	}
 	if got := session.TotalUsage(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("TotalUsage() = %#v, want %#v", got, want)
+	}
+}
+
+func TestUsageAggregationSaturatesInsteadOfOverflowing(t *testing.T) {
+	got := (Usage{InputTokens: math.MaxInt64}).Add(Usage{InputTokens: 1})
+	if got.InputTokens != math.MaxInt64 {
+		t.Fatalf("Usage.Add().InputTokens = %d, want MaxInt64", got.InputTokens)
+	}
+	if total := (Usage{InputTokens: math.MaxInt64, OutputTokens: 1}).TotalTokens(); total != math.MaxInt64 {
+		t.Fatalf("Usage.TotalTokens() = %d, want MaxInt64", total)
 	}
 }
 

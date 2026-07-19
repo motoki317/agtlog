@@ -115,3 +115,55 @@ func TestFollowerReparsesChangedSession(t *testing.T) {
 		t.Fatal("timed out waiting for parsed session update")
 	}
 }
+
+func TestWatcherEmitsRemovedSession(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	watcher, err := NewWatcher([]string{root}, WatchOptions{Debounce: 10 * time.Millisecond, RescanInterval: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer watcher.Close()
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case change := <-watcher.Events():
+		if !reflect.DeepEqual(change.RemovedPaths, []string{path}) {
+			t.Fatalf("removed paths = %v, want %v", change.RemovedPaths, []string{path})
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for removal event")
+	}
+}
+
+func TestFollowerDeliversRemovalOnlyUpdate(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1})
+	follower, err := registry.Follow(context.Background(), WatchOptions{Debounce: 10 * time.Millisecond, RescanInterval: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer follower.Close()
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case update := <-follower.Updates():
+		if len(update.Sessions) != 0 || !reflect.DeepEqual(update.RemovedPaths, []string{path}) {
+			t.Fatalf("update = %#v, want removal-only update", update)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("timed out waiting for removal update")
+	}
+}

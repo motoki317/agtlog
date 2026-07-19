@@ -60,12 +60,7 @@ func (r *Registry) Discover(ctx context.Context) ([]*model.Session, error) {
 				if ctx.Err() != nil {
 					return
 				}
-				if session, ok := r.loadCached(item.source, item.path); ok {
-					results <- session
-					continue
-				}
-				if session, err := item.source.Parse(item.path); err == nil {
-					r.storeCached(item.source, item.path, session)
+				if session, err := r.discoverSession(item.source, item.path); err == nil {
 					results <- session
 				}
 			}

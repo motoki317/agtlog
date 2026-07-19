@@ -1,0 +1,3 @@
+{"timestamp":"2026-01-02T05:00:00Z","type":"session_meta","payload":{"session_id":"session-empty","cwd":"/workspace/observatory","git":{"branch":"sky/one"}}}
+{"timestamp":"2026-01-02T05:00:01Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-01-02T05:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"Calibrate the telescope"}}

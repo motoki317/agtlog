@@ -2,7 +2,10 @@ package codex
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -17,7 +20,7 @@ type Source struct {
 }
 
 func NewSource(parser Parser, roots []string) Source {
-	return Source{parser: parser, roots: roots}
+	return Source{parser: parser, roots: normalizeRoots(roots)}
 }
 
 func DefaultRoots(home, codexHome string) []string {
@@ -36,7 +39,7 @@ func (s Source) Roots() []string {
 }
 
 func (s Source) Discover(ctx context.Context) ([]string, error) {
-	var paths []string
+	seen := make(map[string]bool)
 	for _, root := range s.roots {
 		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
@@ -46,7 +49,13 @@ func (s Source) Discover(ctx context.Context) ([]string, error) {
 				return err
 			}
 			if !entry.IsDir() && filepath.Ext(path) == ".jsonl" {
-				paths = append(paths, path)
+				info, infoErr := entry.Info()
+				if infoErr != nil {
+					return infoErr
+				}
+				if info.Mode().IsRegular() {
+					seen[path] = true
+				}
 			}
 			return nil
 		})
@@ -54,10 +63,50 @@ func (s Source) Discover(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 	}
+	paths := make([]string, 0, len(seen))
+	for path := range seen {
+		paths = append(paths, path)
+	}
 	sort.Strings(paths)
 	return paths, nil
 }
 
+func normalizeRoots(roots []string) []string {
+	seen := make(map[string]bool)
+	normalized := make([]string, 0, len(roots))
+	for _, root := range roots {
+		root = filepath.Clean(root)
+		if canonical, err := filepath.EvalSymlinks(root); err == nil {
+			root = canonical
+		}
+		if !seen[root] {
+			seen[root] = true
+			normalized = append(normalized, root)
+		}
+	}
+	return normalized
+}
+
 func (s Source) Parse(path string) (*model.Session, error) {
 	return s.parser.Parse(path)
+}
+
+func (s Source) Fingerprint(path string) (string, error) {
+	fingerprint, err := fileFingerprint(path)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s", s.parser.CacheFingerprint(), fingerprint)))
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func fileFingerprint(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", errors.New("session path is not a regular file")
+	}
+	return fmt.Sprintf("%d:%d", info.ModTime().UnixNano(), info.Size()), nil
 }

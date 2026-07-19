@@ -21,12 +21,14 @@ type WatchOptions struct {
 }
 
 type Change struct {
-	Paths []string
+	Paths        []string
+	RemovedPaths []string
 }
 
 type SessionUpdate struct {
-	Paths    []string
-	Sessions []*model.Session
+	Paths        []string
+	RemovedPaths []string
+	Sessions     []*model.Session
 }
 
 type Follower struct {
@@ -42,6 +44,7 @@ type Watcher struct {
 	options WatchOptions
 	roots   []string
 	known   map[string]string
+	watched map[string]bool
 	events  chan Change
 	done    chan struct{}
 	once    sync.Once
@@ -64,16 +67,11 @@ func NewWatcher(roots []string, options WatchOptions) (*Watcher, error) {
 		options: options,
 		roots:   append([]string(nil), roots...),
 		known:   make(map[string]string),
+		watched: make(map[string]bool),
 		events:  make(chan Change, 16),
 		done:    make(chan struct{}),
 	}
-	for _, root := range roots {
-		if err := watcher.addTree(root); err != nil {
-			native.Close()
-			return nil, err
-		}
-	}
-	watcher.known = watcher.scanFiles()
+	watcher.known = watcher.scanFiles(true)
 	watcher.group.Add(1)
 	go watcher.run()
 	return watcher, nil
@@ -121,12 +119,15 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 				if !ok {
 					return
 				}
-				sessions := r.refresh(ctx, change.Paths)
-				if len(sessions) == 0 {
+				changed := append([]string(nil), change.Paths...)
+				changed = append(changed, r.removedParentPaths(change.RemovedPaths)...)
+				sessions := r.refresh(ctx, changed)
+				removed := r.topLevelRemoved(change.RemovedPaths)
+				if len(sessions) == 0 && len(removed) == 0 {
 					continue
 				}
 				select {
-				case follower.updates <- SessionUpdate{Paths: change.Paths, Sessions: sessions}:
+				case follower.updates <- SessionUpdate{Paths: change.Paths, RemovedPaths: removed, Sessions: sessions}:
 				case <-ctx.Done():
 					return
 				case <-follower.done:
@@ -136,6 +137,52 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 		}
 	}()
 	return follower, nil
+}
+
+func (r *Registry) topLevelRemoved(paths []string) []string {
+	var removed []string
+	for _, path := range paths {
+		for _, adapter := range r.sources {
+			if !insideAnyRoot(path, adapter.Roots()) {
+				continue
+			}
+			affected := path
+			if mapper, ok := adapter.(affectedPathMapper); ok {
+				affected = mapper.AffectedPath(path)
+			}
+			if affected == path {
+				removed = append(removed, path)
+				if r.options.CacheDir != "" {
+					_ = os.Remove(r.cachePath(adapter, path))
+				}
+			}
+			break
+		}
+	}
+	sort.Strings(removed)
+	return removed
+}
+
+func (r *Registry) removedParentPaths(paths []string) []string {
+	seen := make(map[string]bool)
+	var parents []string
+	for _, path := range paths {
+		for _, adapter := range r.sources {
+			if !insideAnyRoot(path, adapter.Roots()) {
+				continue
+			}
+			if mapper, ok := adapter.(affectedPathMapper); ok {
+				affected := mapper.AffectedPath(path)
+				if affected != path && !seen[affected] {
+					parents = append(parents, affected)
+					seen[affected] = true
+				}
+			}
+			break
+		}
+	}
+	sort.Strings(parents)
+	return parents
 }
 
 func (f *Follower) Updates() <-chan SessionUpdate {
@@ -187,11 +234,11 @@ func (r *Registry) refresh(ctx context.Context, changedPaths []string) []*model.
 			break
 		}
 		// Full re-parse per change; add offset-incremental parsing if large-session refresh lags.
-		session, err := target.adapter.Parse(target.path)
+		before, fingerprintErr := sourceFingerprint(target.adapter, target.path)
+		session, err := r.parseAndCache(target.adapter, target.path, before, fingerprintErr == nil)
 		if err != nil {
 			continue
 		}
-		r.storeCached(target.adapter, target.path, session)
 		sessions = append(sessions, session)
 	}
 	return sessions
@@ -212,8 +259,11 @@ func (w *Watcher) addTree(root string) error {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() {
-			return w.watcher.Add(path)
+		if entry.IsDir() && !w.watched[path] {
+			if err := w.watcher.Add(path); err != nil {
+				return err
+			}
+			w.watched[path] = true
 		}
 		return nil
 	})
@@ -235,7 +285,8 @@ func (w *Watcher) run() {
 		if filepath.Ext(path) != ".jsonl" {
 			return
 		}
-		pending[path] = true
+		_, statErr := os.Stat(path)
+		pending[path] = errors.Is(statErr, os.ErrNotExist)
 		if timer == nil {
 			timer = time.NewTimer(w.options.Debounce)
 		} else {
@@ -255,15 +306,20 @@ func (w *Watcher) run() {
 		timerC = timer.C
 	}
 	flush := func() {
-		paths := make([]string, 0, len(pending))
-		for path := range pending {
-			paths = append(paths, path)
+		var paths, removed []string
+		for path, isRemoved := range pending {
+			if isRemoved {
+				removed = append(removed, path)
+			} else {
+				paths = append(paths, path)
+			}
 			delete(pending, path)
 		}
 		sort.Strings(paths)
-		if len(paths) > 0 {
+		sort.Strings(removed)
+		if len(paths) > 0 || len(removed) > 0 {
 			select {
-			case w.events <- Change{Paths: paths}:
+			case w.events <- Change{Paths: paths, RemovedPaths: removed}:
 			case <-w.done:
 			}
 		}
@@ -287,7 +343,10 @@ func (w *Watcher) run() {
 					continue
 				}
 			}
-			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) {
+			if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+				w.forgetTree(event.Name)
+			}
+			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Rename) || event.Has(fsnotify.Remove) {
 				queue(event.Name)
 			}
 		case _, ok := <-w.watcher.Errors:
@@ -297,12 +356,14 @@ func (w *Watcher) run() {
 		case <-timerC:
 			flush()
 		case <-rescan.C:
-			for _, root := range w.roots {
-				_ = w.addTree(root)
-			}
-			current := w.scanFiles()
+			current := w.scanFiles(true)
 			for path, fingerprint := range current {
 				if w.known[path] != fingerprint {
+					queue(path)
+				}
+			}
+			for path := range w.known {
+				if _, exists := current[path]; !exists {
 					queue(path)
 				}
 			}
@@ -311,14 +372,22 @@ func (w *Watcher) run() {
 	}
 }
 
-func (w *Watcher) scanFiles() map[string]string {
+func (w *Watcher) scanFiles(addWatches bool) map[string]string {
 	files := make(map[string]string)
 	for _, root := range w.roots {
 		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
-			if entry.IsDir() || filepath.Ext(path) != ".jsonl" {
+			if entry.IsDir() {
+				if addWatches && !w.watched[path] {
+					if err := w.watcher.Add(path); err == nil {
+						w.watched[path] = true
+					}
+				}
+				return nil
+			}
+			if filepath.Ext(path) != ".jsonl" {
 				return nil
 			}
 			if fingerprint, err := fileFingerprint(path); err == nil {
@@ -328,4 +397,13 @@ func (w *Watcher) scanFiles() map[string]string {
 		})
 	}
 	return files
+}
+
+func (w *Watcher) forgetTree(root string) {
+	for path := range w.watched {
+		relative, err := filepath.Rel(root, path)
+		if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			delete(w.watched, path)
+		}
+	}
 }

@@ -1,6 +1,9 @@
 package cost
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"strings"
 
 	"github.com/motoki317/agtlog/internal/model"
@@ -15,6 +18,10 @@ type Pricing struct {
 	OutputAbove200K       *float64 `json:"output_cost_per_token_above_200k_tokens"`
 	CacheWriteAbove200K   *float64 `json:"cache_creation_input_token_cost_above_200k_tokens"`
 	CacheReadAbove200K    *float64 `json:"cache_read_input_token_cost_above_200k_tokens"`
+	InputAbove272K        *float64 `json:"input_cost_per_token_above_272k_tokens"`
+	OutputAbove272K       *float64 `json:"output_cost_per_token_above_272k_tokens"`
+	CacheWriteAbove272K   *float64 `json:"cache_creation_input_token_cost_above_272k_tokens"`
+	CacheReadAbove272K    *float64 `json:"cache_read_input_token_cost_above_272k_tokens"`
 	MaxInputTokens        int64    `json:"max_input_tokens"`
 	ProviderSpecificEntry struct {
 		Fast float64 `json:"fast"`
@@ -24,11 +31,18 @@ type Pricing struct {
 type Table map[string]Pricing
 
 type Calculator struct {
-	table Table
+	table       Table
+	fingerprint string
 }
 
 func NewCalculator(table Table) Calculator {
-	return Calculator{table: table}
+	data, _ := json.Marshal(table)
+	digest := sha256.Sum256(data)
+	return Calculator{table: table, fingerprint: hex.EncodeToString(digest[:])}
+}
+
+func (c Calculator) Fingerprint() string {
+	return c.fingerprint
 }
 
 func (c Calculator) CalculateCodex(usage model.Usage, defaultModel string) model.Cost {
@@ -72,22 +86,28 @@ func (c Calculator) Calculate(usage model.Usage) model.Cost {
 		// applying the ordinary input rate to avoid billing those tokens twice.
 		inputTokens = max(0, inputTokens-usage.CacheReadTokens)
 	}
-	usd := priceTokens(inputTokens, pricing.Input, pricing.InputAbove200K)
-	usd += priceTokens(usage.OutputTokens, pricing.Output, pricing.OutputAbove200K)
-	usd += priceTokens(usage.CacheCreation5mTokens, cacheWrite, pricing.CacheWriteAbove200K)
-	usd += priceTokens(usage.CacheReadTokens, cacheRead, pricing.CacheReadAbove200K)
-	usd += priceTokens(usage.CacheCreation1hTokens, pricing.Input*2, doubled(pricing.InputAbove200K))
+	usd := priceTokens(inputTokens, pricing.Input, pricing.InputAbove200K, pricing.InputAbove272K)
+	usd += priceTokens(usage.OutputTokens, pricing.Output, pricing.OutputAbove200K, pricing.OutputAbove272K)
+	usd += priceTokens(usage.CacheCreation5mTokens, cacheWrite, pricing.CacheWriteAbove200K, pricing.CacheWriteAbove272K)
+	usd += priceTokens(usage.CacheReadTokens, cacheRead, pricing.CacheReadAbove200K, pricing.CacheReadAbove272K)
+	usd += priceTokens(usage.CacheCreation1hTokens, pricing.Input*2, doubled(pricing.InputAbove200K), doubled(pricing.InputAbove272K))
 	if usage.Speed == "fast" && pricing.ProviderSpecificEntry.Fast != 0 {
 		usd *= pricing.ProviderSpecificEntry.Fast
 	}
 	return model.Cost{USD: usd}
 }
 
-func priceTokens(tokens int64, base float64, above *float64) float64 {
-	if above == nil || tokens <= 200_000 {
+func priceTokens(tokens int64, base float64, above200K, above272K *float64) float64 {
+	threshold := int64(200_000)
+	above := above200K
+	if above == nil && above272K != nil {
+		threshold = 272_000
+		above = above272K
+	}
+	if above == nil || tokens <= threshold {
 		return float64(tokens) * base
 	}
-	return 200_000*base + float64(tokens-200_000)**above
+	return float64(threshold)*base + float64(tokens-threshold)**above
 }
 
 func doubled(rate *float64) *float64 {
