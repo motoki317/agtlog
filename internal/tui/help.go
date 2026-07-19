@@ -14,8 +14,8 @@ func (m Model) helpView() string {
 	if m.screen == screenDetail {
 		lines = []string{
 			"j/k scroll · g/G edge",
-			"space/enter expand · J/K subagent",
-			"esc/h back",
+			"space expand · enter expand · w wrap",
+			"J/K subagent · esc/h back",
 			"? help · q/ctrl-c quit",
 		}
 		if !m.styles.mono {

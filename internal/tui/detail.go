@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -23,9 +24,15 @@ type detailState struct {
 	loading      bool
 	err          error
 	styles       styles
+	wrap         bool
 	lines        []detailLine
-	rendered     []string
+	rendered     []renderedRow
 	selectedLine int
+}
+
+type renderedRow struct {
+	detailIndex int
+	text        string
 }
 
 type detailLayout struct {
@@ -68,6 +75,8 @@ type detailLine struct {
 
 type detailRole int
 
+const detailPreviewLineCap = 40
+
 const (
 	detailRow detailRole = iota
 	detailAccent
@@ -75,6 +84,9 @@ const (
 	detailTool
 	detailSecondary
 	detailWarning
+	detailDiffAdd
+	detailDiffRemove
+	detailDiffContext
 )
 
 func newDetailState(session *model.Session, width, height int, styles styles) *detailState {
@@ -92,7 +104,7 @@ func (d *detailState) clone() *detailState {
 	}
 	copy.focusables = append([]detailFocus(nil), d.focusables...)
 	copy.lines = append([]detailLine(nil), d.lines...)
-	copy.rendered = append([]string(nil), d.rendered...)
+	copy.rendered = append([]renderedRow(nil), d.rendered...)
 	return &copy
 }
 
@@ -142,6 +154,9 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 			d.expanded[item.key] = !d.expanded[item.key]
 			d.rebuildKeeping(item.key)
 		}
+	case "w":
+		d.wrap = !d.wrap
+		d.rebuild()
 	default:
 		var cmd tea.Cmd
 		d.viewport, cmd = d.viewport.Update(msg)
@@ -221,39 +236,54 @@ func (d *detailState) rebuild() {
 	if len(d.focusables) > 0 {
 		selectedLine = d.focusables[d.focus].line
 	}
-	d.rendered = make([]string, len(lines))
-	for index, line := range lines {
-		prefix := "  "
-		if index == selectedLine {
-			prefix = "› "
-		}
-		d.rendered[index] = fitPlain(prefix+line.text, d.viewport.Width, false)
-	}
 	d.selectedLine = selectedLine
-	d.viewport.SetContent(strings.Join(d.rendered, "\n"))
-	if selectedLine >= 0 {
-		if selectedLine < d.viewport.YOffset {
-			d.viewport.SetYOffset(selectedLine)
-		} else if selectedLine >= d.viewport.YOffset+d.viewport.Height {
-			d.viewport.SetYOffset(selectedLine - d.viewport.Height + 1)
-		}
-	}
+	d.rebuildRendered()
 }
 
 func (d *detailState) updateSelection(oldLine, newLine int) {
-	if oldLine >= 0 && oldLine < len(d.lines) {
-		d.rendered[oldLine] = fitPlain("  "+d.lines[oldLine].text, d.viewport.Width, false)
-	}
-	if newLine >= 0 && newLine < len(d.lines) {
-		d.rendered[newLine] = fitPlain("› "+d.lines[newLine].text, d.viewport.Width, false)
-	}
+	_ = oldLine
 	d.selectedLine = newLine
-	d.viewport.SetContent(strings.Join(d.rendered, "\n"))
-	if newLine < d.viewport.YOffset {
-		d.viewport.SetYOffset(newLine)
-	} else if newLine >= d.viewport.YOffset+d.viewport.Height {
-		d.viewport.SetYOffset(newLine - d.viewport.Height + 1)
+	d.rebuildRendered()
+}
+
+func (d *detailState) rebuildRendered() {
+	d.rendered = d.rendered[:0]
+	content := make([]string, 0, len(d.lines))
+	for detailIndex, line := range d.lines {
+		prefix := "  "
+		if detailIndex == d.selectedLine {
+			prefix = "› "
+		}
+		plain := prefix + line.text
+		rows := []string{plain}
+		if d.wrap && ansi.StringWidth(plain) > d.viewport.Width {
+			rows = strings.Split(ansi.Hardwrap(plain, d.viewport.Width, true), "\n")
+		}
+		for _, row := range rows {
+			row = fitPlain(row, d.viewport.Width, false)
+			d.rendered = append(d.rendered, renderedRow{detailIndex: detailIndex, text: row})
+			content = append(content, row)
+		}
 	}
+	d.viewport.SetContent(strings.Join(content, "\n"))
+	selectedRow := d.firstRenderedRow(d.selectedLine)
+	if selectedRow < 0 {
+		return
+	}
+	if selectedRow < d.viewport.YOffset {
+		d.viewport.SetYOffset(selectedRow)
+	} else if selectedRow >= d.viewport.YOffset+d.viewport.Height {
+		d.viewport.SetYOffset(selectedRow - d.viewport.Height + 1)
+	}
+}
+
+func (d *detailState) firstRenderedRow(detailIndex int) int {
+	for rowIndex, row := range d.rendered {
+		if row.detailIndex == detailIndex {
+			return rowIndex
+		}
+	}
+	return -1
 }
 
 func (d *detailState) sessionLines(session *model.Session, indent int, path string) []detailLine {
@@ -328,7 +358,7 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 	case model.EventThinking:
 		return []detailLine{{text: padding + glyphSecondary + " thinking: " + firstLine(event.Text), key: key, role: detailSecondary}}
 	case model.EventToolCall:
-		return []detailLine{{text: padding + toolLine(event), key: key, role: detailTool}}
+		return d.toolEventLines(event, indent, key)
 	case model.EventSubagent:
 		if event.Subagent == nil {
 			return []detailLine{{text: padding + glyphSubagent + " subagent unavailable", key: key, role: detailWarning}}
@@ -356,6 +386,77 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 	default:
 		return nil
 	}
+}
+
+func (d *detailState) toolEventLines(event model.Event, indent int, key string) []detailLine {
+	padding := strings.Repeat(" ", indent)
+	expandable := detailHasBody(event.Detail)
+	text := padding + toolLine(event)
+	if expandable {
+		marker := glyphCollapsed
+		if d.expanded[key] {
+			marker = glyphExpanded
+		}
+		text = padding + marker + " " + toolLine(event)
+	}
+	lines := []detailLine{{text: text, key: key, expandable: expandable, role: detailTool}}
+	if !d.expanded[key] || event.Detail == nil {
+		return lines
+	}
+	childPadding := strings.Repeat(" ", indent+2)
+	if event.Detail.Diff != "" {
+		for _, text := range boundLines(event.Detail.Diff, detailPreviewLineCap) {
+			plain := detailPlainText(text)
+			role := detailDiffContext
+			if strings.HasPrefix(plain, "+") {
+				role = detailDiffAdd
+			} else if strings.HasPrefix(plain, "-") {
+				role = detailDiffRemove
+			}
+			lines = append(lines, detailLine{text: childPadding + plain, role: role})
+		}
+	}
+	for _, section := range []struct {
+		label string
+		text  string
+	}{{label: "output:", text: event.Detail.Output}, {label: "input:", text: detailInputBody(event)}} {
+		if section.text == "" {
+			continue
+		}
+		lines = append(lines, detailLine{text: childPadding + section.label, role: detailSecondary})
+		for _, text := range boundLines(section.text, detailPreviewLineCap) {
+			lines = append(lines, detailLine{text: childPadding + detailPlainText(text), role: detailSecondary})
+		}
+	}
+	return lines
+}
+
+func detailInputBody(event model.Event) string {
+	if event.Detail == nil || event.Detail.Input == "" {
+		return ""
+	}
+	if strings.Contains(event.Detail.Input, "\n") {
+		return event.Detail.Input
+	}
+	switch event.ToolName {
+	case "Read", "Edit", "MultiEdit", "Write", "apply_patch":
+		return ""
+	default:
+		return event.Detail.Input
+	}
+}
+
+func detailPlainText(text string) string {
+	return strings.Map(func(char rune) rune {
+		if unicode.IsControl(char) || unicode.In(char, unicode.Cf) {
+			return ' '
+		}
+		return char
+	}, ansi.Strip(text))
+}
+
+func detailHasBody(detail *model.ToolDetail) bool {
+	return detail != nil && (detail.Diff != "" || detail.Output != "" || strings.Contains(detail.Input, "\n"))
 }
 
 func turnExpandable(events []model.Event) bool {
@@ -412,6 +513,23 @@ func firstLine(text string) string {
 	return ""
 }
 
+func boundLines(text string, maxLines int) []string {
+	lines := strings.Split(text, "\n")
+	if len(lines) <= maxLines {
+		return lines
+	}
+	if maxLines <= 0 {
+		return nil
+	}
+	head := (maxLines - 1) / 2
+	tail := maxLines - 1 - head
+	bounded := make([]string, 0, maxLines)
+	bounded = append(bounded, lines[:head]...)
+	bounded = append(bounded, fmt.Sprintf("… %d lines hidden …", len(lines)-head-tail))
+	bounded = append(bounded, lines[len(lines)-tail:]...)
+	return bounded
+}
+
 func lastLine(text string) string {
 	lines := strings.Split(strings.TrimSpace(text), "\n")
 	for index := len(lines) - 1; index >= 0; index-- {
@@ -432,12 +550,13 @@ func (d *detailState) view() string {
 	visiblePlain := strings.Split(d.viewport.View(), "\n")
 	visible := make([]panelLine, len(visiblePlain))
 	for index, plain := range visiblePlain {
-		lineIndex := d.viewport.YOffset + index
-		if lineIndex >= len(d.lines) {
+		rowIndex := d.viewport.YOffset + index
+		if rowIndex >= len(d.rendered) {
 			visible[index] = panelLine{plain: plain, styled: d.styles.row.Render(plain)}
 			continue
 		}
-		visible[index] = panelLine{plain: plain, styled: d.styleLine(plain, d.lines[lineIndex], lineIndex == d.selectedLine)}
+		detailIndex := d.rendered[rowIndex].detailIndex
+		visible[index] = panelLine{plain: plain, styled: d.styleLine(plain, d.lines[detailIndex], detailIndex == d.selectedLine)}
 	}
 	for len(visible) < max(0, timelineHeight-2) {
 		plain := strings.Repeat(" ", d.viewport.Width)
@@ -447,15 +566,11 @@ func (d *detailState) view() string {
 		visible = visible[:timelineHeight-2]
 	}
 	hint := ""
-	if len(d.lines) > d.viewport.Height {
-		hint = fmt.Sprintf("%d/%d", min(len(d.lines), d.viewport.YOffset+1), len(d.lines))
+	if len(d.rendered) > d.viewport.Height {
+		hint = fmt.Sprintf("%d/%d", min(len(d.rendered), d.viewport.YOffset+1), len(d.rendered))
 	}
 	timeline := renderPanel("Timeline", hint, visible, d.width, timelineHeight, d.styles)
-	keyText := "j/k scroll   ↵ expand   J/K subagent   esc back"
-	if !d.styles.mono {
-		keyText += "   t theme"
-	}
-	keyText += "   ? help   q quit"
+	keyText := detailKeyText(d.width, d.styles.mono)
 	keyBar := d.styles.keyHint.Render(fitPlain(keyText, d.width, false))
 	return strings.Join([]string{header, timeline, keyBar}, "\n")
 }
@@ -470,9 +585,10 @@ func (d *detailState) compactView(layout detailLayout) string {
 		}
 		content = append(content, headerLines[index])
 	}
-	for lineIndex := d.viewport.YOffset; len(content) < capacity && lineIndex < len(d.rendered); lineIndex++ {
-		plain := fitPlain(d.rendered[lineIndex], max(0, d.width-2), false)
-		content = append(content, panelLine{plain: plain, styled: d.styleLine(plain, d.lines[lineIndex], lineIndex == d.selectedLine)})
+	for rowIndex := d.viewport.YOffset; len(content) < capacity && rowIndex < len(d.rendered); rowIndex++ {
+		row := d.rendered[rowIndex]
+		plain := fitPlain(row.text, max(0, d.width-2), false)
+		content = append(content, panelLine{plain: plain, styled: d.styleLine(plain, d.lines[row.detailIndex], row.detailIndex == d.selectedLine)})
 	}
 	for len(content) < capacity {
 		plain := strings.Repeat(" ", max(0, d.width-2))
@@ -482,8 +598,28 @@ func (d *detailState) compactView(layout detailLayout) string {
 	if layout.keyBarHeight == 0 {
 		return panel
 	}
-	keyBar := d.styles.keyHint.Render(fitPlain("j/k scroll   esc back   ? help   q quit", d.width, false))
+	keyBar := d.styles.keyHint.Render(fitPlain(detailKeyText(d.width, d.styles.mono), d.width, false))
 	return panel + "\n" + keyBar
+}
+
+func detailKeyText(width int, mono bool) string {
+	hints := []string{"j/k scroll", "↵ expand", "J/K subagent", "w wrap", "esc back"}
+	if !mono {
+		hints = append(hints, "t theme")
+	}
+	hints = append(hints, "? help", "q quit")
+	for _, drop := range []string{"t theme", "? help", "J/K subagent", "j/k scroll"} {
+		if ansi.StringWidth(strings.Join(hints, "   ")) <= width {
+			break
+		}
+		for index, hint := range hints {
+			if hint == drop {
+				hints = append(hints[:index], hints[index+1:]...)
+				break
+			}
+		}
+	}
+	return strings.Join(hints, "   ")
 }
 
 func (d *detailState) header() string {
@@ -543,6 +679,12 @@ func (d *detailState) styleLine(line string, detail detailLine, selected bool) s
 		return d.styles.muted.Render(line)
 	case detailWarning:
 		return d.styles.warning.Render(line)
+	case detailDiffAdd:
+		return d.styles.diffAdd.Render(line)
+	case detailDiffRemove:
+		return d.styles.diffRemove.Render(line)
+	case detailDiffContext:
+		return d.styles.muted.Render(line)
 	default:
 		return d.styles.row.Render(line)
 	}

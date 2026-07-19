@@ -56,7 +56,7 @@ func TestGoldenDetailFrame(t *testing.T) {
 		Events: []model.Event{
 			{Kind: model.EventUser, Text: "Delegate the survey"},
 			{Kind: model.EventThinking, Text: "Select a safe path"},
-			{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/starship/map.go", ResultSummary: "map ready", Duration: 400 * time.Millisecond},
+			{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/starship/map.go", ResultSummary: "map ready", Duration: 400 * time.Millisecond, Detail: &model.ToolDetail{Input: "/workspace/starship/map.go", Output: "map ready"}},
 			{Kind: model.EventAssistantText, Text: "Survey delegated"},
 			{Kind: model.EventSubagent, ToolName: "Agent", Subagent: child},
 		},

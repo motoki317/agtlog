@@ -862,6 +862,24 @@ func TestNewerDetailLoadSupersedesOlderResult(t *testing.T) {
 	}
 }
 
+func TestDetailLoadPreservesWrapToggle(t *testing.T) {
+	current := &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/session.jsonl", Title: "Current"}
+	m := NewModel([]*model.Session{current}, nil)
+	m.screen = screenDetail
+	m.detail = newDetailState(current, m.width, m.height, m.styles)
+	m.detail.wrap = true
+	m.detailGeneration = 1
+
+	loaded := cloneSession(current)
+	loaded.Events = []model.Event{{Kind: model.EventAssistantText, Text: strings.Repeat("wrapped route ", 20)}}
+	updated, _ := m.Update(detailLoadedMsg{generation: 1, identity: sessionIdentity(current), session: loaded})
+	m = updated.(Model)
+
+	if !m.detail.wrap {
+		t.Fatal("detail load cleared the active wrap toggle")
+	}
+}
+
 func TestListNeverWrapsAtEightyColumns(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	m := NewModel([]*model.Session{{

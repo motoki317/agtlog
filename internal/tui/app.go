@@ -321,6 +321,7 @@ func (m *Model) replaceDetail(session *model.Session) {
 		focusKey = previous.focusables[previous.focus].key
 	}
 	replacement := newDetailState(session, m.width, m.height, m.styles)
+	replacement.wrap = previous.wrap
 	for key, expanded := range previous.expanded {
 		replacement.expanded[key] = expanded
 	}

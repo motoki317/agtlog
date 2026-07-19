@@ -78,11 +78,11 @@ func TestResolveThemeRejectsUnknownName(t *testing.T) {
 func TestBuiltInThemesDefineSemanticPalettes(t *testing.T) {
 	unsetEnv(t, "NO_COLOR")
 	tests := []struct {
-		name, claude, codex, warning, background string
+		name, claude, codex, warning, diffAdd, diffRemove, background string
 	}{
-		{name: "default", claude: "#D19A66", codex: "#61AFEF", warning: "#E06C75", background: "#1E222A"},
-		{name: "nord", claude: "#88C0D0", codex: "#81A1C1", warning: "#BF616A", background: "#2E3440"},
-		{name: "dracula", claude: "#BD93F9", codex: "#8BE9FD", warning: "#FF5555", background: "#282A36"},
+		{name: "default", claude: "#D19A66", codex: "#61AFEF", warning: "#E06C75", diffAdd: "#98C379", diffRemove: "#E06C75", background: "#1E222A"},
+		{name: "nord", claude: "#88C0D0", codex: "#81A1C1", warning: "#BF616A", diffAdd: "#A3BE8C", diffRemove: "#BF616A", background: "#2E3440"},
+		{name: "dracula", claude: "#BD93F9", codex: "#8BE9FD", warning: "#FF5555", diffAdd: "#50FA7B", diffRemove: "#FF5555", background: "#282A36"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -92,6 +92,9 @@ func TestBuiltInThemesDefineSemanticPalettes(t *testing.T) {
 			}
 			if theme.Claude != test.claude || theme.Codex != test.codex || theme.Warning != test.warning || theme.Background != test.background {
 				t.Fatalf("ResolveTheme(%q) = %#v", test.name, theme)
+			}
+			if theme.DiffAdd != test.diffAdd || theme.DiffRemove != test.diffRemove {
+				t.Fatalf("ResolveTheme(%q) diff colors = %q/%q, want %q/%q", test.name, theme.DiffAdd, theme.DiffRemove, test.diffAdd, test.diffRemove)
 			}
 			for role, color := range map[string]string{
 				"border": theme.Border, "title": theme.Title, "header": theme.Header,
@@ -180,6 +183,33 @@ func TestColorThemeStylesUsePaletteBackground(t *testing.T) {
 	styleSet := newStyles(themes["nord"])
 	if got := fmt.Sprint(styleSet.row.GetBackground()); got != "#2E3440" {
 		t.Fatalf("Nord row background = %q, want #2E3440", got)
+	}
+}
+
+func TestDiffStylesUseSemanticPalette(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+
+	styleSet := newStyles(themes["default"])
+	if got := fmt.Sprint(styleSet.diffAdd.GetForeground()); got != "#98C379" {
+		t.Fatalf("diff add foreground = %q, want #98C379", got)
+	}
+	if got := fmt.Sprint(styleSet.diffRemove.GetForeground()); got != "#E06C75" {
+		t.Fatalf("diff remove foreground = %q, want #E06C75", got)
+	}
+}
+
+func TestMonoDiffStylesAvoidColor(t *testing.T) {
+	styleSet := newStyles(Theme{Name: "mono"})
+	if _, ok := styleSet.diffAdd.GetForeground().(lipgloss.NoColor); !ok {
+		t.Fatalf("mono diff add foreground = %#v, want no color", styleSet.diffAdd.GetForeground())
+	}
+	if _, ok := styleSet.diffRemove.GetForeground().(lipgloss.NoColor); !ok {
+		t.Fatalf("mono diff remove foreground = %#v, want no color", styleSet.diffRemove.GetForeground())
+	}
+	if !styleSet.diffAdd.GetBold() || !styleSet.diffRemove.GetFaint() {
+		t.Fatal("mono diff styles lack add/remove text emphasis")
 	}
 }
 

@@ -19,20 +19,22 @@ const (
 )
 
 type styles struct {
-	mono      bool
-	border    lipgloss.Style
-	title     lipgloss.Style
-	header    lipgloss.Style
-	row       lipgloss.Style
-	selected  lipgloss.Style
-	claude    lipgloss.Style
-	codex     lipgloss.Style
-	muted     lipgloss.Style
-	estimated lipgloss.Style
-	emphasis  lipgloss.Style
-	warning   lipgloss.Style
-	accent    lipgloss.Style
-	keyHint   lipgloss.Style
+	mono       bool
+	border     lipgloss.Style
+	title      lipgloss.Style
+	header     lipgloss.Style
+	row        lipgloss.Style
+	selected   lipgloss.Style
+	claude     lipgloss.Style
+	codex      lipgloss.Style
+	muted      lipgloss.Style
+	estimated  lipgloss.Style
+	emphasis   lipgloss.Style
+	warning    lipgloss.Style
+	accent     lipgloss.Style
+	keyHint    lipgloss.Style
+	diffAdd    lipgloss.Style
+	diffRemove lipgloss.Style
 }
 
 type Theme struct {
@@ -51,23 +53,25 @@ type Theme struct {
 	Estimated  string
 	Accent     string
 	KeyHint    string
+	DiffAdd    string
+	DiffRemove string
 }
 
 var themes = map[string]Theme{
 	"default": {
 		Name: "default", Background: "#1E222A", Border: "#5C6370", Title: "#61AFEF", Header: "#C678DD", Row: "#ABB2BF",
 		SelectedFg: "#FFFFFF", SelectedBg: "#3E4451", Claude: "#D19A66", Codex: "#61AFEF", Warning: "#E06C75",
-		Muted: "#5C6370", Estimated: "#7F848E", Accent: "#61AFEF", KeyHint: "#98C379",
+		Muted: "#5C6370", Estimated: "#7F848E", Accent: "#61AFEF", KeyHint: "#98C379", DiffAdd: "#98C379", DiffRemove: "#E06C75",
 	},
 	"nord": {
 		Name: "nord", Background: "#2E3440", Border: "#4C566A", Title: "#88C0D0", Header: "#E5E9F0", Row: "#D8DEE9",
 		SelectedFg: "#ECEFF4", SelectedBg: "#4C566A", Claude: "#88C0D0", Codex: "#81A1C1", Warning: "#BF616A",
-		Muted: "#4C566A", Estimated: "#616E88", Accent: "#88C0D0", KeyHint: "#A3BE8C",
+		Muted: "#4C566A", Estimated: "#616E88", Accent: "#88C0D0", KeyHint: "#A3BE8C", DiffAdd: "#A3BE8C", DiffRemove: "#BF616A",
 	},
 	"dracula": {
 		Name: "dracula", Background: "#282A36", Border: "#6272A4", Title: "#FF79C6", Header: "#F8F8F2", Row: "#F8F8F2",
 		SelectedFg: "#282A36", SelectedBg: "#50FA7B", Claude: "#BD93F9", Codex: "#8BE9FD", Warning: "#FF5555",
-		Muted: "#6272A4", Estimated: "#6272A4", Accent: "#50FA7B", KeyHint: "#FFB86C",
+		Muted: "#6272A4", Estimated: "#6272A4", Accent: "#50FA7B", KeyHint: "#FFB86C", DiffAdd: "#50FA7B", DiffRemove: "#FF5555",
 	},
 }
 
@@ -112,17 +116,19 @@ func newStyles(selected ...Theme) styles {
 		theme = themes["default"]
 	}
 	result := styles{
-		mono:      theme.Name == "mono",
-		title:     lipgloss.NewStyle().Bold(true),
-		header:    lipgloss.NewStyle().Bold(true),
-		row:       lipgloss.NewStyle(),
-		selected:  lipgloss.NewStyle().Reverse(true),
-		muted:     lipgloss.NewStyle().Faint(true),
-		estimated: lipgloss.NewStyle().Faint(true),
-		emphasis:  lipgloss.NewStyle().Bold(true),
-		warning:   lipgloss.NewStyle().Bold(true),
-		accent:    lipgloss.NewStyle().Bold(true),
-		keyHint:   lipgloss.NewStyle().Faint(true),
+		mono:       theme.Name == "mono",
+		title:      lipgloss.NewStyle().Bold(true),
+		header:     lipgloss.NewStyle().Bold(true),
+		row:        lipgloss.NewStyle(),
+		selected:   lipgloss.NewStyle().Reverse(true),
+		muted:      lipgloss.NewStyle().Faint(true),
+		estimated:  lipgloss.NewStyle().Faint(true),
+		emphasis:   lipgloss.NewStyle().Bold(true),
+		warning:    lipgloss.NewStyle().Bold(true),
+		accent:     lipgloss.NewStyle().Bold(true),
+		keyHint:    lipgloss.NewStyle().Faint(true),
+		diffAdd:    lipgloss.NewStyle().Bold(true),
+		diffRemove: lipgloss.NewStyle().Faint(true),
 	}
 	if theme.Name != "mono" && lipgloss.ColorProfile() != termenv.Ascii {
 		background := lipgloss.Color(theme.Background)
@@ -139,6 +145,8 @@ func newStyles(selected ...Theme) styles {
 		result.emphasis = result.emphasis.Foreground(lipgloss.Color(theme.Row)).Background(background)
 		result.accent = result.accent.Foreground(lipgloss.Color(theme.Accent)).Background(background)
 		result.keyHint = result.keyHint.Foreground(lipgloss.Color(theme.KeyHint)).Background(background)
+		result.diffAdd = result.diffAdd.Foreground(lipgloss.Color(theme.DiffAdd)).Background(background)
+		result.diffRemove = result.diffRemove.Foreground(lipgloss.Color(theme.DiffRemove)).Background(background)
 	}
 	return result
 }
