@@ -351,7 +351,7 @@ func TestTabSwitchesDetailToSubagents(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "route", Agent: model.AgentClaude}, 80, 12, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 
-	if view := ansi.Strip(detail.view()); !strings.Contains(view, "╭─ Subagents ") {
+	if view := ansi.Strip(detail.view()); detail.tab != tabSubagents || !strings.Contains(view, "╭─ Timeline · Subagents ") {
 		t.Fatalf("tab did not activate the Subagents panel:\n%s", view)
 	}
 }
@@ -627,20 +627,21 @@ func TestSubagentEdgeKeysRestoreViewportEdges(t *testing.T) {
 	}
 }
 
-func TestDetailPanelTitleShowsActiveAndFaintInactiveTab(t *testing.T) {
+func TestDetailPanelTabsStayFixedAndStyleActive(t *testing.T) {
 	profile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
-	detail := newDetailState(&model.Session{ID: "route", Agent: model.AgentClaude}, 80, 12, newStyles(themes["default"]))
+	styleSet := newStyles(themes["default"])
+	detail := newDetailState(&model.Session{ID: "route", Agent: model.AgentClaude}, 80, 12, styleSet)
 
-	timelineTitle := strings.Split(detail.view(), "\n")[5]
-	if !strings.Contains(ansi.Strip(timelineTitle), "Timeline · Subagents") || !strings.Contains(timelineTitle, "\x1b[2;") {
-		t.Fatalf("Timeline title did not show a faint inactive tab: %q", timelineTitle)
+	timeline := detail.tabLabel()
+	if timeline.plain != "Timeline · Subagents" || !strings.HasPrefix(timeline.styled, styleSet.title.Render("Timeline")) || !strings.Contains(timeline.styled, styleSet.muted.Render("Subagents")) {
+		t.Fatalf("Timeline tab label = %#v", timeline)
 	}
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
-	subagentsTitle := strings.Split(detail.view(), "\n")[5]
-	if !strings.Contains(ansi.Strip(subagentsTitle), "Subagents · Timeline") || !strings.Contains(subagentsTitle, "\x1b[2;") {
-		t.Fatalf("Subagents title did not show a faint inactive tab: %q", subagentsTitle)
+	subagents := detail.tabLabel()
+	if subagents.plain != timeline.plain || !strings.HasPrefix(subagents.styled, styleSet.muted.Render("Timeline")) || !strings.Contains(subagents.styled, styleSet.title.Render("Subagents")) {
+		t.Fatalf("Subagents tab label = %#v, want fixed plain order %q", subagents, timeline.plain)
 	}
 }
 

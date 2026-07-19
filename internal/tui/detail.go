@@ -908,14 +908,15 @@ func (d *detailState) compactPanelLabel() panelLabel {
 }
 
 func (d *detailState) tabLabel() panelLabel {
-	active := d.tab.title()
-	inactive := tabSubagents.title()
+	timelineStyle := d.styles.title
+	subagentsStyle := d.styles.muted
 	if d.tab == tabSubagents {
-		inactive = tabTimeline.title()
+		timelineStyle = d.styles.muted
+		subagentsStyle = d.styles.title
 	}
 	return panelLabel{
-		plain:  active + " · " + inactive,
-		styled: d.styles.title.Render(active) + d.styles.title.Render(" · ") + d.styles.muted.Render(inactive),
+		plain:  "Timeline · Subagents",
+		styled: timelineStyle.Render("Timeline") + d.styles.title.Render(" · ") + subagentsStyle.Render("Subagents"),
 	}
 }
 
