@@ -22,6 +22,7 @@ const (
 	listModelWidth     = 13
 	listAgeWidth       = 4
 	listMessagesWidth  = 5
+	listSubagentsWidth = 4
 	listTokensWidth    = 9
 	listCostWidth      = 7
 )
@@ -35,6 +36,7 @@ const (
 	columnModel
 	columnAge
 	columnMessages
+	columnSubagents
 	columnTokens
 	columnCost
 )
@@ -106,10 +108,11 @@ func listColumns(width int) []listColumn {
 		{kind: columnModel, title: "MODEL", width: listModelWidth},
 		{kind: columnAge, title: "AGE", width: listAgeWidth, right: true},
 		{kind: columnMessages, title: "MSGS", width: listMessagesWidth, right: true},
+		{kind: columnSubagents, title: "SUBS", width: listSubagentsWidth, right: true},
 		{kind: columnTokens, title: "TOKENS", width: listTokensWidth, right: true},
 		{kind: columnCost, title: "$", width: listCostWidth, right: true},
 	}
-	for _, kind := range []listColumnKind{columnModel, columnMessages, columnProject, columnAge} {
+	for _, kind := range []listColumnKind{columnModel, columnMessages, columnSubagents, columnProject, columnAge} {
 		if listColumnsWidth(columns) <= width {
 			break
 		}
@@ -198,6 +201,11 @@ func sessionCellWithPresentation(session *model.Session, presentation sessionPre
 		return formatAge(now, session.UpdatedAt)
 	case columnMessages:
 		return compactCount(int64(session.Messages), column.width)
+	case columnSubagents:
+		if presentation.subagentCount == 0 {
+			return ""
+		}
+		return compactCount(int64(presentation.subagentCount), column.width)
 	case columnTokens:
 		return formatPresentedTokens(presentation, column.width)
 	case columnCost:
@@ -212,11 +220,7 @@ func formatTokens(session *model.Session, width int) string {
 }
 
 func formatPresentedTokens(presentation sessionPresentation, width int) string {
-	suffix := ""
-	if count := presentation.subagentCount; count > 0 {
-		suffix = " " + glyphSubagent + compactCount(int64(count), 3)
-	}
-	return compactCount(presentation.usage.TotalTokens(), min(4, max(1, width-ansi.StringWidth(suffix)))) + suffix
+	return compactCount(presentation.usage.TotalTokens(), min(4, max(1, width)))
 }
 
 func sessionIdentity(session *model.Session) string {

@@ -101,7 +101,7 @@ func TestColoredWideListKeepsAccountingCellsVisible(t *testing.T) {
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
 	plain := ansi.Strip(updated.(Model).View())
 
-	for _, want := range []string{"claude", "12m", "42", "$12", "1.0B " + glyphSubagent + "17"} {
+	for _, want := range []string{"claude", "12m", "42", "$12", "1.0B", "17"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("colored row lost %q after ANSI stripping:\n%s", want, plain)
 		}
@@ -198,7 +198,7 @@ func TestHumanTokensUsesCompactTiers(t *testing.T) {
 	}
 }
 
-func TestBillionTokenRowKeepsTwoDigitSubagentIndicator(t *testing.T) {
+func TestBillionTokenRowSplitsTokensAndSubagentColumns(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	subagents := make([]*model.Session, 16)
 	for index := range subagents {
@@ -213,8 +213,8 @@ func TestBillionTokenRowKeepsTwoDigitSubagentIndicator(t *testing.T) {
 	m := NewModel([]*model.Session{session}, nil)
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 8})
 
-	if view := ansi.Strip(updated.(Model).View()); !strings.Contains(view, "1.0B ⑃16") {
-		t.Fatalf("billion-token row truncated subagent indicator:\n%s", view)
+	if view := ansi.Strip(updated.(Model).View()); !strings.Contains(view, "1.0B") || !strings.Contains(view, "16") || strings.Contains(view, glyphSubagent) {
+		t.Fatalf("billion-token row did not split token and subagent counts:\n%s", view)
 	}
 }
 
@@ -576,7 +576,7 @@ func TestMissingPricingIsFlaggedInRowAndFooter(t *testing.T) {
 	m := NewModel([]*model.Session{session}, nil)
 	columns := listColumns(160)
 	modelCell := sessionCell(session, time.Now(), columns[3])
-	costCell := sessionCell(session, time.Now(), columns[7])
+	costCell := sessionCell(session, time.Now(), columns[8])
 	if !strings.Contains(modelCell, "!") || !strings.Contains(costCell, "!") {
 		t.Fatalf("missing-pricing cells = %q / %q, want model and cost warning", modelCell, costCell)
 	}
