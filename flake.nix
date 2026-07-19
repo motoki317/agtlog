@@ -61,7 +61,7 @@
             inherit version;
             src = ./.;
             proxyVendor = true;
-            vendorHash = "sha256-c2fm0haUcHMrXwb/BnvWVw1IJsfElfuzD1S18vyz0vk=";
+            vendorHash = "sha256-2nW6R/hs6Loifz3wJkNiogMllX2sAN0Bo7rPfr/Jmqk=";
             subPackages = [ "cmd/agtlog" ];
             ldflags = [ "-s" "-w" "-X main.version=${version}" ];
             env.CGO_ENABLED = 0;
