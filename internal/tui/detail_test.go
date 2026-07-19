@@ -238,6 +238,9 @@ func TestDetailNavigationSupportsVimEdges(t *testing.T) {
 	if want := len(detail.focusables) - 1; detail.focus != want {
 		t.Fatalf("G focus = %d, want %d", detail.focus, want)
 	}
+	if view := ansi.Strip(detail.view()); !strings.Contains(view, "›   ● claude: The valley is clear") {
+		t.Fatalf("G did not keep the last focusable visible:\n%s", view)
+	}
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	if detail.focus != 0 {
 		t.Fatalf("g focus = %d, want 0", detail.focus)

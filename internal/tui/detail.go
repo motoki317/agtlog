@@ -101,7 +101,7 @@ func (d *detailState) resize(width, height int) {
 	layout := newDetailLayout(d.height)
 	d.viewport.Width = max(1, d.width-2)
 	if layout.compact {
-		d.viewport.Height = max(1, layout.compactPanelHeight-4)
+		d.viewport.Height = max(1, layout.compactPanelHeight-5)
 	} else {
 		d.viewport.Height = max(1, layout.timelineHeight-2)
 	}
