@@ -32,7 +32,7 @@ var (
 func newItemView(event model.Event, agent model.AgentKind, crumbs []string, width, height int, styles styles) *itemView {
 	item := &itemView{
 		event: event, agent: agent, crumbs: append([]string(nil), crumbs...), styles: styles,
-		viewport: viewport.New(max(1, width-2), max(1, height-3)), wrap: true,
+		viewport: newViewport(max(1, width-2), max(1, height-3)), wrap: true,
 	}
 	item.lines = itemEventLines(event, agent)
 	item.resize(width, height)
@@ -60,6 +60,10 @@ func (i *itemView) setWrap(wrap bool) {
 	}
 	i.wrap = wrap
 	i.rebuild()
+}
+
+func (i *itemView) scrollWheel(button tea.MouseButton) {
+	scrollViewport(&i.viewport, button)
 }
 
 func (i *itemView) update(msg tea.Msg) tea.Cmd {
@@ -240,5 +244,5 @@ func itemLabel(event model.Event, agent model.AgentKind) string {
 }
 
 func itemKeyText(width int) string {
-	return fitKeyHints(width, []string{"j/k scroll", "w wrap", "esc back"}, []string{"j/k scroll", "w wrap"})
+	return fitKeyHints(width, []string{"j/k scroll", "w wrap", "esc back", "wheel scroll"}, []string{"wheel scroll", "j/k scroll", "w wrap"})
 }

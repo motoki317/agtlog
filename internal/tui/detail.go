@@ -43,11 +43,14 @@ type renderedRow struct {
 }
 
 type detailLayout struct {
-	headerHeight       int
-	timelineHeight     int
-	keyBarHeight       int
-	compact            bool
-	compactPanelHeight int
+	headerHeight        int
+	timelineHeight      int
+	keyBarHeight        int
+	contentY            int
+	contentHeight       int
+	compact             bool
+	compactPanelHeight  int
+	compactHeaderHeight int
 }
 
 func newDetailLayout(height int) detailLayout {
@@ -57,9 +60,47 @@ func newDetailLayout(height int) detailLayout {
 		if height == 3 {
 			keyBarHeight = 0
 		}
-		return detailLayout{compact: true, compactPanelHeight: height - keyBarHeight, keyBarHeight: keyBarHeight}
+		panelHeight := height - keyBarHeight
+		capacity := max(0, panelHeight-2)
+		headerHeight := min(3, capacity)
+		return detailLayout{
+			compact: true, compactPanelHeight: panelHeight, compactHeaderHeight: headerHeight,
+			keyBarHeight: keyBarHeight, contentY: 1 + headerHeight, contentHeight: capacity - headerHeight,
+		}
 	}
-	return detailLayout{headerHeight: 5, timelineHeight: height - 6, keyBarHeight: 1}
+	headerHeight := 5
+	timelineHeight := height - 6
+	return detailLayout{
+		headerHeight: headerHeight, timelineHeight: timelineHeight, keyBarHeight: 1,
+		contentY: headerHeight + 1, contentHeight: timelineHeight - 2,
+	}
+}
+
+func (d *detailState) rowAtY(y int) (int, bool) {
+	layout := newDetailLayout(d.height)
+	visibleRow := y - layout.contentY
+	if visibleRow < 0 || visibleRow >= layout.contentHeight {
+		return 0, false
+	}
+	renderedIndex := d.viewport.YOffset + visibleRow
+	if renderedIndex < 0 || renderedIndex >= len(d.rendered) {
+		return 0, false
+	}
+	detailIndex := d.rendered[renderedIndex].detailIndex
+	if d.tab == tabSubagents {
+		if detailIndex >= 0 && detailIndex < len(d.subagents) {
+			return detailIndex, true
+		}
+		return 0, false
+	}
+	focus := -1
+	for index, item := range d.focusables {
+		if item.line > detailIndex {
+			break
+		}
+		focus = index
+	}
+	return focus, focus >= 0
 }
 
 type detailFocus struct {
@@ -96,6 +137,21 @@ type flattenedSubagent struct {
 
 const detailPreviewLineCap = 40
 
+func newViewport(width, height int) viewport.Model {
+	view := viewport.New(width, height)
+	view.MouseWheelDelta = mouseWheelRows
+	return view
+}
+
+func scrollViewport(view *viewport.Model, button tea.MouseButton) {
+	switch button {
+	case tea.MouseButtonWheelUp:
+		view.ScrollUp(mouseWheelRows)
+	case tea.MouseButtonWheelDown:
+		view.ScrollDown(mouseWheelRows)
+	}
+}
+
 const (
 	tabTimeline detailTab = iota
 	tabSubagents
@@ -128,7 +184,7 @@ func newDetailStateBase(session *model.Session, width, height int, styles styles
 	if project := terminalText(session.Project, 96); project != "" {
 		state.crumbs = []string{project}
 	}
-	state.viewport = viewport.New(max(1, width-2), max(1, height-8))
+	state.viewport = newViewport(max(1, width-2), max(1, height-8))
 	return state
 }
 
@@ -153,16 +209,16 @@ func (d *detailState) clone() *detailState {
 	return &copy
 }
 
+func (d *detailState) scrollWheel(button tea.MouseButton) {
+	scrollViewport(&d.viewport, button)
+}
+
 func (d *detailState) resize(width, height int) {
 	pinned := d.tab == tabTimeline && len(d.rendered) > 0 && d.pinnedToBottom()
 	d.width, d.height = max(1, width), max(3, height)
 	layout := newDetailLayout(d.height)
 	d.viewport.Width = max(1, d.width-2)
-	if layout.compact {
-		d.viewport.Height = max(1, layout.compactPanelHeight-5)
-	} else {
-		d.viewport.Height = max(1, layout.timelineHeight-2)
-	}
+	d.viewport.Height = max(1, layout.contentHeight)
 	d.rebuild()
 	if pinned {
 		d.viewport.GotoBottom()
@@ -289,6 +345,25 @@ func (d *detailState) moveFocus(direction int, subagentsOnly bool) {
 			return
 		}
 	}
+}
+
+func (d *detailState) selectRow(index int) bool {
+	if d.tab == tabSubagents {
+		alreadySelected := d.subagentSelection == index
+		oldLine := d.selectedLine
+		d.subagentSelection = index
+		d.updateSelection(oldLine, index)
+		return alreadySelected
+	}
+	alreadySelected := d.focus == index
+	oldLine := d.selectedLine
+	d.focus = index
+	d.updateSelection(oldLine, d.focusables[index].line)
+	return alreadySelected
+}
+
+func (d *detailState) selectedExpandable() bool {
+	return d.tab == tabTimeline && len(d.focusables) > 0 && d.focusables[d.focus].expandable
 }
 
 func (d *detailState) rebuildKeeping(key string) {
@@ -758,12 +833,12 @@ func (d *detailState) view() string {
 		detailIndex := d.rendered[rowIndex].detailIndex
 		visible[index] = panelLine{plain: plain, styled: d.styleLine(plain, d.lines[detailIndex], detailIndex == d.selectedLine, d.rendered[rowIndex].first)}
 	}
-	for len(visible) < max(0, timelineHeight-2) {
+	for len(visible) < layout.contentHeight {
 		plain := strings.Repeat(" ", d.viewport.Width)
 		visible = append(visible, panelLine{plain: plain, styled: d.styles.row.Render(plain)})
 	}
-	if len(visible) > max(0, timelineHeight-2) {
-		visible = visible[:timelineHeight-2]
+	if len(visible) > layout.contentHeight {
+		visible = visible[:layout.contentHeight]
 	}
 	hint := ""
 	if len(d.rendered) > d.viewport.Height {
@@ -780,7 +855,7 @@ func (d *detailState) compactView(layout detailLayout) string {
 	headerLines := d.headerPanelLines()
 	content := make([]panelLine, 0, capacity)
 	for _, index := range []int{0, 2, 1} {
-		if len(content) >= capacity {
+		if len(content) >= layout.compactHeaderHeight {
 			break
 		}
 		content = append(content, headerLines[index])
@@ -849,13 +924,13 @@ func detailKeyText(width int, mono bool, tab detailTab) string {
 	if tab == tabTimeline {
 		hints = append(hints, "J/K subagent")
 	}
-	hints = append(hints, "w wrap", "esc back")
+	hints = append(hints, "w wrap", "esc back", "mouse scroll/click")
 	if !mono {
 		hints = append(hints, "t theme")
 	}
 	hints = append(hints, "? help", "q quit")
 	return fitKeyHints(width, hints, []string{
-		"t theme", "? help", "J/K subagent", "j/k scroll", "q quit", "tab tabs", "w wrap", "space toggle", "↵ open",
+		"mouse scroll/click", "t theme", "? help", "J/K subagent", "j/k scroll", "q quit", "tab tabs", "w wrap", "space toggle", "↵ open",
 	})
 }
 

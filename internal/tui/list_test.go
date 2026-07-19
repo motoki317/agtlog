@@ -708,6 +708,158 @@ func TestListNavigationSupportsVimEdges(t *testing.T) {
 	}
 }
 
+func TestListMouseWheelDownScrollsContent(t *testing.T) {
+	sessions := make([]*model.Session, 20)
+	for index := range sessions {
+		sessions[index] = &model.Session{ID: fmt.Sprintf("session-%02d", index), UpdatedAt: time.Unix(int64(20-index), 0)}
+	}
+	m := NewModel(sessions, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = updated.(Model)
+
+	updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	m = updated.(Model)
+
+	if m.listOffset != 3 || m.cursor != 0 {
+		t.Fatalf("wheel down offset=%d cursor=%d, want offset 3 with unchanged selection", m.listOffset, m.cursor)
+	}
+}
+
+func TestListMouseWheelUpScrollsContent(t *testing.T) {
+	sessions := make([]*model.Session, 20)
+	for index := range sessions {
+		sessions[index] = &model.Session{ID: fmt.Sprintf("session-%02d", index), UpdatedAt: time.Unix(int64(20-index), 0)}
+	}
+	m := NewModel(sessions, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = updated.(Model)
+	m.listOffset = 6
+
+	updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp})
+	m = updated.(Model)
+
+	if m.listOffset != 3 || m.cursor != 0 {
+		t.Fatalf("wheel up offset=%d cursor=%d, want offset 3 with unchanged selection", m.listOffset, m.cursor)
+	}
+}
+
+func TestListMouseClickSelectsRow(t *testing.T) {
+	sessions := []*model.Session{
+		{ID: "first", UpdatedAt: time.Unix(2, 0)},
+		{ID: "second", UpdatedAt: time.Unix(1, 0)},
+	}
+	m := NewModel(sessions, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = updated.(Model)
+
+	updated, _ = m.Update(tea.MouseMsg{X: 2, Y: 6, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	m = updated.(Model)
+
+	if m.cursor != 1 || m.screen != screenList {
+		t.Fatalf("click selection cursor=%d screen=%v, want second row on list", m.cursor, m.screen)
+	}
+}
+
+func TestListMouseSecondClickOpensSelectedRow(t *testing.T) {
+	sessions := []*model.Session{
+		{ID: "first", UpdatedAt: time.Unix(2, 0)},
+		{ID: "second", UpdatedAt: time.Unix(1, 0)},
+	}
+	m := NewModel(sessions, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = updated.(Model)
+	click := tea.MouseMsg{X: 2, Y: 6, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}
+	updated, _ = m.Update(click)
+	m = updated.(Model)
+
+	updated, _ = m.Update(click)
+	m = updated.(Model)
+
+	if m.screen != screenDetail || detailStateFromScreen(t, m.detail).session != sessions[1] {
+		t.Fatalf("second click screen=%v detail=%#v, want second session detail", m.screen, m.detail)
+	}
+}
+
+func TestFilteringIgnoresMouseClicksButAllowsWheel(t *testing.T) {
+	sessions := make([]*model.Session, 20)
+	for index := range sessions {
+		sessions[index] = &model.Session{ID: fmt.Sprintf("session-%02d", index), UpdatedAt: time.Unix(int64(20-index), 0)}
+	}
+	m := NewModel(sessions, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updated.(Model)
+
+	updated, _ = m.Update(tea.MouseMsg{X: 2, Y: 7, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	m = updated.(Model)
+	if m.cursor != 0 || m.screen != screenList {
+		t.Fatalf("filter click cursor=%d screen=%v, want unchanged list selection", m.cursor, m.screen)
+	}
+	updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	m = updated.(Model)
+	if m.listOffset != mouseWheelRows {
+		t.Fatalf("filter wheel offset=%d, want %d", m.listOffset, mouseWheelRows)
+	}
+}
+
+func TestListRowAtYMapsCompactSession(t *testing.T) {
+	m := NewModel([]*model.Session{{ID: "route"}}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 7})
+	m = updated.(Model)
+
+	index, ok := m.rowAtY(2)
+	if !ok || index != 0 {
+		t.Fatalf("compact rowAtY(2) = %d, %t, want first session", index, ok)
+	}
+}
+
+func TestCompactListMouseWheelScrollsDisplayedRow(t *testing.T) {
+	sessions := []*model.Session{
+		{ID: "first", Title: "First survey", UpdatedAt: time.Unix(3, 0)},
+		{ID: "second", Title: "Second survey", UpdatedAt: time.Unix(2, 0)},
+		{ID: "third", Title: "Third survey", UpdatedAt: time.Unix(1, 0)},
+	}
+	m := NewModel(sessions, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 7})
+	m = updated.(Model)
+
+	updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	m = updated.(Model)
+
+	index, ok := m.rowAtY(2)
+	if m.cursor != 0 || index != 2 || !ok || !strings.Contains(m.View(), "Third survey") || strings.Contains(m.View(), "First survey") {
+		t.Fatalf("compact wheel cursor=%d row=%d/%t:\n%s", m.cursor, index, ok, m.View())
+	}
+}
+
+func TestListRowAtYHonorsPanelBoundariesAndOffset(t *testing.T) {
+	sessions := make([]*model.Session, 20)
+	for index := range sessions {
+		sessions[index] = &model.Session{ID: fmt.Sprintf("session-%02d", index), UpdatedAt: time.Unix(int64(20-index), 0)}
+	}
+	m := NewModel(sessions, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = updated.(Model)
+	m.listOffset = 3
+
+	for _, test := range []struct {
+		y     int
+		index int
+		ok    bool
+	}{
+		{y: 0}, {y: 2}, {y: 3}, {y: 4},
+		{y: 5, index: 3, ok: true},
+		{y: 7, index: 5, ok: true},
+		{y: 10}, {y: 11},
+	} {
+		index, ok := m.rowAtY(test.y)
+		if index != test.index || ok != test.ok {
+			t.Errorf("rowAtY(%d) = %d, %t, want %d, %t", test.y, index, ok, test.index, test.ok)
+		}
+	}
+}
+
 func TestEscapeReturnsFromDetailToList(t *testing.T) {
 	m := NewModel([]*model.Session{{ID: "lunar", Agent: model.AgentClaude}}, nil)
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})

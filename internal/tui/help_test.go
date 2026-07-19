@@ -12,7 +12,7 @@ import (
 func TestListHelpIncludesEveryRequiredBinding(t *testing.T) {
 	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
 	view := m.helpView()
-	for _, want := range []string{"j/k ↑/↓", "pgup/pgdn page", "home/end/g/G edge", "/ filter", "s sort", "a agent", "enter open", "r refresh", "t theme", "? help", "q/ctrl-c quit"} {
+	for _, want := range []string{"j/k ↑/↓", "pgup/pgdn page", "home/end/g/G edge", "/ filter", "s sort", "a agent", "enter open", "r refresh", "mouse wheel scroll · click select · click again open", "shift+drag terminal copy", "t theme", "? help", "q/ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("list help missing %q:\n%s", want, view)
 		}
@@ -23,7 +23,7 @@ func TestDetailHelpIncludesEveryRequiredBinding(t *testing.T) {
 	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
 	m.screen = screenDetail
 	view := m.helpView()
-	for _, want := range []string{"j/k scroll", "g/G edge", "space toggle", "enter open", "tab tabs", "w wrap", "J/K subagent", "esc/h back", "? help", "ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "space toggle", "enter open", "tab tabs", "w wrap", "J/K subagent", "mouse wheel scroll · click select · click again activate", "esc/h back", "? help", "ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("detail help missing %q:\n%s", want, view)
 		}
@@ -50,7 +50,7 @@ func TestItemHelpIncludesOnlyItemBindings(t *testing.T) {
 	m.screen = screenDetail
 	m.detail = newItemView(model.Event{Kind: model.EventThinking, Text: "Chart route"}, model.AgentClaude, nil, m.width, m.height, m.styles)
 	view := m.helpView()
-	for _, want := range []string{"j/k scroll", "g/G edge", "w wrap", "esc/h/← back", "t theme", "? help", "q/ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "w wrap", "mouse wheel scroll", "esc/h/← back", "t theme", "? help", "q/ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("item help missing %q:\n%s", want, view)
 		}

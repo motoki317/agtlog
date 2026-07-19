@@ -30,6 +30,20 @@ func detailStateFromScreen(t testing.TB, screen detailScreen) *detailState {
 	return detail
 }
 
+func viewLineY(t testing.TB, view, match string, occurrence int) int {
+	t.Helper()
+	for y, line := range strings.Split(ansi.Strip(view), "\n") {
+		if strings.Contains(line, match) {
+			if occurrence == 0 {
+				return y
+			}
+			occurrence--
+		}
+	}
+	t.Fatalf("view has no occurrence %d of %q:\n%s", occurrence, match, ansi.Strip(view))
+	return 0
+}
+
 func (s detailTestSource) Agent() model.AgentKind { return model.AgentClaude }
 func (s detailTestSource) Roots() []string        { return []string{"/workspace"} }
 func (s detailTestSource) Discover(context.Context) ([]string, error) {
@@ -833,6 +847,21 @@ func TestSubagentsKeyBarOmitsTimelineOnlyJumpHint(t *testing.T) {
 	}
 }
 
+func TestWideKeyBarsAdvertiseMouse(t *testing.T) {
+	m := NewModel([]*model.Session{{ID: "route", Agent: model.AgentClaude}}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 12})
+	m = updated.(Model)
+	if keyBar := strings.Split(ansi.Strip(m.View()), "\n")[11]; !strings.Contains(keyBar, "mouse scroll/click") {
+		t.Fatalf("wide list key bar missing mouse hint: %q", keyBar)
+	}
+	if keyBar := detailKeyText(160, false, tabTimeline); !strings.Contains(keyBar, "mouse scroll/click") {
+		t.Fatalf("wide detail key bar missing mouse hint: %q", keyBar)
+	}
+	if keyBar := itemKeyText(160); !strings.Contains(keyBar, "wheel scroll") {
+		t.Fatalf("wide item key bar missing mouse hint: %q", keyBar)
+	}
+}
+
 func TestSpaceOnSubagentDoesNotExpandInline(t *testing.T) {
 	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout", Events: []model.Event{{Kind: model.EventUser, Text: "Inspect the ridge"}}}
 	parent := &model.Session{
@@ -1345,6 +1374,391 @@ func TestDetailTimelineOpensAtNewestEvent(t *testing.T) {
 	}
 	if view := ansi.Strip(detail.view()); !strings.Contains(view, "Newest route confirmed") {
 		t.Fatalf("newest event is not visible on open:\n%s", view)
+	}
+}
+
+func TestDetailMouseWheelDownScrollsTimeline(t *testing.T) {
+	events := make([]model.Event, 20)
+	for index := range events {
+		events[index] = model.Event{Kind: model.EventUser, Text: fmt.Sprintf("Instruction %02d", index)}
+	}
+	m := NewModel([]*model.Session{{ID: "route", Agent: model.AgentCodex, Events: events}}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	detail.viewport.GotoTop()
+	focus, selectedLine, subagentSelection := detail.focus, detail.selectedLine, detail.subagentSelection
+
+	updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	m = updated.(Model)
+
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.viewport.YOffset != mouseWheelRows || detail.focus != focus || detail.selectedLine != selectedLine || detail.subagentSelection != subagentSelection {
+		t.Fatalf("detail wheel down offset=%d focus=%d selected=%d subagent=%d", detail.viewport.YOffset, detail.focus, detail.selectedLine, detail.subagentSelection)
+	}
+}
+
+func TestDetailMouseWheelUpScrollsTimeline(t *testing.T) {
+	events := make([]model.Event, 20)
+	for index := range events {
+		events[index] = model.Event{Kind: model.EventUser, Text: fmt.Sprintf("Instruction %02d", index)}
+	}
+	m := NewModel([]*model.Session{{ID: "route", Agent: model.AgentCodex, Events: events}}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	detail.viewport.SetYOffset(6)
+	focus, selectedLine, subagentSelection := detail.focus, detail.selectedLine, detail.subagentSelection
+
+	updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp})
+	m = updated.(Model)
+
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.viewport.YOffset != 3 || detail.focus != focus || detail.selectedLine != selectedLine || detail.subagentSelection != subagentSelection {
+		t.Fatalf("detail wheel up offset=%d focus=%d selected=%d subagent=%d", detail.viewport.YOffset, detail.focus, detail.selectedLine, detail.subagentSelection)
+	}
+}
+
+func TestDetailMouseWheelModifiersStillScrollVertically(t *testing.T) {
+	events := make([]model.Event, 20)
+	for index := range events {
+		events[index] = model.Event{Kind: model.EventUser, Text: fmt.Sprintf("Instruction %02d", index)}
+	}
+
+	for _, test := range []struct {
+		name  string
+		mouse tea.MouseMsg
+	}{
+		{name: "shift", mouse: tea.MouseMsg{Shift: true}},
+		{name: "alt", mouse: tea.MouseMsg{Alt: true}},
+		{name: "control", mouse: tea.MouseMsg{Ctrl: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m := NewModel([]*model.Session{{ID: "route", Agent: model.AgentCodex, Events: events}}, nil)
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+			m = updated.(Model)
+			updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			m = updated.(Model)
+			detail := detailStateFromScreen(t, m.detail)
+			detail.viewport.GotoTop()
+
+			test.mouse.Action = tea.MouseActionPress
+			test.mouse.Button = tea.MouseButtonWheelDown
+			updated, _ = m.Update(test.mouse)
+			m = updated.(Model)
+
+			if got := detailStateFromScreen(t, m.detail).viewport.YOffset; got != mouseWheelRows {
+				t.Fatalf("modified detail wheel offset = %d, want %d", got, mouseWheelRows)
+			}
+		})
+	}
+}
+
+func TestSubagentsMouseWheelScrollsWithoutChangingSelection(t *testing.T) {
+	children := make([]*model.Session, 12)
+	for index := range children {
+		children[index] = &model.Session{ID: fmt.Sprintf("worker-%02d", index), Agent: model.AgentClaude}
+	}
+	m := NewModel([]*model.Session{{ID: "route", Subagents: children}}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	detail.viewport.GotoTop()
+
+	updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	m = updated.(Model)
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.viewport.YOffset != mouseWheelRows || detail.subagentSelection != 0 || detail.selectedLine != 0 {
+		t.Fatalf("subagents wheel offset=%d selection=%d line=%d", detail.viewport.YOffset, detail.subagentSelection, detail.selectedLine)
+	}
+}
+
+func TestItemMouseWheelScrollsAndClicksDoNothing(t *testing.T) {
+	item := newItemView(model.Event{Kind: model.EventThinking, Text: "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine"}, model.AgentCodex, nil, 80, 8, newStyles())
+	m := NewModel(nil, nil)
+	m.screen = screenDetail
+	m.detail = item
+
+	updated, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	m = updated.(Model)
+	if got := m.detail.(*itemView).viewport.YOffset; got != mouseWheelRows {
+		t.Fatalf("item wheel down offset = %d, want %d", got, mouseWheelRows)
+	}
+	updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft, X: 2, Y: 2})
+	m = updated.(Model)
+	if _, ok := m.detail.(*itemView); !ok || m.detail.(*itemView).viewport.YOffset != mouseWheelRows {
+		t.Fatalf("item click detail=%T offset=%d, want unchanged item", m.detail, m.detail.(*itemView).viewport.YOffset)
+	}
+	updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelUp})
+	m = updated.(Model)
+	if got := m.detail.(*itemView).viewport.YOffset; got != 0 {
+		t.Fatalf("item wheel up offset = %d, want 0", got)
+	}
+}
+
+func TestItemShiftWheelStillScrollsVertically(t *testing.T) {
+	item := newItemView(model.Event{Kind: model.EventThinking, Text: "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine"}, model.AgentCodex, nil, 80, 8, newStyles())
+	m := NewModel(nil, nil)
+	m.screen = screenDetail
+	m.detail = item
+
+	updated, _ := m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown, Shift: true})
+	m = updated.(Model)
+	if got := m.detail.(*itemView).viewport.YOffset; got != mouseWheelRows {
+		t.Fatalf("shift+wheel item offset = %d, want %d", got, mouseWheelRows)
+	}
+}
+
+func TestMouseHotPathAvoidsCloningRenderedTimeline(t *testing.T) {
+	events := make([]model.Event, 2000)
+	for index := range events {
+		events[index] = model.Event{Kind: model.EventUser, Text: fmt.Sprintf("Instruction %04d", index)}
+	}
+	m := NewModel([]*model.Session{{ID: "route", Agent: model.AgentCodex, Events: events}}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	before := detailStateFromScreen(t, m.detail)
+	before.viewport.GotoTop()
+
+	updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionMotion, X: 2, Y: 6})
+	m = updated.(Model)
+	if detailStateFromScreen(t, m.detail) != before {
+		t.Fatal("ignored mouse motion cloned the detail timeline")
+	}
+	updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+	m = updated.(Model)
+	after := detailStateFromScreen(t, m.detail)
+	if after == before || &after.rendered[0] != &before.rendered[0] || after.viewport.YOffset != mouseWheelRows {
+		t.Fatalf("wheel clone detail=%t rows shared=%t offset=%d", after != before, &after.rendered[0] == &before.rendered[0], after.viewport.YOffset)
+	}
+}
+
+func TestDetailMouseClickSelectsTurn(t *testing.T) {
+	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the crater"},
+		{Kind: model.EventAssistantText, Text: "Route prepared"},
+		{Kind: model.EventToolCall, ToolName: "Read", Detail: &model.ToolDetail{Output: "map ready"}},
+	}}
+	m := NewModel([]*model.Session{session}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	target := 1
+	y := viewLineY(t, m.View(), "1 tools", 0)
+
+	updated, _ = m.Update(tea.MouseMsg{X: 2, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
+	m = updated.(Model)
+
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.focus != target || !detail.isExpanded(detail.focusables[target].key) {
+		t.Fatalf("turn click focus=%d expanded=%t, want selected expanded turn", detail.focus, detail.isExpanded(detail.focusables[target].key))
+	}
+}
+
+func TestDetailMouseSecondClickTogglesTurn(t *testing.T) {
+	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the crater"},
+		{Kind: model.EventThinking, Text: "Compare routes"},
+		{Kind: model.EventAssistantText, Text: "Route prepared"},
+	}}
+	m := NewModel([]*model.Session{session}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	target := 1
+	y := viewLineY(t, m.View(), "1 thinking", 0)
+	click := tea.MouseMsg{X: 2, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}
+	updated, _ = m.Update(click)
+	m = updated.(Model)
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.focus != target || !detail.isExpanded(detail.focusables[target].key) {
+		t.Fatalf("first turn click focus=%d expanded=%t, want selected expanded turn", detail.focus, detail.isExpanded(detail.focusables[target].key))
+	}
+
+	updated, _ = m.Update(click)
+	m = updated.(Model)
+
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.isExpanded(detail.focusables[target].key) || m.screen != screenDetail {
+		t.Fatalf("second turn click expanded=%t screen=%v, want collapsed timeline", detail.isExpanded(detail.focusables[target].key), m.screen)
+	}
+}
+
+func TestDetailMouseSecondClickTogglesTool(t *testing.T) {
+	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the crater"},
+		{Kind: model.EventAssistantText, Text: "Route prepared"},
+		{Kind: model.EventToolCall, ToolName: "Read", Detail: &model.ToolDetail{Output: "map ready"}},
+	}}
+	m := NewModel([]*model.Session{session}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	target := len(detail.focusables) - 1
+	y := viewLineY(t, m.View(), "Read", 0)
+	click := tea.MouseMsg{X: 2, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}
+	updated, _ = m.Update(click)
+	m = updated.(Model)
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.focus != target || !detail.isExpanded(detail.focusables[target].key) {
+		t.Fatalf("first tool click focus=%d expanded=%t, want selected expanded tool", detail.focus, detail.isExpanded(detail.focusables[target].key))
+	}
+	updated, _ = m.Update(click)
+	m = updated.(Model)
+
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.isExpanded(detail.focusables[detail.focus].key) || detail.focusables[detail.focus].event.Kind != model.EventToolCall {
+		t.Fatalf("second tool click focus=%#v expanded=%t, want collapsed tool", detail.focusables[detail.focus], detail.isExpanded(detail.focusables[detail.focus].key))
+	}
+}
+
+func TestDetailMouseSecondClickOpensPlainEvent(t *testing.T) {
+	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the crater"},
+		{Kind: model.EventAssistantText, Text: "Route prepared"},
+	}}
+	m := NewModel([]*model.Session{session}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	target := len(detail.focusables) - 1
+	y := viewLineY(t, m.View(), "Route prepared", 1)
+	click := tea.MouseMsg{X: 2, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}
+	updated, _ = m.Update(click)
+	m = updated.(Model)
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.focus != target || detail.session != session || len(m.detailStack) != 0 {
+		t.Fatalf("first plain-event click focus=%d session=%q stack=%d", detail.focus, detail.session.ID, len(m.detailStack))
+	}
+
+	updated, _ = m.Update(click)
+	m = updated.(Model)
+
+	item, ok := m.detail.(*itemView)
+	if !ok || item.event.Kind != model.EventAssistantText {
+		t.Fatalf("second plain-event click detail=%T event=%v, want assistant item", m.detail, item)
+	}
+}
+
+func TestSubagentsMouseSecondClickDrillsIntoSelectedRow(t *testing.T) {
+	first := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge"}
+	second := &model.Session{ID: "mapper", Agent: model.AgentCodex, Title: "Map crater"}
+	root := &model.Session{ID: "route", Agent: model.AgentClaude, Subagents: []*model.Session{first, second}}
+	m := NewModel([]*model.Session{root}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	y := viewLineY(t, m.View(), "Map crater", 0)
+	click := tea.MouseMsg{X: 2, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}
+	updated, _ = m.Update(click)
+	m = updated.(Model)
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.subagentSelection != 1 || detail.session != root || len(m.detailStack) != 0 {
+		t.Fatalf("first subagents click selection=%d session=%q stack=%d", detail.subagentSelection, detail.session.ID, len(m.detailStack))
+	}
+
+	updated, _ = m.Update(click)
+	m = updated.(Model)
+
+	if detailStateFromScreen(t, m.detail).session != second || len(m.detailStack) != 1 {
+		t.Fatalf("second subagents click detail=%q stack=%d, want mapper over root", detailStateFromScreen(t, m.detail).session.ID, len(m.detailStack))
+	}
+}
+
+func TestTimelineMouseSecondClickDrillsIntoSubagentRow(t *testing.T) {
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge"}
+	root := &model.Session{ID: "route", Agent: model.AgentCodex, Subagents: []*model.Session{child}, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the crater"},
+		{Kind: model.EventSubagent, Subagent: child},
+	}}
+	m := NewModel([]*model.Session{root}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	target := len(detail.focusables) - 1
+	y := viewLineY(t, m.View(), "Task(Scout ridge)", 0)
+	click := tea.MouseMsg{X: 2, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}
+	updated, _ = m.Update(click)
+	m = updated.(Model)
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.focus != target || detail.session != root || len(m.detailStack) != 0 {
+		t.Fatalf("first timeline subagent click focus=%d session=%q stack=%d", detail.focus, detail.session.ID, len(m.detailStack))
+	}
+	updated, _ = m.Update(click)
+	m = updated.(Model)
+
+	if detailStateFromScreen(t, m.detail).session != child || len(m.detailStack) != 1 {
+		t.Fatalf("second timeline subagent click detail=%q stack=%d, want scout over root", detailStateFromScreen(t, m.detail).session.ID, len(m.detailStack))
+	}
+}
+
+func TestDetailRowAtYMapsCompactTimeline(t *testing.T) {
+	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the crater"},
+		{Kind: model.EventAssistantText, Text: "Route prepared"},
+	}}
+	detail := newDetailState(session, 80, 8, newStyles())
+	detail.viewport.GotoTop()
+
+	index, ok := detail.rowAtY(4)
+	if !ok || index != 0 {
+		t.Fatalf("compact detail rowAtY(4) = %d, %t, want first focusable", index, ok)
+	}
+}
+
+func TestDetailRowAtYHonorsPanelBoundariesAndOffset(t *testing.T) {
+	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the crater"},
+		{Kind: model.EventAssistantText, Text: "Route prepared"},
+		{Kind: model.EventToolCall, ToolName: "Read", Detail: &model.ToolDetail{Output: "one\ntwo\nthree\nfour\nfive"}},
+	}}
+	detail := newDetailState(session, 80, 12, newStyles())
+	detail.viewport.SetYOffset(4)
+
+	for _, test := range []struct {
+		y     int
+		index int
+		ok    bool
+	}{
+		{y: 0}, {y: 4}, {y: 5},
+		{y: 6, index: 3, ok: true},
+		{y: 9, index: 3, ok: true},
+		{y: 10}, {y: 11},
+	} {
+		index, ok := detail.rowAtY(test.y)
+		if index != test.index || ok != test.ok {
+			t.Errorf("rowAtY(%d) = %d, %t, want %d, %t", test.y, index, ok, test.index, test.ok)
+		}
 	}
 }
 

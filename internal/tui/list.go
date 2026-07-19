@@ -68,6 +68,7 @@ type listLayout struct {
 	sessionsHeight     int
 	keyBarHeight       int
 	rowCapacity        int
+	sessionRowsY       int
 	compact            bool
 	compactPanelHeight int
 }
@@ -88,13 +89,37 @@ func newListLayout(height int, filtering bool) listLayout {
 		if panelHeight >= 4 {
 			rowCapacity = 1
 		}
-		return listLayout{compact: true, compactPanelHeight: panelHeight, keyBarHeight: keyBarHeight, rowCapacity: rowCapacity}
+		sessionRowsY := 2
+		if filtering {
+			sessionRowsY++
+		}
+		return listLayout{compact: true, compactPanelHeight: panelHeight, keyBarHeight: keyBarHeight, rowCapacity: rowCapacity, sessionRowsY: sessionRowsY}
 	}
 	sessionsHeight := height - contextHeight - 1
 	return listLayout{
 		contextHeight: contextHeight, sessionsHeight: sessionsHeight, keyBarHeight: 1,
-		rowCapacity: max(0, sessionsHeight-3),
+		rowCapacity: max(0, sessionsHeight-3), sessionRowsY: contextHeight + 2,
 	}
+}
+
+func (m Model) rowAtY(y int) (int, bool) {
+	layout := newListLayout(m.height, m.filtering)
+	if layout.compact {
+		if y != layout.sessionRowsY || layout.sessionRowsY >= layout.compactPanelHeight-1 || layout.rowCapacity == 0 || len(m.visible) == 0 {
+			return 0, false
+		}
+		return m.compactListIndex(), true
+	}
+	row := y - layout.sessionRowsY
+	index := m.listOffset + row
+	if row < 0 || row >= layout.rowCapacity || index < 0 || index >= len(m.visible) {
+		return 0, false
+	}
+	return index, true
+}
+
+func (m Model) compactListIndex() int {
+	return max(0, min(m.listOffset, len(m.visible)-1))
 }
 
 func listColumns(width int) []listColumn {
@@ -444,7 +469,8 @@ func (m Model) compactListView(layout listLayout) string {
 	if len(content) < layout.compactPanelHeight-2 {
 		if len(m.visible) > 0 {
 			columns := listColumns(innerWidth)
-			content = append(content, renderSessionPanelLine(m.visible[min(m.cursor, len(m.visible)-1)], m.now(), columns, innerWidth, true, m.styles))
+			index := m.compactListIndex()
+			content = append(content, renderSessionPanelLine(m.visible[index], m.now(), columns, innerWidth, index == m.cursor, m.styles))
 		} else {
 			plain := fitPlain("No sessions found.", innerWidth, false)
 			content = append(content, panelLine{plain: plain, styled: m.styles.muted.Render(plain)})
@@ -592,11 +618,12 @@ func styleSessionCell(cell string, session *model.Session, presentation sessionP
 }
 
 func (m Model) renderKeyBar() string {
-	plain := "/ filter   s sort   a agent   ↵ open   r refresh"
+	hints := []string{"/ filter", "s sort", "a agent", "↵ open", "r refresh", "mouse scroll/click"}
 	if !m.styles.mono {
-		plain += "   t theme"
+		hints = append(hints, "t theme")
 	}
-	plain += "   ? help   q quit"
+	hints = append(hints, "? help", "q quit")
+	plain := fitKeyHints(m.width, hints, []string{"mouse scroll/click", "t theme", "r refresh", "a agent", "s sort", "/ filter", "? help", "q quit", "↵ open"})
 	return m.styles.keyHint.Render(fitPlain(plain, m.width, false))
 }
 

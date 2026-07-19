@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/motoki317/agtlog/internal/model"
 	"github.com/motoki317/agtlog/internal/source"
 	"github.com/motoki317/agtlog/internal/tui"
@@ -383,6 +384,33 @@ func TestBubbleTeaRunnerPrintsEverySessionOffTerminal(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "Survey 00") || !strings.Contains(output.String(), "Survey 19") {
 		t.Fatalf("static output omitted sessions:\n%s", output.String())
+	}
+}
+
+type quittingTeaModel struct{}
+
+func (quittingTeaModel) Init() tea.Cmd                       { return tea.Quit }
+func (quittingTeaModel) Update(tea.Msg) (tea.Model, tea.Cmd) { return quittingTeaModel{}, nil }
+func (quittingTeaModel) View() string                        { return "" }
+
+func TestInteractiveProgramEnablesMouseCellMotion(t *testing.T) {
+	var output bytes.Buffer
+	program := newBubbleTeaProgram(context.Background(), nil, &output, quittingTeaModel{})
+	if _, err := program.Run(); err != nil {
+		t.Fatal(err)
+	}
+	for _, sequences := range [][2]string{
+		{"\x1b[?1002h", "\x1b[?1002l"},
+		{"\x1b[?1006h", "\x1b[?1006l"},
+	} {
+		enabledAt := strings.Index(output.String(), sequences[0])
+		disabledAt := strings.Index(output.String(), sequences[1])
+		if enabledAt < 0 || disabledAt <= enabledAt {
+			t.Fatalf("interactive output %q does not balance mouse sequences %q", output.String(), sequences)
+		}
+	}
+	if strings.Contains(output.String(), "\x1b[?1003h") {
+		t.Fatalf("interactive output %q enabled all-motion mouse reporting", output.String())
 	}
 }
 

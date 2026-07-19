@@ -17,6 +17,7 @@ import (
 
 type detailScreen interface {
 	update(tea.Msg) tea.Cmd
+	scrollWheel(tea.MouseButton)
 	view() string
 	resize(width, height int)
 	setWrap(bool)
@@ -55,6 +56,8 @@ type Model struct {
 type screen int
 
 type ageTickMsg struct{}
+
+const mouseWheelRows = 3
 
 const (
 	screenList screen = iota
@@ -125,7 +128,19 @@ func nextAgeTick() tea.Cmd {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	if m.detail != nil {
+	if mouse, ok := msg.(tea.MouseMsg); ok {
+		if m.helpOpen || (!isMouseWheel(mouse) && !isLeftMouseRelease(mouse)) {
+			return m, nil
+		}
+		if _, item := m.detail.(*itemView); item && isLeftMouseRelease(mouse) {
+			return m, nil
+		}
+		if m.detail != nil && isMouseWheel(mouse) {
+			m.detail = cloneDetailScreenForScroll(m.detail)
+		} else if m.detail != nil {
+			m.detail = cloneDetailScreen(m.detail)
+		}
+	} else if m.detail != nil {
 		m.detail = cloneDetailScreen(m.detail)
 	}
 	if _, ok := msg.(ageTickMsg); ok {
@@ -206,6 +221,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+	if mouse, ok := msg.(tea.MouseMsg); ok {
+		if m.screen == screenDetail {
+			return m, m.updateDetailMouse(mouse)
+		}
+		if m.screen == screenList && isMouseWheel(mouse) {
+			switch mouse.Button {
+			case tea.MouseButtonWheelUp:
+				m.listOffset = max(0, m.listOffset-mouseWheelRows)
+			case tea.MouseButtonWheelDown:
+				maxOffset := max(0, len(m.visible)-m.listRowCapacity())
+				m.listOffset = min(m.listOffset+mouseWheelRows, maxOffset)
+			}
+		}
+		if m.screen == screenList && !m.filtering && isLeftMouseRelease(mouse) && mouse.X > 0 && mouse.X < m.width-1 {
+			if index, ok := m.rowAtY(mouse.Y); ok {
+				alreadySelected := index == m.cursor
+				m.cursor = index
+				m.filterSelection = m.selectedIdentity()
+				if alreadySelected {
+					return m, m.openListSelection()
+				}
+			}
+		}
+		return m, nil
+	}
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		if key.Matches(keyMsg, m.keys.Quit) && (!m.filtering || keyMsg.String() == "ctrl+c") {
 			return m, tea.Quit
@@ -237,39 +277,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "enter" || key.String() == "right" || key.String() == "l") {
-			if detail, ok := m.detail.(*detailState); ok {
-				if subagent := detail.focusedSubagent(); subagent != nil {
-					wrap := detail.wrap
-					crumbs := append([]string(nil), detail.crumbs...)
-					if label := detailCrumbLabel(detail.session); label != "" {
-						crumbs = append(crumbs, label)
-					}
-					if detail.tab == tabSubagents {
-						crumbs = append(crumbs, subagentCrumbLabels(detail.session, subagent)...)
-					}
-					m.detailStack = append(m.detailStack, m.detail)
-					child := newDetailStateBase(subagent, m.width, m.height, m.styles)
-					child.crumbs = crumbs
-					child.defaultExpanded = detail.defaultExpanded
-					child.wrap = wrap
-					child.focus = -1
-					child.resize(m.width, m.height)
-					child.viewport.GotoBottom()
-					m.detail = child
-					return m, nil
-				}
-				if event, exists := detail.focusedEvent(); exists {
-					crumbs := append([]string(nil), detail.crumbs...)
-					if label := detailCrumbLabel(detail.session); label != "" {
-						crumbs = append(crumbs, label)
-					}
-					m.detailStack = append(m.detailStack, m.detail)
-					item := newItemView(event, detail.session.Agent, crumbs, m.width, m.height, m.styles)
-					item.focusKey = detail.focusables[detail.focus].key
-					item.setWrap(detail.wrap)
-					m.detail = item
-					return m, nil
-				}
+			if m.activateDetailSelection() {
+				return m, nil
 			}
 		}
 		return m, m.detail.update(msg)
@@ -308,19 +317,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cycleTheme()
 		return m, nil
 	}
-	if key, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.String() == "enter" && len(m.visible) > 0 {
-		index := min(m.cursor, len(m.visible)-1)
-		m.screen = screenDetail
-		m.detailStack = nil
-		detail := newDetailState(m.visible[index], m.width, m.height, m.styles)
-		m.detail = detail
-		if m.registry != nil {
-			detail.loading = true
-			detail.rebuild()
-			m.detailGeneration++
-			return m, loadDetail(m.ctx, m.registry, m.visible[index], m.detailGeneration)
-		}
-		return m, nil
+	if key, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.String() == "enter" {
+		return m, m.openListSelection()
 	}
 	if m.filtering {
 		if keyMsg, ok := msg.(tea.KeyMsg); ok {
@@ -366,6 +364,95 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+func isLeftMouseRelease(mouse tea.MouseMsg) bool {
+	return mouse.Action == tea.MouseActionRelease && mouse.Button == tea.MouseButtonLeft
+}
+
+func isMouseWheel(mouse tea.MouseMsg) bool {
+	return tea.MouseEvent(mouse).IsWheel()
+}
+
+func (m *Model) updateDetailMouse(mouse tea.MouseMsg) tea.Cmd {
+	if isMouseWheel(mouse) {
+		m.detail.scrollWheel(mouse.Button)
+		return nil
+	}
+	detail, ok := m.detail.(*detailState)
+	if !ok || !isLeftMouseRelease(mouse) || mouse.X <= 0 || mouse.X >= m.width-1 {
+		return nil
+	}
+	index, ok := detail.rowAtY(mouse.Y)
+	if !ok {
+		return nil
+	}
+	if !detail.selectRow(index) {
+		return nil
+	}
+	if detail.selectedExpandable() {
+		return detail.update(tea.KeyMsg{Type: tea.KeySpace})
+	}
+	m.activateDetailSelection()
+	return nil
+}
+
+func (m *Model) activateDetailSelection() bool {
+	detail, ok := m.detail.(*detailState)
+	if !ok {
+		return false
+	}
+	if subagent := detail.focusedSubagent(); subagent != nil {
+		wrap := detail.wrap
+		crumbs := append([]string(nil), detail.crumbs...)
+		if label := detailCrumbLabel(detail.session); label != "" {
+			crumbs = append(crumbs, label)
+		}
+		if detail.tab == tabSubagents {
+			crumbs = append(crumbs, subagentCrumbLabels(detail.session, subagent)...)
+		}
+		m.detailStack = append(m.detailStack, m.detail)
+		child := newDetailStateBase(subagent, m.width, m.height, m.styles)
+		child.crumbs = crumbs
+		child.defaultExpanded = detail.defaultExpanded
+		child.wrap = wrap
+		child.focus = -1
+		child.resize(m.width, m.height)
+		child.viewport.GotoBottom()
+		m.detail = child
+		return true
+	}
+	if event, exists := detail.focusedEvent(); exists {
+		crumbs := append([]string(nil), detail.crumbs...)
+		if label := detailCrumbLabel(detail.session); label != "" {
+			crumbs = append(crumbs, label)
+		}
+		m.detailStack = append(m.detailStack, m.detail)
+		item := newItemView(event, detail.session.Agent, crumbs, m.width, m.height, m.styles)
+		item.focusKey = detail.focusables[detail.focus].key
+		item.setWrap(detail.wrap)
+		m.detail = item
+		return true
+	}
+	return false
+}
+
+func (m *Model) openListSelection() tea.Cmd {
+	if len(m.visible) == 0 {
+		return nil
+	}
+	index := min(m.cursor, len(m.visible)-1)
+	m.screen = screenDetail
+	m.detailStack = nil
+	detail := newDetailState(m.visible[index], m.width, m.height, m.styles)
+	m.detail = detail
+	if m.registry == nil {
+		return nil
+	}
+	detail.loading = true
+	detail.rebuild()
+	m.detailGeneration++
+	return loadDetail(m.ctx, m.registry, m.visible[index], m.detailGeneration)
 }
 
 func detailCrumbLabel(session *model.Session) string {
@@ -444,6 +531,19 @@ func cloneDetailScreen(screen detailScreen) detailScreen {
 		return screen.clone()
 	case *itemView:
 		return screen.clone()
+	default:
+		return screen
+	}
+}
+
+func cloneDetailScreenForScroll(screen detailScreen) detailScreen {
+	switch screen := screen.(type) {
+	case *detailState:
+		copy := *screen
+		return &copy
+	case *itemView:
+		copy := *screen
+		return &copy
 	default:
 		return screen
 	}

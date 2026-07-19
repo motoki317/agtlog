@@ -242,7 +242,7 @@ func runBubbleTea(ctx context.Context, input io.Reader, output io.Writer, initia
 		_, err := fmt.Fprintln(output, ansi.Strip(initial.StaticView()))
 		return err
 	}
-	program := tea.NewProgram(initial, tea.WithAltScreen(), tea.WithContext(ctx), tea.WithInput(input), tea.WithOutput(output))
+	program := newBubbleTeaProgram(ctx, input, output, initial)
 	done := make(chan struct{})
 	var group sync.WaitGroup
 	if updates != nil {
@@ -266,6 +266,10 @@ func runBubbleTea(ctx context.Context, input io.Reader, output io.Writer, initia
 	close(done)
 	group.Wait()
 	return err
+}
+
+func newBubbleTeaProgram(ctx context.Context, input io.Reader, output io.Writer, initial tea.Model) *tea.Program {
+	return tea.NewProgram(initial, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx), tea.WithInput(input), tea.WithOutput(output))
 }
 
 func terminalField(value string, maxRunes int) string {
