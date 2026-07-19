@@ -192,6 +192,27 @@ func TestSubagentColumnUsesAccentStyle(t *testing.T) {
 	}
 }
 
+func TestSubagentCellIsBlankRecursiveAndCompact(t *testing.T) {
+	nested := &model.Session{ID: "parent", Subagents: []*model.Session{{ID: "child", Subagents: []*model.Session{{ID: "grandchild"}}}}}
+	tests := []struct {
+		name         string
+		presentation sessionPresentation
+		want         string
+	}{
+		{name: "none", presentation: sessionPresentation{}, want: ""},
+		{name: "recursive", presentation: newSessionPresentation(nested), want: "2"},
+		{name: "compact", presentation: sessionPresentation{subagentCount: 12_345}, want: "12k"},
+	}
+	column := listColumn{kind: columnSubagents, width: listSubagentsWidth, right: true}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := sessionCellWithPresentation(&model.Session{}, test.presentation, time.Time{}, column); got != test.want {
+				t.Fatalf("subagent cell = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestHumanTokensUsesCompactTiers(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -274,6 +295,28 @@ func TestListColumnsFillWidthAndDropLowValueFieldsInOrder(t *testing.T) {
 	}
 	if wide[1].kind != columnProject || wide[1].width != listProjectCap || wide[2].kind != columnTitle || wide[2].width <= listTitlePreferred {
 		t.Fatalf("wide flex columns = %#v, want capped project and slack-absorbing title", wide)
+	}
+	boundaries := []struct {
+		width int
+		want  []listColumnKind
+	}{
+		{width: 84, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnModel, columnAge, columnMessages, columnSubagents, columnTokens, columnCost}},
+		{width: 83, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnAge, columnMessages, columnSubagents, columnTokens, columnCost}},
+		{width: 69, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnAge, columnSubagents, columnTokens, columnCost}},
+		{width: 63, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnAge, columnTokens, columnCost}},
+		{width: 58, want: []listColumnKind{columnAgent, columnTitle, columnAge, columnTokens, columnCost}},
+		{width: 49, want: []listColumnKind{columnAgent, columnTitle, columnTokens, columnCost}},
+	}
+	for _, boundary := range boundaries {
+		columns := listColumns(boundary.width)
+		if got := listColumnsWidth(columns); got != boundary.width || len(columns) != len(boundary.want) {
+			t.Fatalf("columns at width %d = %#v (width %d), want %v", boundary.width, columns, got, boundary.want)
+		}
+		for index := range boundary.want {
+			if columns[index].kind != boundary.want[index] {
+				t.Fatalf("column %d at width %d = %v, want %v", index, boundary.width, columns[index].kind, boundary.want[index])
+			}
+		}
 	}
 
 	narrow := listColumns(58)

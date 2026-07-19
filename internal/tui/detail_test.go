@@ -238,12 +238,21 @@ func TestDetailNavigationSupportsVimEdges(t *testing.T) {
 	if want := len(detail.focusables) - 1; detail.focus != want {
 		t.Fatalf("G focus = %d, want %d", detail.focus, want)
 	}
+	if want := detail.focusables[detail.focus].line; detail.selectedLine != want || detail.viewport.YOffset == 0 || want < detail.viewport.YOffset || want >= detail.viewport.YOffset+detail.viewport.Height {
+		t.Fatalf("G selection line=%d offset=%d height=%d, want visible line %d below top", detail.selectedLine, detail.viewport.YOffset, detail.viewport.Height, want)
+	}
 	if view := ansi.Strip(detail.view()); !strings.Contains(view, "›   ● claude: The valley is clear") {
 		t.Fatalf("G did not keep the last focusable visible:\n%s", view)
 	}
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	if detail.focus != 0 {
 		t.Fatalf("g focus = %d, want 0", detail.focus)
+	}
+	if want := detail.focusables[detail.focus].line; detail.selectedLine != want || detail.viewport.YOffset != 0 {
+		t.Fatalf("g selection line=%d offset=%d, want line %d at top", detail.selectedLine, detail.viewport.YOffset, want)
+	}
+	if view := ansi.Strip(detail.view()); !strings.Contains(view, "› ▸ you: Survey the ridge") {
+		t.Fatalf("g did not keep the first focusable visible:\n%s", view)
 	}
 }
 
