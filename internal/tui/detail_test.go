@@ -226,6 +226,24 @@ func TestDetailScrollVisitsExpandedToolRows(t *testing.T) {
 	}
 }
 
+func TestDetailNavigationSupportsVimEdges(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the ridge"},
+		{Kind: model.EventAssistantText, Text: "The ridge is clear"},
+		{Kind: model.EventUser, Text: "Survey the valley"},
+		{Kind: model.EventAssistantText, Text: "The valley is clear"},
+	}}
+	detail := newDetailState(session, 80, 8, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	if want := len(detail.focusables) - 1; detail.focus != want {
+		t.Fatalf("G focus = %d, want %d", detail.focus, want)
+	}
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if detail.focus != 0 {
+		t.Fatalf("g focus = %d, want 0", detail.focus)
+	}
+}
+
 func TestCloneSessionRebindsSubagentEvents(t *testing.T) {
 	child := &model.Session{ID: "scout"}
 	parent := &model.Session{ID: "root", Subagents: []*model.Session{child}, Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}}}

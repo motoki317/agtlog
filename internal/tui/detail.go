@@ -120,6 +120,18 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		d.moveFocus(1, false)
 	case "k", "up":
 		d.moveFocus(-1, false)
+	case "g":
+		if len(d.focusables) > 0 {
+			oldLine := d.focusables[d.focus].line
+			d.focus = 0
+			d.updateSelection(oldLine, d.focusables[d.focus].line)
+		}
+	case "G":
+		if len(d.focusables) > 0 {
+			oldLine := d.focusables[d.focus].line
+			d.focus = len(d.focusables) - 1
+			d.updateSelection(oldLine, d.focusables[d.focus].line)
+		}
 	case "J":
 		d.moveFocus(1, true)
 	case "K":
