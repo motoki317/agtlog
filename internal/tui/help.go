@@ -3,7 +3,7 @@ package tui
 func (m Model) helpView() string {
 	lines := []string{
 		"j/k ↑/↓ move · / filter",
-		"pgup/pgdn page · home/end edge",
+		"pgup/pgdn page · home/end/g/G edge",
 		"s sort · a agent",
 		"enter open · r refresh",
 		"? help · q/ctrl-c quit",

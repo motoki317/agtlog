@@ -11,7 +11,7 @@ import (
 func TestListHelpIncludesEveryRequiredBinding(t *testing.T) {
 	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
 	view := m.helpView()
-	for _, want := range []string{"j/k ↑/↓", "pgup/pgdn page", "home/end edge", "/ filter", "s sort", "a agent", "enter open", "r refresh", "t theme", "? help", "q/ctrl-c quit"} {
+	for _, want := range []string{"j/k ↑/↓", "pgup/pgdn page", "home/end/g/G edge", "/ filter", "s sort", "a agent", "enter open", "r refresh", "t theme", "? help", "q/ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("list help missing %q:\n%s", want, view)
 		}
