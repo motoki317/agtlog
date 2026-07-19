@@ -1,0 +1,29 @@
+name: Update pricing
+
+on:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - uses: extractions/setup-just@v3
+      - run: just update-pricing
+      - run: just test
+      - uses: peter-evans/create-pull-request@v8
+        with:
+          branch: automation/update-pricing
+          commit-message: "chore(cost): update LiteLLM pricing"
+          title: "chore(cost): update LiteLLM pricing"
+          body: "Refresh the embedded LiteLLM pricing snapshot from the canonical upstream table."
+          delete-branch: true
