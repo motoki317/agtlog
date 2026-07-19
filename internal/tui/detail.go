@@ -39,6 +39,7 @@ type detailState struct {
 type renderedRow struct {
 	detailIndex int
 	text        string
+	first       bool
 }
 
 type detailLayout struct {
@@ -72,6 +73,7 @@ type detailFocus struct {
 
 type detailLine struct {
 	text            string
+	label           string
 	key             string
 	expandable      bool
 	subagent        bool
@@ -103,6 +105,8 @@ const (
 	detailRow detailRole = iota
 	detailAccent
 	detailAssistant
+	detailUserPrompt
+	detailSystemPrompt
 	detailTool
 	detailSecondary
 	detailWarning
@@ -415,9 +419,9 @@ func (d *detailState) rebuildRendered() {
 		if d.wrap && ansi.StringWidth(plain) > d.viewport.Width {
 			rows = strings.Split(ansi.Hardwrap(plain, d.viewport.Width, true), "\n")
 		}
-		for _, row := range rows {
+		for rowIndex, row := range rows {
 			row = fitPlain(row, d.viewport.Width, false)
-			d.rendered = append(d.rendered, renderedRow{detailIndex: detailIndex, text: row})
+			d.rendered = append(d.rendered, renderedRow{detailIndex: detailIndex, text: row, first: rowIndex == 0})
 			content = append(content, row)
 		}
 	}
@@ -446,7 +450,8 @@ func (d *detailState) sessionLines(session *model.Session, indent int, path stri
 		event := session.Events[index]
 		if event.Kind == model.EventUser {
 			key := fmt.Sprintf("%s/user/%d", path, index)
-			lines = append(lines, detailLine{text: strings.Repeat(" ", indent) + glyphCollapsed + " you: " + firstLine(event.Text), key: key, role: detailAccent, event: event})
+			label := glyphCollapsed + " you:"
+			lines = append(lines, detailLine{text: strings.Repeat(" ", indent) + label + " " + firstLine(event.Text), label: label, key: key, role: detailUserPrompt, event: event})
 			index++
 			continue
 		}
@@ -457,7 +462,8 @@ func (d *detailState) sessionLines(session *model.Session, indent int, path stri
 		turn := session.Events[start:index]
 		key := fmt.Sprintf("%s/turn/%d", path, start)
 		expanded := d.isExpanded(key)
-		lines = append(lines, detailLine{text: d.turnSummary(session, turn, indent, expanded), key: key, expandable: turnExpandable(turn), role: detailAssistant, agent: session.Agent, event: turnItemEvent(turn)})
+		label := glyphAssistant + " " + terminalText(string(session.Agent), 32) + ":"
+		lines = append(lines, detailLine{text: d.turnSummary(session, turn, indent, expanded), label: label, key: key, expandable: turnExpandable(turn), role: detailAssistant, agent: session.Agent, event: turnItemEvent(turn)})
 		if expanded {
 			for eventIndex, item := range turn {
 				lines = append(lines, d.eventLines(session, item, indent+2, fmt.Sprintf("%s/event/%d", key, eventIndex))...)
@@ -523,7 +529,8 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 	padding := strings.Repeat(" ", indent)
 	switch event.Kind {
 	case model.EventAssistantText:
-		return []detailLine{{text: padding + terminalText(string(session.Agent), 32) + ": " + firstLine(event.Text), key: key, role: detailAssistant, agent: session.Agent, event: event}}
+		label := terminalText(string(session.Agent), 32) + ":"
+		return []detailLine{{text: padding + label + " " + firstLine(event.Text), label: label, key: key, role: detailAssistant, agent: session.Agent, event: event}}
 	case model.EventThinking:
 		return []detailLine{{text: padding + glyphSecondary + " thinking: " + firstLine(event.Text), key: key, role: detailSecondary, event: event}}
 	case model.EventToolCall:
@@ -540,9 +547,9 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 		label = ansi.Truncate(label, 28, "…")
 		return []detailLine{{text: padding + glyphSubagent + " Task(" + label + ") " + terminalText(shortModels(event.Subagent), 96) + " · " + humanTokens(event.Subagent.TotalUsage().TotalTokens()) + " · " + formatCost(event.Subagent.TotalCost()), key: childKey, subagent: true, subagentSession: event.Subagent, role: detailAccent, event: event}}
 	case model.EventCompact:
-		return []detailLine{{text: padding + glyphSecondary + " compact: " + firstLine(event.Text), key: key, role: detailSecondary, event: event}}
+		return []detailLine{{text: padding + glyphSecondary + " compact: " + firstLine(event.Text), key: key, role: detailSystemPrompt, event: event}}
 	case model.EventSystem:
-		return []detailLine{{text: padding + glyphSecondary + " " + firstLine(event.Text), key: key, role: detailSecondary, event: event}}
+		return []detailLine{{text: padding + glyphSecondary + " " + firstLine(event.Text), key: key, role: detailSystemPrompt, event: event}}
 	default:
 		return nil
 	}
@@ -749,7 +756,7 @@ func (d *detailState) view() string {
 			continue
 		}
 		detailIndex := d.rendered[rowIndex].detailIndex
-		visible[index] = panelLine{plain: plain, styled: d.styleLine(plain, d.lines[detailIndex], detailIndex == d.selectedLine)}
+		visible[index] = panelLine{plain: plain, styled: d.styleLine(plain, d.lines[detailIndex], detailIndex == d.selectedLine, d.rendered[rowIndex].first)}
 	}
 	for len(visible) < max(0, timelineHeight-2) {
 		plain := strings.Repeat(" ", d.viewport.Width)
@@ -781,7 +788,7 @@ func (d *detailState) compactView(layout detailLayout) string {
 	for rowIndex := d.viewport.YOffset; len(content) < capacity && rowIndex < len(d.rendered); rowIndex++ {
 		row := d.rendered[rowIndex]
 		plain := fitPlain(row.text, max(0, d.width-2), false)
-		content = append(content, panelLine{plain: plain, styled: d.styleLine(plain, d.lines[row.detailIndex], row.detailIndex == d.selectedLine)})
+		content = append(content, panelLine{plain: plain, styled: d.styleLine(plain, d.lines[row.detailIndex], row.detailIndex == d.selectedLine, row.first)})
 	}
 	for len(content) < capacity {
 		plain := strings.Repeat(" ", max(0, d.width-2))
@@ -954,27 +961,37 @@ func (d *detailState) headerPanelLines() []panelLine {
 	return lines
 }
 
-func (d *detailState) styleLine(line string, detail detailLine, selected bool) string {
+func (d *detailState) styleLine(line string, detail detailLine, selected, first bool) string {
 	if selected {
 		return d.styles.selected.Render(line)
 	}
 	if detail.role == detailRow && detail.subagentSession != nil {
 		return d.styleSubagentLine(line, detail)
 	}
-	return styleDetailRole(d.styles, detail.agent, detail.role, line)
+	if detail.role == detailAssistant {
+		if !first {
+			return d.styles.row.Render(line)
+		}
+		return styleLabelLine(line, detail.label, d.styles.row, d.agentStyle(detail.agent))
+	}
+	if detail.role == detailUserPrompt {
+		if !first {
+			return d.styles.userPrompt.Render(line)
+		}
+		labelStyle := d.styles.userPrompt.Foreground(d.styles.accent.GetForeground()).Bold(d.styles.accent.GetBold())
+		return styleLabelLine(line, detail.label, d.styles.userPrompt, labelStyle)
+	}
+	return styleDetailRole(d.styles, detail.role, line)
 }
 
-func styleDetailRole(styleSet styles, agent model.AgentKind, role detailRole, line string) string {
+func styleDetailRole(styleSet styles, role detailRole, line string) string {
 	switch role {
 	case detailAccent, detailTool:
 		return styleSet.accent.Render(line)
-	case detailAssistant:
-		if agent == model.AgentClaude {
-			return styleSet.claude.Render(line)
-		}
-		if agent == model.AgentCodex {
-			return styleSet.codex.Render(line)
-		}
+	case detailUserPrompt:
+		return styleSet.userPrompt.Render(line)
+	case detailSystemPrompt:
+		return styleSet.systemPrompt.Render(line)
 	case detailSecondary:
 		return styleSet.muted.Render(line)
 	case detailWarning:
@@ -987,6 +1004,15 @@ func styleDetailRole(styleSet styles, agent model.AgentKind, role detailRole, li
 		return styleSet.muted.Render(line)
 	}
 	return styleSet.row.Render(line)
+}
+
+func styleLabelLine(line, label string, base, labelStyle lipgloss.Style) string {
+	start := strings.Index(line, label)
+	if label == "" || start < 0 {
+		return base.Render(line)
+	}
+	end := start + len(label)
+	return base.Render(line[:start]) + labelStyle.Render(line[start:end]) + base.Render(line[end:])
 }
 
 func (d *detailState) styleSubagentLine(line string, detail detailLine) string {

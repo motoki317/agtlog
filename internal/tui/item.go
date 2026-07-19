@@ -93,9 +93,9 @@ func (i *itemView) rebuild() {
 		if i.wrap && ansi.StringWidth(plain) > i.viewport.Width {
 			rows = strings.Split(ansi.Hardwrap(plain, i.viewport.Width, true), "\n")
 		}
-		for _, row := range rows {
+		for rowIndex, row := range rows {
 			row = fitPlain(row, i.viewport.Width, false)
-			i.rendered = append(i.rendered, renderedRow{detailIndex: detailIndex, text: row})
+			i.rendered = append(i.rendered, renderedRow{detailIndex: detailIndex, text: row, first: rowIndex == 0})
 			content = append(content, row)
 		}
 	}
@@ -157,16 +157,18 @@ func (i *itemView) title() string {
 }
 
 func (i *itemView) styleLine(plain string, line detailLine) string {
-	return styleDetailRole(i.styles, i.agent, line.role, plain)
+	return styleDetailRole(i.styles, line.role, plain)
 }
 
 func itemEventLines(event model.Event, agent model.AgentKind) []detailLine {
 	if event.Kind != model.EventToolCall {
 		role := detailSecondary
 		if event.Kind == model.EventUser {
-			role = detailAccent
+			role = detailUserPrompt
 		} else if event.Kind == model.EventAssistantText {
-			role = detailAssistant
+			role = detailRow
+		} else if event.Kind == model.EventSystem || event.Kind == model.EventCompact {
+			role = detailSystemPrompt
 		}
 		return itemTextLines(event.Text, role, agent)
 	}

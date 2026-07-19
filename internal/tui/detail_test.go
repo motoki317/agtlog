@@ -655,7 +655,7 @@ func TestSubagentsRowAppliesCellStylesAfterFitting(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "route", Subagents: []*model.Session{first, selected}}, 100, 14, styleSet)
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 	line := detail.lines[1]
-	styled := detail.styleLine(detail.rendered[1].text, line, false)
+	styled := detail.styleLine(detail.rendered[1].text, line, false, true)
 
 	for name, want := range map[string]string{
 		"agent":  styleSet.codex.Render("codex"),
@@ -664,6 +664,96 @@ func TestSubagentsRowAppliesCellStylesAfterFitting(t *testing.T) {
 	} {
 		if !strings.Contains(styled, want) {
 			t.Errorf("Subagents row missing %s cell style in %q", name, styled)
+		}
+	}
+}
+
+func TestAssistantLineColorsOnlyTheAgentLabel(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	styleSet := newStyles(themes["default"])
+	detail := &detailState{styles: styleSet}
+	plain := "  codex: ordinary prose"
+
+	got := detail.styleLine(plain, detailLine{label: "codex:", role: detailAssistant, agent: model.AgentCodex}, false, true)
+	want := styleSet.row.Render("  ") + styleSet.codex.Render("codex:") + styleSet.row.Render(" ordinary prose")
+	if got != want {
+		t.Fatalf("assistant line styling = %q, want only the label agent-colored as %q", got, want)
+	}
+}
+
+func TestWrappedAssistantProseDoesNotColorLabelTextOnContinuation(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	styleSet := newStyles(themes["default"])
+	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{{
+		Kind: model.EventAssistantText, Text: "ordinary route notes continue codex: remains ordinary prose",
+	}}}
+	detail := newDetailState(session, 28, 16, styleSet)
+	found := false
+	for rowIndex, row := range detail.rendered {
+		if rowIndex == detail.firstRenderedRow(row.detailIndex) || !strings.Contains(row.text, "codex:") {
+			continue
+		}
+		found = true
+		if got, want := detail.styleLine(row.text, detail.lines[row.detailIndex], false, row.first), styleSet.row.Render(row.text); got != want {
+			t.Fatalf("wrapped assistant prose styling = %q, want neutral continuation %q", got, want)
+		}
+	}
+	if !found {
+		t.Fatalf("fixture did not place agent label text on a wrapped continuation: %#v", detail.rendered)
+	}
+}
+
+func TestUserPromptColorsOnlyTheLabelOverTheFullRowTint(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	styleSet := newStyles(themes["default"])
+	detail := newDetailState(&model.Session{ID: "lunar", Events: []model.Event{{Kind: model.EventUser, Text: "ordinary prose"}}}, 40, 12, styleSet)
+	line := detail.lines[0]
+	plain := detail.rendered[0].text
+	label := glyphCollapsed + " you:"
+	start := strings.Index(plain, label)
+	base := lipgloss.NewStyle().Foreground(lipgloss.Color("#ABB2BF")).Background(lipgloss.Color("#262B33"))
+	labelStyle := base.Foreground(lipgloss.Color("#61AFEF")).Bold(true)
+	want := base.Render(plain[:start]) + labelStyle.Render(label) + base.Render(plain[start+len(label):])
+
+	if got := detail.styleLine(plain, line, false, true); got != want {
+		t.Fatalf("user prompt styling = %q, want neutral prose and a full-row tint as %q", got, want)
+	}
+}
+
+func TestSystemAndCompactRowsUseTheSystemPromptTint(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	styleSet := newStyles(themes["default"])
+	detail := &detailState{styles: styleSet}
+	wantStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ABB2BF")).Background(lipgloss.Color("#2B2A26"))
+
+	for _, kind := range []model.EventKind{model.EventSystem, model.EventCompact} {
+		line := detail.eventLines(&model.Session{}, model.Event{Kind: kind, Text: "runtime notice"}, 0, "event")[0]
+		plain := fitPlain(line.text, 36, false)
+		if got, want := detail.styleLine(plain, line, false, true), wantStyle.Render(plain); got != want {
+			t.Errorf("%s row styling = %q, want system tint %q", kind, got, want)
+		}
+	}
+}
+
+func TestSelectionOverridesPromptTints(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	styleSet := newStyles(themes["default"])
+	detail := &detailState{styles: styleSet}
+	for _, role := range []detailRole{detailUserPrompt, detailSystemPrompt} {
+		line := detailLine{text: "prompt", role: role}
+		plain := fitPlain(line.text, 24, false)
+		if got, want := detail.styleLine(plain, line, true, true), styleSet.selected.Render(plain); got != want {
+			t.Errorf("selected role %v styling = %q, want selection %q", role, got, want)
 		}
 	}
 }
@@ -1587,6 +1677,24 @@ func TestItemToolLinesUseFallbacksAndDiffRoles(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestItemTextRolesMatchTimelinePromptSemantics(t *testing.T) {
+	for _, test := range []struct {
+		kind model.EventKind
+		want detailRole
+	}{
+		{kind: model.EventUser, want: detailUserPrompt},
+		{kind: model.EventAssistantText, want: detailRow},
+		{kind: model.EventThinking, want: detailSecondary},
+		{kind: model.EventSystem, want: detailSystemPrompt},
+		{kind: model.EventCompact, want: detailSystemPrompt},
+	} {
+		lines := itemEventLines(model.Event{Kind: test.kind, Text: "ordinary prose"}, model.AgentCodex)
+		if len(lines) != 1 || lines[0].role != test.want {
+			t.Errorf("item %s roles = %#v, want one role %v", test.kind, lines, test.want)
+		}
 	}
 }
 

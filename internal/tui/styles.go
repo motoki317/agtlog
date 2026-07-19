@@ -19,22 +19,24 @@ const (
 )
 
 type styles struct {
-	mono       bool
-	border     lipgloss.Style
-	title      lipgloss.Style
-	header     lipgloss.Style
-	row        lipgloss.Style
-	selected   lipgloss.Style
-	claude     lipgloss.Style
-	codex      lipgloss.Style
-	muted      lipgloss.Style
-	estimated  lipgloss.Style
-	emphasis   lipgloss.Style
-	warning    lipgloss.Style
-	accent     lipgloss.Style
-	keyHint    lipgloss.Style
-	diffAdd    lipgloss.Style
-	diffRemove lipgloss.Style
+	mono         bool
+	border       lipgloss.Style
+	title        lipgloss.Style
+	header       lipgloss.Style
+	row          lipgloss.Style
+	selected     lipgloss.Style
+	claude       lipgloss.Style
+	codex        lipgloss.Style
+	muted        lipgloss.Style
+	estimated    lipgloss.Style
+	emphasis     lipgloss.Style
+	warning      lipgloss.Style
+	accent       lipgloss.Style
+	keyHint      lipgloss.Style
+	diffAdd      lipgloss.Style
+	diffRemove   lipgloss.Style
+	userPrompt   lipgloss.Style
+	systemPrompt lipgloss.Style
 }
 
 type Theme struct {
@@ -55,6 +57,8 @@ type Theme struct {
 	KeyHint    string
 	DiffAdd    string
 	DiffRemove string
+	UserBg     string
+	SystemBg   string
 }
 
 var themes = map[string]Theme{
@@ -62,17 +66,33 @@ var themes = map[string]Theme{
 		Name: "default", Background: "#1E222A", Border: "#5C6370", Title: "#61AFEF", Header: "#C678DD", Row: "#ABB2BF",
 		SelectedFg: "#FFFFFF", SelectedBg: "#3E4451", Claude: "#D19A66", Codex: "#61AFEF", Warning: "#E06C75",
 		Muted: "#5C6370", Estimated: "#7F848E", Accent: "#61AFEF", KeyHint: "#98C379", DiffAdd: "#98C379", DiffRemove: "#E06C75",
+		UserBg: "#262B33", SystemBg: "#2B2A26",
 	},
 	"nord": {
 		Name: "nord", Background: "#2E3440", Border: "#4C566A", Title: "#88C0D0", Header: "#E5E9F0", Row: "#D8DEE9",
 		SelectedFg: "#ECEFF4", SelectedBg: "#4C566A", Claude: "#88C0D0", Codex: "#81A1C1", Warning: "#BF616A",
 		Muted: "#4C566A", Estimated: "#616E88", Accent: "#88C0D0", KeyHint: "#A3BE8C", DiffAdd: "#A3BE8C", DiffRemove: "#BF616A",
+		UserBg: "#353C4A", SystemBg: "#3B4252",
 	},
 	"dracula": {
 		Name: "dracula", Background: "#282A36", Border: "#6272A4", Title: "#FF79C6", Header: "#F8F8F2", Row: "#F8F8F2",
 		SelectedFg: "#282A36", SelectedBg: "#50FA7B", Claude: "#BD93F9", Codex: "#8BE9FD", Warning: "#FF5555",
 		Muted: "#6272A4", Estimated: "#6272A4", Accent: "#50FA7B", KeyHint: "#FFB86C", DiffAdd: "#50FA7B", DiffRemove: "#FF5555",
+		UserBg: "#2E3040", SystemBg: "#343646",
 	},
+}
+
+type promptFallback struct {
+	userANSI256   string
+	systemANSI256 string
+	userANSI      string
+	systemANSI    string
+}
+
+var promptFallbacks = map[string]promptFallback{
+	"default": {userANSI256: "233", systemANSI256: "234", userANSI: "4", systemANSI: "5"},
+	"nord":    {userANSI256: "24", systemANSI256: "60", userANSI: "4", systemANSI: "5"},
+	"dracula": {userANSI256: "23", systemANSI256: "59", userANSI: "6", systemANSI: "8"},
 }
 
 var colorThemeOrder = []string{"default", "nord", "dracula"}
@@ -116,19 +136,21 @@ func newStyles(selected ...Theme) styles {
 		theme = themes["default"]
 	}
 	result := styles{
-		mono:       theme.Name == "mono",
-		title:      lipgloss.NewStyle().Bold(true),
-		header:     lipgloss.NewStyle().Bold(true),
-		row:        lipgloss.NewStyle(),
-		selected:   lipgloss.NewStyle().Reverse(true),
-		muted:      lipgloss.NewStyle().Faint(true),
-		estimated:  lipgloss.NewStyle().Faint(true),
-		emphasis:   lipgloss.NewStyle().Bold(true),
-		warning:    lipgloss.NewStyle().Bold(true),
-		accent:     lipgloss.NewStyle().Bold(true),
-		keyHint:    lipgloss.NewStyle().Faint(true),
-		diffAdd:    lipgloss.NewStyle().Bold(true),
-		diffRemove: lipgloss.NewStyle().Faint(true),
+		mono:         theme.Name == "mono",
+		title:        lipgloss.NewStyle().Bold(true),
+		header:       lipgloss.NewStyle().Bold(true),
+		row:          lipgloss.NewStyle(),
+		selected:     lipgloss.NewStyle().Reverse(true),
+		muted:        lipgloss.NewStyle().Faint(true),
+		estimated:    lipgloss.NewStyle().Faint(true),
+		emphasis:     lipgloss.NewStyle().Bold(true),
+		warning:      lipgloss.NewStyle().Bold(true),
+		accent:       lipgloss.NewStyle().Bold(true),
+		keyHint:      lipgloss.NewStyle().Faint(true),
+		diffAdd:      lipgloss.NewStyle().Bold(true),
+		diffRemove:   lipgloss.NewStyle(),
+		userPrompt:   lipgloss.NewStyle(),
+		systemPrompt: lipgloss.NewStyle(),
 	}
 	if theme.Name != "mono" && lipgloss.ColorProfile() != termenv.Ascii {
 		background := lipgloss.Color(theme.Background)
@@ -147,6 +169,18 @@ func newStyles(selected ...Theme) styles {
 		result.keyHint = result.keyHint.Foreground(lipgloss.Color(theme.KeyHint)).Background(background)
 		result.diffAdd = result.diffAdd.Foreground(lipgloss.Color(theme.DiffAdd)).Background(background)
 		result.diffRemove = result.diffRemove.Foreground(lipgloss.Color(theme.DiffRemove)).Background(background)
+		userBackground, systemBackground := promptBackgrounds(theme)
+		result.userPrompt = result.userPrompt.Foreground(lipgloss.Color(theme.Row)).Background(userBackground)
+		result.systemPrompt = result.systemPrompt.Foreground(lipgloss.Color(theme.Row)).Background(systemBackground)
 	}
 	return result
+}
+
+func promptBackgrounds(theme Theme) (lipgloss.TerminalColor, lipgloss.TerminalColor) {
+	fallback, ok := promptFallbacks[theme.Name]
+	if !ok {
+		return lipgloss.Color(theme.UserBg), lipgloss.Color(theme.SystemBg)
+	}
+	return lipgloss.CompleteColor{TrueColor: theme.UserBg, ANSI256: fallback.userANSI256, ANSI: fallback.userANSI},
+		lipgloss.CompleteColor{TrueColor: theme.SystemBg, ANSI256: fallback.systemANSI256, ANSI: fallback.systemANSI}
 }

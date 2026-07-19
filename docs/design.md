@@ -39,23 +39,31 @@ highest-value summary instead of slicing a pre-rendered panel.
 ## Themes and emphasis
 
 Color is semantic. Theme roles cover borders, panel titles, table headers, normal and selected
-rows, each agent, warnings, muted metadata, estimates, accents, key hints, and added and removed
-diff lines.
+rows, each agent, warnings, muted metadata, estimates, accents, key hints, prompts, and added and
+removed diff lines. Ordinary user, assistant, and thinking prose never takes an agent color.
+Only the short agent or role label carries identity color; thinking remains muted.
 
-| Theme | Claude | Codex | Accent | Warning | Diff add | Diff remove | Base |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| `default` | `#D19A66` | `#61AFEF` | `#61AFEF` | `#E06C75` | `#98C379` | `#E06C75` | `#1E222A` |
-| `nord` | `#88C0D0` | `#81A1C1` | `#88C0D0` | `#BF616A` | `#A3BE8C` | `#BF616A` | `#2E3440` |
-| `dracula` | `#BD93F9` | `#8BE9FD` | `#50FA7B` | `#FF5555` | `#50FA7B` | `#FF5555` | `#282A36` |
+| Theme | Claude | Codex | Accent | Warning | Diff add | Diff remove | Base | User prompt | System prompt |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `default` | `#D19A66` | `#61AFEF` | `#61AFEF` | `#E06C75` | `#98C379` | `#E06C75` | `#1E222A` | `#262B33` | `#2B2A26` |
+| `nord` | `#88C0D0` | `#81A1C1` | `#88C0D0` | `#BF616A` | `#A3BE8C` | `#BF616A` | `#2E3440` | `#353C4A` | `#3B4252` |
+| `dracula` | `#BD93F9` | `#8BE9FD` | `#50FA7B` | `#FF5555` | `#50FA7B` | `#FF5555` | `#282A36` | `#2E3040` | `#343646` |
 
 `--theme` takes precedence over `AGTLOG_THEME`; otherwise the default palette is used. `t` cycles
 `default` → `nord` → `dracula` at runtime. `NO_COLOR` forces the implicit `mono` theme regardless
 of those selections. Mono identifies itself in the context summary, hides the inactive `t`
 binding, and makes `t` a no-op. Mono retains bold, faint, reverse-video, layout, text markers,
 and glyph meaning. A terminal that exposes only an ASCII color profile also uses semantic
-bold/faint/reverse styles so selection does not depend on unavailable colors.
-Diff rows retain their `+`, `-`, or context-space prefix in every theme. Mono uses those prefixes,
-with bold added lines and faint removed lines, instead of color.
+bold, faint, and reverse styles so selection does not depend on unavailable colors.
+Diff rows retain their `+`, `-`, or context-space prefix in every theme. Color themes render
+additions solid green, removals solid red, and context muted. Mono uses the prefixes, with bold
+added lines, instead of color.
+
+User-entered prompt rows use the user-prompt background; system and compaction rows use the
+system-prompt background. Both tints cover the padded row and are absent in mono. A selected row
+uses the selection foreground and background instead of either prompt tint. Reduced color
+profiles use explicit palette fallbacks so the base, prompt, and selection backgrounds stay
+distinct after color conversion.
 
 The selected list row is one full-width highlight bar with a single foreground color. Unselected
 rows use the agent color in `AGENT`, the accent color in `SUBS`, muted `AGE` and `MSGS`, and the
