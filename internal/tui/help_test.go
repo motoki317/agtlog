@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
+	"github.com/motoki317/agtlog/internal/model"
 )
 
 func TestListHelpIncludesEveryRequiredBinding(t *testing.T) {
@@ -22,7 +23,7 @@ func TestDetailHelpIncludesEveryRequiredBinding(t *testing.T) {
 	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
 	m.screen = screenDetail
 	view := m.helpView()
-	for _, want := range []string{"j/k scroll", "g/G edge", "space expand", "enter drill", "tab tabs", "w wrap", "J/K subagent", "esc/h back", "? help", "ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "space expand", "enter open", "tab tabs", "w wrap", "J/K subagent", "esc/h back", "? help", "ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("detail help missing %q:\n%s", want, view)
 		}
@@ -34,13 +35,30 @@ func TestDetailHelpKeepsBindingsVisibleAtFortyColumns(t *testing.T) {
 	m.width = 40
 	m.screen = screenDetail
 	view := ansi.Strip(m.helpView())
-	for _, want := range []string{"j/k scroll", "g/G edge", "space expand", "enter drill", "tab tabs", "w wrap", "J/K subagent", "esc/h back", "? help", "q/ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "space expand", "enter open", "tab tabs", "w wrap", "J/K subagent", "esc/h back", "? help", "q/ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("40-column detail help missing %q:\n%s", want, view)
 		}
 	}
 	if strings.Contains(view, "…") {
 		t.Fatalf("40-column detail help truncated a binding:\n%s", view)
+	}
+}
+
+func TestItemHelpIncludesOnlyItemBindings(t *testing.T) {
+	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
+	m.screen = screenDetail
+	m.detail = newItemView(model.Event{Kind: model.EventThinking, Text: "Chart route"}, model.AgentClaude, nil, m.width, m.height, m.styles)
+	view := m.helpView()
+	for _, want := range []string{"j/k scroll", "g/G edge", "w wrap", "esc/h/← back", "t theme", "? help", "q/ctrl-c quit"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("item help missing %q:\n%s", want, view)
+		}
+	}
+	for _, sessionOnly := range []string{"space expand", "enter open", "tab tabs", "J/K subagent"} {
+		if strings.Contains(view, sessionOnly) {
+			t.Fatalf("item help advertised session-only binding %q:\n%s", sessionOnly, view)
+		}
 	}
 }
 

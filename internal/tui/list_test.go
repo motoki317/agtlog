@@ -362,7 +362,7 @@ func TestFilterNarrowsRowsByFuzzyTitle(t *testing.T) {
 	m = updated.(Model)
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
-	if m.detail == nil || m.detail.session.ID != "lunar" {
+	if m.detail == nil || detailStateFromScreen(t, m.detail).session.ID != "lunar" {
 		t.Fatalf("filtered open selected %#v, want lunar", m.detail)
 	}
 }
@@ -663,7 +663,7 @@ func TestEnterOpensSelectedSessionDetail(t *testing.T) {
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
 
-	if m.screen != screenDetail || m.detail == nil || m.detail.session.ID != "second" {
+	if m.screen != screenDetail || m.detail == nil || detailStateFromScreen(t, m.detail).session.ID != "second" {
 		t.Fatalf("screen = %v, detail = %#v", m.screen, m.detail)
 	}
 }
@@ -761,7 +761,7 @@ func TestUnrelatedLiveUpdateKeepsOpenDetailState(t *testing.T) {
 	m := NewModel([]*model.Session{open, other}, nil)
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
-	detail := m.detail
+	detail := detailStateFromScreen(t, m.detail)
 	detail.expanded["kept"] = true
 
 	replacement := cloneSession(other)
@@ -769,7 +769,7 @@ func TestUnrelatedLiveUpdateKeepsOpenDetailState(t *testing.T) {
 	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
 	m = updated.(Model)
 
-	if m.detail == detail || !m.detail.expanded["kept"] {
+	if m.detail == detail || !detailStateFromScreen(t, m.detail).expanded["kept"] {
 		t.Fatalf("unrelated update replaced open detail state: %#v", m.detail)
 	}
 }
@@ -779,13 +779,13 @@ func TestMatchingLiveUpdatePreservesDetailAndRemovalReturnsToList(t *testing.T) 
 	m := NewModel([]*model.Session{open}, nil)
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
-	m.detail.expanded["kept"] = true
+	detailStateFromScreen(t, m.detail).expanded["kept"] = true
 
 	replacement := cloneSession(open)
 	replacement.Title = "After"
 	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
 	m = updated.(Model)
-	if m.detail == nil || m.detail.session.Title != "After" || !m.detail.expanded["kept"] {
+	if m.detail == nil || detailStateFromScreen(t, m.detail).session.Title != "After" || !detailStateFromScreen(t, m.detail).expanded["kept"] {
 		t.Fatalf("matching update lost detail state: %#v", m.detail)
 	}
 
@@ -857,7 +857,7 @@ func TestNewerDetailLoadSupersedesOlderResult(t *testing.T) {
 	updated, _ = m.Update(detailLoadedMsg{generation: 1, identity: sessionIdentity(current), session: older})
 	m = updated.(Model)
 
-	if got := m.detail.session.Events[0].Text; got != "newer" {
+	if got := detailStateFromScreen(t, m.detail).session.Events[0].Text; got != "newer" {
 		t.Fatalf("detail after stale load = %q, want newer", got)
 	}
 }
@@ -867,7 +867,7 @@ func TestDetailLoadPreservesWrapToggle(t *testing.T) {
 	m := NewModel([]*model.Session{current}, nil)
 	m.screen = screenDetail
 	m.detail = newDetailState(current, m.width, m.height, m.styles)
-	m.detail.wrap = true
+	detailStateFromScreen(t, m.detail).wrap = true
 	m.detailGeneration = 1
 
 	loaded := cloneSession(current)
@@ -875,7 +875,7 @@ func TestDetailLoadPreservesWrapToggle(t *testing.T) {
 	updated, _ := m.Update(detailLoadedMsg{generation: 1, identity: sessionIdentity(current), session: loaded})
 	m = updated.(Model)
 
-	if !m.detail.wrap {
+	if !detailStateFromScreen(t, m.detail).wrap {
 		t.Fatal("detail load cleared the active wrap toggle")
 	}
 }

@@ -1,0 +1,18 @@
+╭─ starship › Plot route › Edit ───────────────────────────────────────────────╮
+│input:                                                                        │
+│/workspace/starship/route.go                                                  │
+│-burn = 3                                                                     │
+│ burn = estimate                                                              │
+│+burn = 4                                                                     │
+│output:                                                                       │
+│route updated                                                                 │
+│checks ready                                                                  │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+j/k scroll   w wrap   esc back

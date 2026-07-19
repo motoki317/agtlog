@@ -68,11 +68,46 @@ func TestGoldenDetailFrame(t *testing.T) {
 		{Type: tea.KeyDown},
 		{Type: tea.KeySpace},
 		{Type: tea.KeyRunes, Runes: []rune{'J'}},
+	} {
+		tm.Send(key)
+	}
+	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "Task(Scout terrain)") }, teatest.WithDuration(time.Second))
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second)).(Model)
+
+	teatest.RequireEqualOutput(t, []byte(normalizeGolden(final.View())))
+}
+
+func TestGoldenItemFrame(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	session := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/starship/route.jsonl", CWD: "/workspace/starship", Project: "starship", Title: "Plot route",
+		Models: []string{"claude-opus-4-8"}, GitBranch: "orbit/alpha", StartedAt: goldenNow.Add(-12 * time.Minute), UpdatedAt: goldenNow,
+		Usage: []model.Usage{{InputTokens: 64_000, OutputTokens: 4_000}}, Cost: model.Cost{USD: 0.48},
+		Events: []model.Event{
+			{Kind: model.EventUser, Text: "Adjust the lunar route"},
+			{Kind: model.EventToolCall, ToolName: "Edit", ToolInput: "/workspace/starship/route.go", ResultSummary: "route updated", Detail: &model.ToolDetail{
+				Input:  "/workspace/starship/route.go",
+				Diff:   "-burn = 3\n burn = estimate\n+burn = 4",
+				Output: "route updated\nchecks ready",
+			}},
+			{Kind: model.EventAssistantText, Text: "The lunar route is ready"},
+		},
+	}
+	m := newModelWithClock([]*model.Session{session}, nil, func() time.Time { return goldenNow })
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 18))
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyDown},
+		{Type: tea.KeySpace},
+		{Type: tea.KeyDown},
 		{Type: tea.KeyEnter},
 	} {
 		tm.Send(key)
 	}
-	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "Inspect the ridge") }, teatest.WithDuration(time.Second))
+	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "checks ready") }, teatest.WithDuration(time.Second))
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}

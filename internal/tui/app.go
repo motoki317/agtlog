@@ -15,6 +15,13 @@ import (
 	"github.com/sahilm/fuzzy"
 )
 
+type detailScreen interface {
+	update(tea.Msg) tea.Cmd
+	view() string
+	resize(width, height int)
+	setWrap(bool)
+}
+
 type Model struct {
 	registry          *source.Registry
 	sessions          []*model.Session
@@ -26,8 +33,8 @@ type Model struct {
 	sort              sortMode
 	agent             agentFilter
 	screen            screen
-	detail            *detailState
-	detailStack       []*detailState
+	detail            detailScreen
+	detailStack       []detailScreen
 	cursor            int
 	listOffset        int
 	filterSelection   string
@@ -119,7 +126,7 @@ func nextAgeTick() tea.Cmd {
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.detail != nil {
-		m.detail = m.detail.clone()
+		m.detail = cloneDetailScreen(m.detail)
 	}
 	if _, ok := msg.(ageTickMsg); ok {
 		m.syncList(m.selectedIdentity())
@@ -144,9 +151,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if root := m.detailRoot(); root != nil && sessionIdentity(root.session) == loaded.identity {
 			if loaded.err != nil {
-				m.detail.err = loaded.err
-				m.detail.loading = false
-				m.detail.rebuild()
+				root.err = loaded.err
+				root.loading = false
+				root.rebuild()
 				return m, nil
 			}
 			m.replaceDetailTree(loaded.session)
@@ -194,7 +201,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.detail.resize(m.width, m.height)
 		}
 		for index, detail := range m.detailStack {
-			m.detailStack[index] = detail.clone()
+			m.detailStack[index] = cloneDetailScreen(detail)
 			m.detailStack[index].resize(m.width, m.height)
 		}
 		return m, nil
@@ -230,21 +237,35 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "enter" || key.String() == "right" || key.String() == "l") {
-			if subagent := m.detail.focusedSubagent(); subagent != nil {
-				wrap := m.detail.wrap
-				crumbs := append([]string(nil), m.detail.crumbs...)
-				if label := detailCrumbLabel(m.detail.session); label != "" {
-					crumbs = append(crumbs, label)
+			if detail, ok := m.detail.(*detailState); ok {
+				if subagent := detail.focusedSubagent(); subagent != nil {
+					wrap := detail.wrap
+					crumbs := append([]string(nil), detail.crumbs...)
+					if label := detailCrumbLabel(detail.session); label != "" {
+						crumbs = append(crumbs, label)
+					}
+					if detail.tab == tabSubagents {
+						crumbs = append(crumbs, subagentCrumbLabels(detail.session, subagent)...)
+					}
+					m.detailStack = append(m.detailStack, m.detail)
+					child := newDetailState(subagent, m.width, m.height, m.styles)
+					child.crumbs = crumbs
+					child.setWrap(wrap)
+					m.detail = child
+					return m, nil
 				}
-				if m.detail.tab == tabSubagents {
-					crumbs = append(crumbs, subagentCrumbLabels(m.detail.session, subagent)...)
+				if event, exists := detail.focusedEvent(); exists {
+					crumbs := append([]string(nil), detail.crumbs...)
+					if label := detailCrumbLabel(detail.session); label != "" {
+						crumbs = append(crumbs, label)
+					}
+					m.detailStack = append(m.detailStack, m.detail)
+					item := newItemView(event, detail.session.Agent, crumbs, m.width, m.height, m.styles)
+					item.focusKey = detail.focusables[detail.focus].key
+					item.setWrap(detail.wrap)
+					m.detail = item
+					return m, nil
 				}
-				m.detailStack = append(m.detailStack, m.detail)
-				m.detail = newDetailState(subagent, m.width, m.height, m.styles)
-				m.detail.wrap = wrap
-				m.detail.crumbs = crumbs
-				m.detail.rebuild()
-				return m, nil
 			}
 		}
 		return m, m.detail.update(msg)
@@ -287,10 +308,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		index := min(m.cursor, len(m.visible)-1)
 		m.screen = screenDetail
 		m.detailStack = nil
-		m.detail = newDetailState(m.visible[index], m.width, m.height, m.styles)
+		detail := newDetailState(m.visible[index], m.width, m.height, m.styles)
+		m.detail = detail
 		if m.registry != nil {
-			m.detail.loading = true
-			m.detail.rebuild()
+			detail.loading = true
+			detail.rebuild()
 			m.detailGeneration++
 			return m, loadDetail(m.ctx, m.registry, m.visible[index], m.detailGeneration)
 		}
@@ -403,14 +425,28 @@ func detailBreadcrumbs(root, target *model.Session) []string {
 }
 
 func (m Model) detailRoot() *detailState {
-	if len(m.detailStack) > 0 {
-		return m.detailStack[0]
+	for _, screen := range m.detailStack {
+		if detail, ok := screen.(*detailState); ok {
+			return detail
+		}
 	}
-	return m.detail
+	detail, _ := m.detail.(*detailState)
+	return detail
+}
+
+func cloneDetailScreen(screen detailScreen) detailScreen {
+	switch screen := screen.(type) {
+	case *detailState:
+		return screen.clone()
+	case *itemView:
+		return screen.clone()
+	default:
+		return screen
+	}
 }
 
 func (m *Model) replaceDetailTree(root *model.Session) {
-	states := append(append([]*detailState(nil), m.detailStack...), m.detail)
+	screens := append(append([]detailScreen(nil), m.detailStack...), m.detail)
 	sessions := make(map[string]*model.Session)
 	var indexSessions func(*model.Session)
 	indexSessions = func(session *model.Session) {
@@ -420,8 +456,31 @@ func (m *Model) replaceDetailTree(root *model.Session) {
 		}
 	}
 	indexSessions(root)
-	replacements := make([]*detailState, 0, len(states))
-	for _, state := range states {
+	replacements := make([]detailScreen, 0, len(screens))
+	for _, screen := range screens {
+		state, ok := screen.(*detailState)
+		if !ok {
+			if item, ok := screen.(*itemView); ok && len(replacements) > 0 {
+				parent, parentOK := replacements[len(replacements)-1].(*detailState)
+				if !parentOK {
+					continue
+				}
+				event, eventOK := parent.eventForKey(item.focusKey)
+				if !eventOK || !sameItemEvent(item.event, event) {
+					continue
+				}
+				crumbs := append([]string(nil), parent.crumbs...)
+				if label := detailCrumbLabel(parent.session); label != "" {
+					crumbs = append(crumbs, label)
+				}
+				replacement := newItemView(event, parent.session.Agent, crumbs, m.width, m.height, m.styles)
+				replacement.focusKey = item.focusKey
+				replacement.setWrap(item.wrap)
+				replacement.viewport.SetYOffset(item.viewport.YOffset)
+				replacements = append(replacements, replacement)
+			}
+			continue
+		}
 		session := sessions[sessionIdentity(state.session)]
 		if session == nil {
 			break
@@ -435,6 +494,22 @@ func (m *Model) replaceDetailTree(root *model.Session) {
 	last := len(replacements) - 1
 	m.detail = replacements[last]
 	m.detailStack = replacements[:last]
+}
+
+func sameItemEvent(previous, replacement model.Event) bool {
+	if previous.Kind != replacement.Kind {
+		return false
+	}
+	if previous.CallID != "" || replacement.CallID != "" {
+		return previous.CallID != "" && previous.CallID == replacement.CallID
+	}
+	if previous.AgentID != "" || replacement.AgentID != "" {
+		return previous.AgentID != "" && previous.AgentID == replacement.AgentID
+	}
+	if !previous.Timestamp.IsZero() || !replacement.Timestamp.IsZero() {
+		return !previous.Timestamp.IsZero() && previous.Timestamp.Equal(replacement.Timestamp)
+	}
+	return previous.Kind != model.EventToolCall || previous.ToolName == replacement.ToolName
 }
 
 func (m *Model) replacementDetailState(previous *detailState, session, root *model.Session) *detailState {
@@ -486,13 +561,22 @@ func (m *Model) cycleTheme() {
 	m.theme = cycleTheme(m.theme)
 	m.styles = newStyles(m.theme)
 	if m.detail != nil {
-		m.detail.styles = m.styles
-		m.detail.rebuild()
+		setDetailScreenStyles(m.detail, m.styles)
 	}
 	for index, detail := range m.detailStack {
-		m.detailStack[index] = detail.clone()
-		m.detailStack[index].styles = m.styles
-		m.detailStack[index].rebuild()
+		m.detailStack[index] = cloneDetailScreen(detail)
+		setDetailScreenStyles(m.detailStack[index], m.styles)
+	}
+}
+
+func setDetailScreenStyles(screen detailScreen, styleSet styles) {
+	switch screen := screen.(type) {
+	case *detailState:
+		screen.styles = styleSet
+		screen.rebuild()
+	case *itemView:
+		screen.styles = styleSet
+		screen.rebuild()
 	}
 }
 

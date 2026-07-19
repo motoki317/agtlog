@@ -1,18 +1,18 @@
-╭─ Session · starship › Plan route ────────────────────────────────────────────╮
-│claude ·  ()                                                                  │
-│opus-4.8 ·  · —→—                                                             │
-│45k tokens / $0.32 · own 45k / $0.32 · subagents 0 / $0.00                    │
+╭─ Session · starship ─────────────────────────────────────────────────────────╮
+│claude · starship (/workspace/starship)                                       │
+│opus-4.8 · orbit/alpha · Jan 02 05:44→Jan 02 06:04                            │
+│173k tokens / $1.16 · own 128k / $0.84 · subagents 45k / $0.32                │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Timeline · Subagents ───────────────────────────────────────────────────────╮
-│› ▸ you: Inspect the ridge                                                    │
-│    ● claude: The ridge is clear                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
+│  ▸ you: Delegate the survey                                                  │
+│  ▾ ● claude: Survey delegated · 1 thinking · 1 tools · 1 subagents           │
+│    ◇ thinking: Select a safe path                                            │
+│    ▸ ⚙ Read(/workspace/starship/map.go) → map ready · 400ms                  │
+│    claude: Survey delegated                                                  │
+│›   ⑃ Task(Scout terrain) opus-4.8 · 45k · $0.32                              │
 │                                                                              │
 │                                                                              │
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-j/k scroll   tab tabs   ↵ drill   J/K subagent   w wrap   esc back   q quit
+j/k scroll   space expand   ↵ open   tab tabs   w wrap   esc back   q quit

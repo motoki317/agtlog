@@ -12,15 +12,26 @@ func (m Model) helpView() string {
 		lines[3] += " · t theme"
 	}
 	if m.screen == screenDetail {
-		lines = []string{
-			"j/k scroll · g/G edge",
-			"space expand · enter drill",
-			"tab tabs · w wrap",
-			"J/K subagent · esc/h back",
-			"? help · q/ctrl-c quit",
-		}
-		if !m.styles.mono {
-			lines[3] += " · t theme"
+		if _, item := m.detail.(*itemView); item {
+			lines = []string{
+				"j/k scroll · g/G edge",
+				"w wrap · esc/h/← back",
+				"? help · q/ctrl-c quit",
+			}
+			if !m.styles.mono {
+				lines[1] += " · t theme"
+			}
+		} else {
+			lines = []string{
+				"j/k scroll · g/G edge",
+				"space expand · enter open",
+				"tab tabs · w wrap",
+				"J/K subagent · esc/h back",
+				"? help · q/ctrl-c quit",
+			}
+			if !m.styles.mono {
+				lines[3] += " · t theme"
+			}
 		}
 	}
 	innerWidth := max(0, m.width-2)

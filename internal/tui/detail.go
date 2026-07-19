@@ -65,6 +65,7 @@ type detailFocus struct {
 	expandable      bool
 	subagent        bool
 	subagentSession *model.Session
+	event           model.Event
 }
 
 type detailLine struct {
@@ -77,6 +78,7 @@ type detailLine struct {
 	subagentCost    string
 	role            detailRole
 	agent           model.AgentKind
+	event           model.Event
 }
 
 type detailRole int
@@ -147,6 +149,14 @@ func (d *detailState) resize(width, height int) {
 	d.rebuild()
 }
 
+func (d *detailState) setWrap(wrap bool) {
+	if d.wrap == wrap {
+		return
+	}
+	d.wrap = wrap
+	d.rebuild()
+}
+
 func (d *detailState) update(msg tea.Msg) tea.Cmd {
 	key, ok := msg.(tea.KeyMsg)
 	if !ok {
@@ -203,15 +213,14 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		if d.tab == tabTimeline {
 			d.moveFocus(-1, true)
 		}
-	case " ", "enter":
+	case " ":
 		if d.tab == tabTimeline && len(d.focusables) > 0 && d.focusables[d.focus].expandable {
 			item := d.focusables[d.focus]
 			d.expanded[item.key] = !d.expanded[item.key]
 			d.rebuildKeeping(item.key)
 		}
 	case "w":
-		d.wrap = !d.wrap
-		d.rebuild()
+		d.setWrap(!d.wrap)
 	default:
 		var cmd tea.Cmd
 		d.viewport, cmd = d.viewport.Update(msg)
@@ -276,7 +285,7 @@ func (d *detailState) rebuild() {
 	d.focusables = d.focusables[:0]
 	for index, line := range lines {
 		if line.key != "" {
-			d.focusables = append(d.focusables, detailFocus{key: line.key, line: index, expandable: line.expandable, subagent: line.subagent, subagentSession: line.subagentSession})
+			d.focusables = append(d.focusables, detailFocus{key: line.key, line: index, expandable: line.expandable, subagent: line.subagent, subagentSession: line.subagentSession, event: line.event})
 		}
 	}
 	if len(d.focusables) == 0 {
@@ -379,7 +388,7 @@ func (d *detailState) sessionLines(session *model.Session, indent int, path stri
 		event := session.Events[index]
 		if event.Kind == model.EventUser {
 			key := fmt.Sprintf("%s/user/%d", path, index)
-			lines = append(lines, detailLine{text: strings.Repeat(" ", indent) + glyphCollapsed + " you: " + firstLine(event.Text), key: key, role: detailAccent})
+			lines = append(lines, detailLine{text: strings.Repeat(" ", indent) + glyphCollapsed + " you: " + firstLine(event.Text), key: key, role: detailAccent, event: event})
 			index++
 			continue
 		}
@@ -389,7 +398,7 @@ func (d *detailState) sessionLines(session *model.Session, indent int, path stri
 		}
 		turn := session.Events[start:index]
 		key := fmt.Sprintf("%s/turn/%d", path, start)
-		lines = append(lines, detailLine{text: d.turnSummary(session, turn, indent, d.expanded[key]), key: key, expandable: turnExpandable(turn), role: detailAssistant, agent: session.Agent})
+		lines = append(lines, detailLine{text: d.turnSummary(session, turn, indent, d.expanded[key]), key: key, expandable: turnExpandable(turn), role: detailAssistant, agent: session.Agent, event: turnItemEvent(turn)})
 		if d.expanded[key] {
 			for eventIndex, item := range turn {
 				lines = append(lines, d.eventLines(session, item, indent+2, fmt.Sprintf("%s/event/%d", key, eventIndex))...)
@@ -400,6 +409,20 @@ func (d *detailState) sessionLines(session *model.Session, indent int, path stri
 		lines = append(lines, detailLine{text: strings.Repeat(" ", indent) + "No timeline events.", role: detailSecondary})
 	}
 	return lines
+}
+
+func turnItemEvent(events []model.Event) model.Event {
+	for index := len(events) - 1; index >= 0; index-- {
+		if events[index].Kind == model.EventAssistantText {
+			return events[index]
+		}
+	}
+	for _, event := range events {
+		if event.Kind != model.EventSubagent {
+			return event
+		}
+	}
+	return model.Event{}
 }
 
 func (d *detailState) turnSummary(session *model.Session, events []model.Event, indent int, expanded bool) string {
@@ -441,14 +464,14 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 	padding := strings.Repeat(" ", indent)
 	switch event.Kind {
 	case model.EventAssistantText:
-		return []detailLine{{text: padding + terminalText(string(session.Agent), 32) + ": " + firstLine(event.Text), key: key, role: detailAssistant, agent: session.Agent}}
+		return []detailLine{{text: padding + terminalText(string(session.Agent), 32) + ": " + firstLine(event.Text), key: key, role: detailAssistant, agent: session.Agent, event: event}}
 	case model.EventThinking:
-		return []detailLine{{text: padding + glyphSecondary + " thinking: " + firstLine(event.Text), key: key, role: detailSecondary}}
+		return []detailLine{{text: padding + glyphSecondary + " thinking: " + firstLine(event.Text), key: key, role: detailSecondary, event: event}}
 	case model.EventToolCall:
 		return d.toolEventLines(event, indent, key)
 	case model.EventSubagent:
 		if event.Subagent == nil {
-			return []detailLine{{text: padding + glyphSubagent + " subagent unavailable", key: key, role: detailWarning}}
+			return []detailLine{{text: padding + glyphSubagent + " subagent unavailable", key: key, subagent: true, role: detailWarning, event: event}}
 		}
 		childKey := key + "/subagent/" + sessionIdentity(event.Subagent)
 		label := firstLine(event.ToolInput)
@@ -456,11 +479,11 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 			label = firstLine(event.Subagent.Title)
 		}
 		label = ansi.Truncate(label, 28, "…")
-		return []detailLine{{text: padding + glyphSubagent + " Task(" + label + ") " + terminalText(shortModels(event.Subagent), 96) + " · " + humanTokens(event.Subagent.TotalUsage().TotalTokens()) + " · " + formatCost(event.Subagent.TotalCost()), key: childKey, subagent: true, subagentSession: event.Subagent, role: detailAccent}}
+		return []detailLine{{text: padding + glyphSubagent + " Task(" + label + ") " + terminalText(shortModels(event.Subagent), 96) + " · " + humanTokens(event.Subagent.TotalUsage().TotalTokens()) + " · " + formatCost(event.Subagent.TotalCost()), key: childKey, subagent: true, subagentSession: event.Subagent, role: detailAccent, event: event}}
 	case model.EventCompact:
-		return []detailLine{{text: padding + glyphSecondary + " compact: " + firstLine(event.Text), key: key, role: detailSecondary}}
+		return []detailLine{{text: padding + glyphSecondary + " compact: " + firstLine(event.Text), key: key, role: detailSecondary, event: event}}
 	case model.EventSystem:
-		return []detailLine{{text: padding + glyphSecondary + " " + firstLine(event.Text), key: key, role: detailSecondary}}
+		return []detailLine{{text: padding + glyphSecondary + " " + firstLine(event.Text), key: key, role: detailSecondary, event: event}}
 	default:
 		return nil
 	}
@@ -479,6 +502,26 @@ func (d *detailState) focusedSubagent() *model.Session {
 	return d.focusables[d.focus].subagentSession
 }
 
+func (d *detailState) focusedEvent() (model.Event, bool) {
+	if d.tab != tabTimeline || len(d.focusables) == 0 {
+		return model.Event{}, false
+	}
+	focused := d.focusables[d.focus]
+	if focused.subagent || focused.event.Kind == "" {
+		return model.Event{}, false
+	}
+	return focused.event, true
+}
+
+func (d *detailState) eventForKey(key string) (model.Event, bool) {
+	for _, focused := range d.focusables {
+		if focused.key == key && !focused.subagent && focused.event.Kind != "" {
+			return focused.event, true
+		}
+	}
+	return model.Event{}, false
+}
+
 func (d *detailState) toolEventLines(event model.Event, indent int, key string) []detailLine {
 	padding := strings.Repeat(" ", indent)
 	expandable := detailHasBody(event.Detail)
@@ -490,7 +533,7 @@ func (d *detailState) toolEventLines(event model.Event, indent int, key string) 
 		}
 		text = padding + marker + " " + toolLine(event)
 	}
-	lines := []detailLine{{text: text, key: key, expandable: expandable, role: detailTool}}
+	lines := []detailLine{{text: text, key: key, expandable: expandable, role: detailTool, event: event}}
 	if !d.expanded[key] || event.Detail == nil {
 		return lines
 	}
@@ -560,12 +603,7 @@ func turnExpandable(events []model.Event) bool {
 }
 
 func toolLine(event model.Event) string {
-	name := terminalText(event.ToolName, 96)
-	if name == "exec_command" {
-		name = "Bash"
-	} else if name == "apply_patch" {
-		name = "Edit"
-	}
+	name := toolDisplayName(event.ToolName)
 	line := glyphTool + " " + name
 	if input := firstLine(event.ToolInput); input != "" {
 		line += "(" + input + ")"
@@ -577,6 +615,17 @@ func toolLine(event model.Event) string {
 		line += " · " + formatDuration(event.Duration)
 	}
 	return line
+}
+
+func toolDisplayName(name string) string {
+	name = terminalText(name, 96)
+	if name == "exec_command" {
+		return "Bash"
+	}
+	if name == "apply_patch" {
+		return "Edit"
+	}
+	return name
 }
 
 func formatDuration(duration time.Duration) string {
@@ -727,7 +776,7 @@ func (d *detailState) tabLabel() panelLabel {
 }
 
 func detailKeyText(width int, mono bool, tab detailTab) string {
-	hints := []string{"j/k scroll", "tab tabs", "↵ drill"}
+	hints := []string{"j/k scroll", "space expand", "↵ open", "tab tabs"}
 	if tab == tabTimeline {
 		hints = append(hints, "J/K subagent")
 	}
@@ -736,7 +785,13 @@ func detailKeyText(width int, mono bool, tab detailTab) string {
 		hints = append(hints, "t theme")
 	}
 	hints = append(hints, "? help", "q quit")
-	for _, drop := range []string{"t theme", "? help", "J/K subagent", "j/k scroll"} {
+	return fitKeyHints(width, hints, []string{
+		"t theme", "? help", "J/K subagent", "j/k scroll", "q quit", "tab tabs", "w wrap", "space expand", "↵ open",
+	})
+}
+
+func fitKeyHints(width int, hints, dropOrder []string) string {
+	for _, drop := range dropOrder {
 		if ansi.StringWidth(strings.Join(hints, "   ")) <= width {
 			break
 		}
@@ -747,7 +802,14 @@ func detailKeyText(width int, mono bool, tab detailTab) string {
 			}
 		}
 	}
-	return strings.Join(hints, "   ")
+	text := strings.Join(hints, "   ")
+	if ansi.StringWidth(text) <= width {
+		return text
+	}
+	if len(hints) == 1 && hints[0] == "esc back" && width >= ansi.StringWidth("esc") {
+		return "esc"
+	}
+	return ""
 }
 
 func (d *detailState) header() string {
@@ -783,8 +845,36 @@ func (d *detailState) headerPanelLines() []panelLine {
 			}
 		}
 	}
-	line1 := fmt.Sprintf("%s · %s (%s)", terminalText(string(session.Agent), 32), terminalText(session.Project, 96), terminalText(session.CWD, 256))
-	line2 := fmt.Sprintf("%s · %s · %s→%s", terminalText(detailModels(session), 256), terminalText(session.GitBranch, 96), formatDetailTime(session.StartedAt), formatDetailTime(session.UpdatedAt))
+	line1Parts := make([]string, 0, 2)
+	if agent := terminalText(string(session.Agent), 32); agent != "" {
+		line1Parts = append(line1Parts, agent)
+	}
+	project, cwd := terminalText(session.Project, 96), terminalText(session.CWD, 256)
+	if project != "" && cwd != "" {
+		line1Parts = append(line1Parts, project+" ("+cwd+")")
+	} else if project != "" {
+		line1Parts = append(line1Parts, project)
+	} else if cwd != "" {
+		line1Parts = append(line1Parts, cwd)
+	}
+	line1 := strings.Join(line1Parts, " · ")
+
+	line2Parts := make([]string, 0, 3)
+	if models := terminalText(detailModels(session), 256); models != "" {
+		line2Parts = append(line2Parts, models)
+	}
+	if branch := terminalText(session.GitBranch, 96); branch != "" {
+		line2Parts = append(line2Parts, branch)
+	}
+	started, updated := formatDetailTime(session.StartedAt), formatDetailTime(session.UpdatedAt)
+	if started != "" && updated != "" {
+		line2Parts = append(line2Parts, started+"→"+updated)
+	} else if started != "" {
+		line2Parts = append(line2Parts, started)
+	} else if updated != "" {
+		line2Parts = append(line2Parts, updated)
+	}
+	line2 := strings.Join(line2Parts, " · ")
 	line3 := fmt.Sprintf("%s tokens / %s · own %s / %s · subagents %s / %s",
 		humanTokens(totalUsage.TotalTokens()), formatCost(totalCost), humanTokens(ownUsage.TotalTokens()), formatCost(session.Cost),
 		humanTokens(totalUsage.TotalTokens()-ownUsage.TotalTokens()), formatCost(subagentCost))
@@ -809,24 +899,32 @@ func (d *detailState) styleLine(line string, detail detailLine, selected bool) s
 	if detail.role == detailRow && detail.subagentSession != nil {
 		return d.styleSubagentLine(line, detail)
 	}
-	switch detail.role {
+	return styleDetailRole(d.styles, detail.agent, detail.role, line)
+}
+
+func styleDetailRole(styleSet styles, agent model.AgentKind, role detailRole, line string) string {
+	switch role {
 	case detailAccent, detailTool:
-		return d.styles.accent.Render(line)
+		return styleSet.accent.Render(line)
 	case detailAssistant:
-		return d.agentStyle(detail.agent).Render(line)
+		if agent == model.AgentClaude {
+			return styleSet.claude.Render(line)
+		}
+		if agent == model.AgentCodex {
+			return styleSet.codex.Render(line)
+		}
 	case detailSecondary:
-		return d.styles.muted.Render(line)
+		return styleSet.muted.Render(line)
 	case detailWarning:
-		return d.styles.warning.Render(line)
+		return styleSet.warning.Render(line)
 	case detailDiffAdd:
-		return d.styles.diffAdd.Render(line)
+		return styleSet.diffAdd.Render(line)
 	case detailDiffRemove:
-		return d.styles.diffRemove.Render(line)
+		return styleSet.diffRemove.Render(line)
 	case detailDiffContext:
-		return d.styles.muted.Render(line)
-	default:
-		return d.styles.row.Render(line)
+		return styleSet.muted.Render(line)
 	}
+	return styleSet.row.Render(line)
 }
 
 func (d *detailState) styleSubagentLine(line string, detail detailLine) string {
@@ -883,7 +981,7 @@ func (d *detailState) agentStyle(agent model.AgentKind) lipgloss.Style {
 
 func detailModels(session *model.Session) string {
 	if len(session.Models) == 0 {
-		return "—"
+		return ""
 	}
 	missing := make(map[string]bool, len(session.Cost.MissingPricingModels))
 	for _, name := range session.Cost.MissingPricingModels {
@@ -902,7 +1000,7 @@ func detailModels(session *model.Session) string {
 
 func formatDetailTime(value time.Time) string {
 	if value.IsZero() {
-		return "—"
+		return ""
 	}
 	return value.Format("Jan 02 15:04")
 }

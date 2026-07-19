@@ -32,7 +32,7 @@ func defaultKeys() keyMap {
 		Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 		Back:      key.NewBinding(key.WithKeys("esc", "h"), key.WithHelp("esc/h", "back")),
-		Toggle:    key.NewBinding(key.WithKeys(" ", "enter"), key.WithHelp("space/enter", "expand")),
+		Toggle:    key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "expand")),
 		NextAgent: key.NewBinding(key.WithKeys("J"), key.WithHelp("J", "next subagent")),
 		PrevAgent: key.NewBinding(key.WithKeys("K"), key.WithHelp("K", "previous subagent")),
 	}
