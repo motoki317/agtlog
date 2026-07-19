@@ -87,7 +87,7 @@ func TestFollowerReparsesChangedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &countingSource{path: path}
-	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: filepath.Join(root, "cache")})
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
 	follower, err := registry.Follow(context.Background(), WatchOptions{Debounce: 10 * time.Millisecond, RescanInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)

@@ -1,6 +1,13 @@
 package cost
 
-import "testing"
+import (
+	"bytes"
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
 
 func TestEmbeddedTableContainsSupportedModels(t *testing.T) {
 	table, err := EmbeddedTable()
@@ -13,6 +20,306 @@ func TestEmbeddedTableContainsSupportedModels(t *testing.T) {
 		if _, ok := table[name]; !ok {
 			t.Errorf("EmbeddedTable() missing %q", name)
 		}
+	}
+}
+
+func TestRuntimeTableOverlaysCachedModels(t *testing.T) {
+	cacheDir := t.TempDir()
+	cache := `{"claude-opus-4-8":{"input_cost_per_token":42}}`
+	if err := os.WriteFile(filepath.Join(cacheDir, "pricing.json"), []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	table, err := RuntimeTable(cacheDir, true)
+	if err != nil {
+		t.Fatalf("RuntimeTable() error = %v", err)
+	}
+	if got := table["claude-opus-4-8"].Input; got != 42 {
+		t.Fatalf("cached input rate = %v, want 42", got)
+	}
+	if _, ok := table["gpt-5.6"]; !ok {
+		t.Fatal("embedded-only gpt-5.6 pricing was removed by overlay")
+	}
+}
+
+func TestPricingCacheRefreshDecision(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	tests := []struct {
+		name    string
+		age     time.Duration
+		missing bool
+		want    bool
+	}{
+		{name: "fresh", age: time.Hour, want: false},
+		{name: "old", age: 25 * time.Hour, want: true},
+		{name: "future", age: -time.Hour, want: true},
+		{name: "missing", missing: true, want: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "pricing.json")
+			if !test.missing {
+				if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				modified := now.Add(-test.age)
+				if err := os.Chtimes(path, modified, modified); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := pricingCacheNeedsRefresh(path, now); got != test.want {
+				t.Fatalf("pricingCacheNeedsRefresh() = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestRuntimeTableRefreshScheduling(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	tests := []struct {
+		name      string
+		cacheAge  time.Duration
+		cacheFile bool
+		wantFetch int
+	}{
+		{name: "fresh", cacheAge: time.Hour, cacheFile: true, wantFetch: 0},
+		{name: "old", cacheAge: 25 * time.Hour, cacheFile: true, wantFetch: 1},
+		{name: "missing", wantFetch: 1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cacheDir := t.TempDir()
+			cachePath := filepath.Join(cacheDir, "pricing.json")
+			if test.cacheFile {
+				if err := os.WriteFile(cachePath, []byte(`{"cached-model":{"input_cost_per_token":1}}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				modified := now.Add(-test.cacheAge)
+				if err := os.Chtimes(cachePath, modified, modified); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fetches := 0
+			table, err := runtimeTable(runtimePricingOptions{
+				cacheDir: cacheDir,
+				now:      func() time.Time { return now },
+				fetch: func(context.Context) ([]byte, error) {
+					fetches++
+					return []byte(`{"runtime-model":{"input_cost_per_token":7}}`), nil
+				},
+				start: func(task func()) { task() },
+			})
+			if err != nil {
+				t.Fatalf("runtimeTable() error = %v", err)
+			}
+			if fetches != test.wantFetch {
+				t.Fatalf("fetches = %d, want %d", fetches, test.wantFetch)
+			}
+			if test.wantFetch == 0 {
+				return
+			}
+			if _, ok := table["runtime-model"]; ok {
+				t.Fatal("fresh pricing was hot-swapped into the startup table")
+			}
+			cached, err := os.ReadFile(cachePath)
+			if err != nil {
+				t.Fatalf("read refreshed cache: %v", err)
+			}
+			parsed, err := pricingTable(cached)
+			if err != nil || parsed["runtime-model"].Input != 7 {
+				t.Fatalf("refreshed cache = %#v, %v", parsed, err)
+			}
+		})
+	}
+}
+
+func TestRuntimeTableOfflineSkipsFetch(t *testing.T) {
+	fetches := 0
+	_, err := runtimeTable(runtimePricingOptions{
+		cacheDir: t.TempDir(),
+		offline:  true,
+		fetch: func(context.Context) ([]byte, error) {
+			fetches++
+			return []byte("{}"), nil
+		},
+		start: func(task func()) { task() },
+	})
+	if err != nil {
+		t.Fatalf("runtimeTable() error = %v", err)
+	}
+	if fetches != 0 {
+		t.Fatalf("offline fetches = %d, want 0", fetches)
+	}
+}
+
+func TestRuntimeTableMalformedCacheFallsBackToEmbedded(t *testing.T) {
+	cacheDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheDir, pricingCacheName), []byte("{malformed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	table, err := runtimeTable(runtimePricingOptions{cacheDir: cacheDir, offline: true})
+	if err != nil {
+		t.Fatalf("runtimeTable() error = %v", err)
+	}
+	if _, ok := table["gpt-5.6"]; !ok {
+		t.Fatal("malformed cache removed embedded gpt-5.6 pricing")
+	}
+}
+
+func TestRuntimeTableRejectsUnpricedCachedEntries(t *testing.T) {
+	embedded, err := EmbeddedTable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := embedded["gpt-5.6"]
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{name: "null", payload: `{"gpt-5.6":null}`},
+		{name: "empty", payload: `{"gpt-5.6":{}}`},
+		{name: "negative", payload: `{"gpt-5.6":{"input_cost_per_token":-1}}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cacheDir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(cacheDir, pricingCacheName), []byte(test.payload), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			table, err := RuntimeTable(cacheDir, true)
+			if err != nil {
+				t.Fatalf("RuntimeTable() error = %v", err)
+			}
+			if got := table["gpt-5.6"]; got.Input != want.Input || got.Output != want.Output {
+				t.Fatalf("gpt-5.6 pricing = %#v, want embedded %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestReadPricingCacheSupportsParseableXDGFiles(t *testing.T) {
+	t.Run("regular", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), pricingCacheName)
+		if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readPricingCache(path); err != nil {
+			t.Fatalf("readPricingCache() error = %v", err)
+		}
+	})
+	t.Run("oversized", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), pricingCacheName)
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(maxPricingBytes + 1); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readPricingCache(path); err == nil {
+			t.Fatal("readPricingCache() accepted oversized cache")
+		}
+	})
+	t.Run("symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "target.json")
+		if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, pricingCacheName)
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readPricingCache(path); err != nil {
+			t.Fatalf("readPricingCache() error = %v", err)
+		}
+	})
+	t.Run("directory", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), pricingCacheName)
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readPricingCache(path); err == nil {
+			t.Fatal("readPricingCache() accepted directory")
+		}
+	})
+	t.Run("world writable", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		if err := os.Chmod(cacheDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(cacheDir, pricingCacheName)
+		if err := os.WriteFile(path, []byte(`{"gpt-5.6":{"input_cost_per_token":42}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o666); err != nil {
+			t.Fatal(err)
+		}
+		table, err := RuntimeTable(cacheDir, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := table["gpt-5.6"].Input; got != 42 {
+			t.Fatalf("cached input rate = %v, want 42", got)
+		}
+	})
+}
+
+func TestStorePricingCacheSupportsXDGDirectoryLayouts(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		parent := t.TempDir()
+		target := t.TempDir()
+		cacheDir := filepath.Join(parent, "agtlog")
+		if err := os.Symlink(target, cacheDir); err != nil {
+			t.Fatal(err)
+		}
+		if err := storePricingCache(cacheDir, []byte("{}")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(target, pricingCacheName)); err != nil {
+			t.Fatalf("symlink target pricing file error = %v", err)
+		}
+	})
+	t.Run("group writable", func(t *testing.T) {
+		cacheDir := t.TempDir()
+		if err := os.Chmod(cacheDir, 0o770); err != nil {
+			t.Fatal(err)
+		}
+		if err := storePricingCache(cacheDir, []byte("{}")); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("symlink ancestor", func(t *testing.T) {
+		parent := t.TempDir()
+		target := t.TempDir()
+		linkedParent := filepath.Join(parent, "cache")
+		if err := os.Symlink(target, linkedParent); err != nil {
+			t.Fatal(err)
+		}
+		cacheDir := filepath.Join(linkedParent, "agtlog")
+		if err := storePricingCache(cacheDir, []byte("{}")); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(target, "agtlog", pricingCacheName)); err != nil {
+			t.Fatalf("symlink ancestor target error = %v", err)
+		}
+	})
+}
+
+func TestReadPricingResponseEnforcesLimit(t *testing.T) {
+	if got, err := readPricingResponse(bytes.NewBufferString("1234"), 4); err != nil || string(got) != "1234" {
+		t.Fatalf("exact-limit response = %q, %v", got, err)
+	}
+	if _, err := readPricingResponse(bytes.NewBufferString("12345"), 4); err == nil {
+		t.Fatal("readPricingResponse() accepted response over limit")
 	}
 }
 

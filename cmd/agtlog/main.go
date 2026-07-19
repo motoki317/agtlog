@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"unicode"
@@ -34,12 +35,21 @@ func main() {
 	}
 }
 
-func defaultRegistry(agent string) (*source.Registry, error) {
-	table, err := cost.EmbeddedTable()
+func defaultRegistry(agent string, offline bool) (*source.Registry, error) {
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
 	}
-	home, err := os.UserHomeDir()
+	cacheDir := defaultCacheDir(home, os.Getenv("XDG_CACHE_HOME"))
+	claudeRoots := claude.DefaultRoots(home, os.Getenv("CLAUDE_CONFIG_DIR"))
+	codexRoots := codex.DefaultRoots(home, os.Getenv("CODEX_HOME"))
+	cacheRoots := append(append([]string(nil), claudeRoots...), codexRoots...)
+	if resolved, ok := source.ResolveCacheDir(cacheDir, cacheRoots); ok {
+		cacheDir = resolved
+	} else {
+		cacheDir = ""
+	}
+	table, err := cost.RuntimeTable(cacheDir, offline)
 	if err != nil {
 		return nil, err
 	}
@@ -48,36 +58,40 @@ func defaultRegistry(agent string) (*source.Registry, error) {
 	if agent == "" || agent == string(model.AgentClaude) {
 		adapters = append(adapters, claude.NewSource(
 			claude.NewParser(calculator),
-			claude.DefaultRoots(home, os.Getenv("CLAUDE_CONFIG_DIR")),
+			claudeRoots,
 		))
 	}
 	if agent == "" || agent == string(model.AgentCodex) {
 		adapters = append(adapters, codex.NewSource(
 			codex.NewParser(calculator, "gpt-5"),
-			codex.DefaultRoots(home, os.Getenv("CODEX_HOME")),
+			codexRoots,
 		))
-	}
-	cacheDir := ""
-	if userCacheDir, err := os.UserCacheDir(); err == nil {
-		cacheDir = filepath.Join(userCacheDir, "agtlog")
 	}
 	return source.NewRegistry(adapters, source.Options{CacheDir: cacheDir}), nil
 }
 
+func defaultCacheDir(home, xdg string) string {
+	if filepath.IsAbs(xdg) {
+		return filepath.Join(xdg, "agtlog")
+	}
+	return filepath.Join(home, ".cache", "agtlog")
+}
+
 func run(ctx context.Context, args []string, output io.Writer, registry *source.Registry) error {
-	return execute(ctx, args, output, func(string) (*source.Registry, error) { return registry, nil })
+	return execute(ctx, args, output, func(string, bool) (*source.Registry, error) { return registry, nil })
 }
 
 type cliOptions struct {
 	showVersion bool
 	help        bool
+	offline     bool
 	noWatch     bool
 	agent       string
 }
 
 type tuiRunner func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error
 
-type registryFactory func(string) (*source.Registry, error)
+type registryFactory func(string, bool) (*source.Registry, error)
 
 func executeTUI(ctx context.Context, options cliOptions, input io.Reader, output io.Writer, registry *source.Registry, runner tuiRunner) error {
 	runCtx, cancel := context.WithCancel(ctx)
@@ -108,14 +122,16 @@ func executeTUI(ctx context.Context, options cliOptions, input io.Reader, output
 
 func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 	flags := flag.NewFlagSet("agtlog", flag.ContinueOnError)
-	flags.SetOutput(output)
+	flags.SetOutput(io.Discard)
 	showVersion := flags.Bool("version", false, "print version")
+	offline := flags.Bool("offline", false, "skip pricing refresh")
 	noWatch := flags.Bool("no-watch", false, "disable live session following")
 	agent := flags.String("agent", "", "limit sessions to claude or codex")
 	flags.Usage = func() {
-		_, _ = fmt.Fprintln(output, "Usage: agtlog [--no-watch] [--agent claude|codex] [--version]")
+		_, _ = fmt.Fprintln(output, "Usage: agtlog [--offline] [--no-watch] [--agent claude|codex] [--version]")
 		_, _ = fmt.Fprintln(output, "  --agent     limit sessions to claude or codex")
 		_, _ = fmt.Fprintln(output, "  --no-watch  disable live session following")
+		_, _ = fmt.Fprintln(output, "  --offline   skip pricing refresh")
 		_, _ = fmt.Fprintln(output, "  --version   print version")
 	}
 	if err := flags.Parse(args); err != nil {
@@ -132,7 +148,7 @@ func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 		flags.Usage()
 		return cliOptions{}, fmt.Errorf("invalid agent %q", *agent)
 	}
-	return cliOptions{showVersion: *showVersion, noWatch: *noWatch, agent: *agent}, nil
+	return cliOptions{showVersion: *showVersion, offline: *offline, noWatch: *noWatch, agent: *agent}, nil
 }
 
 func execute(ctx context.Context, args []string, output io.Writer, registryFactory registryFactory) error {
@@ -155,14 +171,32 @@ func executeApplication(ctx context.Context, args []string, input io.Reader, out
 		return err
 	}
 	if options.showVersion {
-		_, err := fmt.Fprintln(output, version)
+		_, err := fmt.Fprintln(output, currentVersion())
 		return err
 	}
-	registry, err := factory(options.agent)
+	registry, err := factory(options.agent, options.offline)
 	if err != nil {
 		return err
 	}
 	return executeTUI(ctx, options, input, output, registry, runner)
+}
+
+func currentVersion() string {
+	moduleVersion := ""
+	if info, ok := debug.ReadBuildInfo(); ok {
+		moduleVersion = info.Main.Version
+	}
+	return resolveVersion(version, moduleVersion)
+}
+
+func resolveVersion(linked, module string) string {
+	if linked != "dev" {
+		return linked
+	}
+	if module != "" && module != "(devel)" {
+		return module
+	}
+	return linked
 }
 
 func runBubbleTea(ctx context.Context, input io.Reader, output io.Writer, initial tui.Model, updates <-chan source.SessionUpdate) error {

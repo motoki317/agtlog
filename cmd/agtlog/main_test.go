@@ -24,6 +24,90 @@ func TestTerminalFieldSanitizesDiagnostics(t *testing.T) {
 	}
 }
 
+func TestDefaultCacheDirUsesXDGThenHome(t *testing.T) {
+	tests := []struct {
+		name string
+		xdg  string
+		want string
+	}{
+		{name: "xdg", xdg: "/cache", want: "/cache/agtlog"},
+		{name: "home fallback", want: "/workspace/home/.cache/agtlog"},
+		{name: "relative xdg fallback", xdg: "relative-cache", want: "/workspace/home/.cache/agtlog"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := defaultCacheDir("/workspace/home", test.xdg); got != test.want {
+				t.Fatalf("defaultCacheDir() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestDefaultRegistryProtectsUnselectedAgentRootFromCache(t *testing.T) {
+	home := t.TempDir()
+	claudeRoot := filepath.Join(home, "claude")
+	codexRoot := filepath.Join(home, "codex")
+	xdgRoot := filepath.Join(home, "xdg")
+	if err := os.MkdirAll(filepath.Join(claudeRoot, "projects", "observatory"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(codexRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(xdgRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"user","uuid":"user-1","timestamp":"2026-01-02T03:04:05Z","sessionId":"session-1","cwd":"/workspace/observatory","message":{"role":"user","content":"Map lunar craters"}}` + "\n"
+	if err := os.WriteFile(filepath.Join(claudeRoot, "projects", "observatory", "session.jsonl"), []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(codexRoot, filepath.Join(xdgRoot, "agtlog")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeRoot)
+	t.Setenv("CODEX_HOME", codexRoot)
+	t.Setenv("XDG_CACHE_HOME", xdgRoot)
+
+	registry, err := defaultRegistry("claude", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(codexRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("unselected Codex root entries = %v, want none", entries)
+	}
+}
+
+func TestResolveVersionUsesLinkerThenModuleMetadata(t *testing.T) {
+	tests := []struct {
+		name   string
+		linked string
+		module string
+		want   string
+	}{
+		{name: "linked release", linked: "v1.2.3", module: "v1.2.2", want: "v1.2.3"},
+		{name: "go install module", linked: "dev", module: "v1.2.3", want: "v1.2.3"},
+		{name: "local build", linked: "dev", module: "(devel)", want: "dev"},
+		{name: "missing metadata", linked: "dev", want: "dev"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := resolveVersion(test.linked, test.module); got != test.want {
+				t.Fatalf("resolveVersion() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 type staticSource struct {
 	session *model.Session
 }
@@ -69,7 +153,7 @@ func TestRunPrintsVersionWithoutDiscovery(t *testing.T) {
 func TestExecutePrintsVersionBeforeBuildingRegistry(t *testing.T) {
 	var output bytes.Buffer
 	called := false
-	err := execute(context.Background(), []string{"--version"}, &output, func(string) (*source.Registry, error) {
+	err := execute(context.Background(), []string{"--version"}, &output, func(string, bool) (*source.Registry, error) {
 		called = true
 		return nil, errors.New("registry unavailable")
 	})
@@ -101,30 +185,54 @@ func TestRunRejectsUnexpectedArguments(t *testing.T) {
 	}
 }
 
-func TestParseOptionsReadsWatchAndAgentSelection(t *testing.T) {
-	options, err := parseOptions([]string{"--no-watch", "--agent", "codex"}, io.Discard)
+func TestParseOptionsReadsOfflineWatchAndAgentSelection(t *testing.T) {
+	options, err := parseOptions([]string{"--offline", "--no-watch", "--agent", "codex"}, io.Discard)
 	if err != nil {
 		t.Fatalf("parseOptions() error = %v", err)
 	}
-	if !options.noWatch || options.agent != "codex" {
+	if !options.offline || !options.noWatch || options.agent != "codex" {
 		t.Fatalf("parseOptions() = %#v", options)
 	}
 }
 
-func TestExecuteApplicationPassesAgentToRegistryFactory(t *testing.T) {
+func TestExecuteApplicationReportsFlagErrorsOnce(t *testing.T) {
+	var diagnostics bytes.Buffer
+	err := executeApplication(
+		context.Background(),
+		[]string{"--agent"},
+		strings.NewReader(""),
+		io.Discard,
+		&diagnostics,
+		func(string, bool) (*source.Registry, error) { t.Fatal("registry factory called"); return nil, nil },
+		func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error {
+			t.Fatal("TUI runner called")
+			return nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "flag needs an argument") {
+		t.Fatalf("executeApplication() error = %v", err)
+	}
+	if got := diagnostics.String(); !strings.Contains(got, "Usage: agtlog") || strings.Contains(got, err.Error()) {
+		t.Fatalf("diagnostics = %q, want usage without duplicated error", got)
+	}
+}
+
+func TestExecuteApplicationPassesOptionsToRegistryFactory(t *testing.T) {
 	selected := ""
-	factory := func(agent string) (*source.Registry, error) {
+	offline := false
+	factory := func(agent string, requestedOffline bool) (*source.Registry, error) {
 		selected = agent
+		offline = requestedOffline
 		return source.NewRegistry(nil, source.Options{}), nil
 	}
 	runner := func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error { return nil }
 
-	err := executeApplication(context.Background(), []string{"--no-watch", "--agent", "codex"}, strings.NewReader(""), io.Discard, io.Discard, factory, runner)
+	err := executeApplication(context.Background(), []string{"--offline", "--no-watch", "--agent", "codex"}, strings.NewReader(""), io.Discard, io.Discard, factory, runner)
 	if err != nil {
 		t.Fatalf("executeApplication() error = %v", err)
 	}
-	if selected != "codex" {
-		t.Fatalf("factory agent = %q, want codex", selected)
+	if selected != "codex" || !offline {
+		t.Fatalf("factory options = agent %q, offline %v", selected, offline)
 	}
 }
 
@@ -201,7 +309,7 @@ func TestBubbleTeaRunnerPrintsEverySessionOffTerminal(t *testing.T) {
 
 func TestExecuteWritesInvalidFlagUsageOnlyToDiagnostics(t *testing.T) {
 	var output, diagnostics bytes.Buffer
-	err := executeWithDiagnostics(context.Background(), []string{"--definitely-unknown"}, &output, &diagnostics, func(string) (*source.Registry, error) {
+	err := executeWithDiagnostics(context.Background(), []string{"--definitely-unknown"}, &output, &diagnostics, func(string, bool) (*source.Registry, error) {
 		return source.NewRegistry(nil, source.Options{}), nil
 	})
 	if err == nil {

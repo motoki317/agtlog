@@ -68,7 +68,7 @@ func TestRegistryReusesUnchangedCachedSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &countingSource{path: path}
-	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: filepath.Join(root, "cache")})
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
 
 	for range 2 {
 		if _, err := registry.Discover(context.Background()); err != nil {
@@ -77,6 +77,76 @@ func TestRegistryReusesUnchangedCachedSummary(t *testing.T) {
 	}
 	if adapter.parses != 1 {
 		t.Fatalf("Parse() called %d times, want once for unchanged file", adapter.parses)
+	}
+}
+
+func TestRegistryDoesNotCacheInsideSourceRoots(t *testing.T) {
+	for _, ancestor := range []bool{false, true} {
+		name := "cache directory"
+		if ancestor {
+			name = "ancestor"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "session.jsonl")
+			if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			linked := filepath.Join(t.TempDir(), "cache")
+			if err := os.Symlink(root, linked); err != nil {
+				t.Fatal(err)
+			}
+			cacheDir := linked
+			if ancestor {
+				cacheDir = filepath.Join(linked, "agtlog")
+			}
+			adapter := &countingSource{path: path}
+			registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: cacheDir})
+
+			for range 2 {
+				if _, err := registry.Discover(context.Background()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if adapter.parses != 2 {
+				t.Fatalf("Parse() called %d times, want cache disabled", adapter.parses)
+			}
+			if _, err := os.Stat(registry.cachePath(adapter, path)); !os.IsNotExist(err) {
+				t.Fatalf("cache path error = %v, want not exist", err)
+			}
+		})
+	}
+}
+
+func TestRegistryCachesThroughSymlinkOutsideSourceRoots(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target := t.TempDir()
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	if err := os.Symlink(target, cacheDir); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: cacheDir})
+
+	for range 2 {
+		if _, err := registry.Discover(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if adapter.parses != 1 {
+		t.Fatalf("Parse() called %d times, want symlinked cache reused", adapter.parses)
+	}
+}
+
+func TestCacheDirOutsideRootsRejectsSourceAncestor(t *testing.T) {
+	cacheDir := t.TempDir()
+	root := filepath.Join(cacheDir, "projects")
+	if CacheDirOutsideRoots(cacheDir, []string{root}) {
+		t.Fatal("CacheDirOutsideRoots() accepted source-root ancestor")
 	}
 }
 
@@ -189,7 +259,7 @@ func TestRegistryInvalidatesUnversionedCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &countingSource{path: path}
-	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: filepath.Join(root, "cache")})
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
 	if _, err := registry.Discover(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +296,7 @@ func TestRegistryDoesNotCacheFileChangedDuringParse(t *testing.T) {
 		t.Fatal(err)
 	}
 	adapter := &changingFingerprintSource{countingSource: countingSource{path: path}}
-	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: filepath.Join(root, "cache")})
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
 
 	for range 2 {
 		if _, err := registry.Discover(context.Background()); err != nil {

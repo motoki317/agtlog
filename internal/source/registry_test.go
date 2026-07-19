@@ -61,7 +61,7 @@ func TestRegistryInvalidatesClaudeCacheForSubagentChange(t *testing.T) {
 	}
 	calculator := cost.NewCalculator(cost.Table{"claude-opus-4-8": {Input: 1}})
 	adapter := claude.NewSource(claude.NewParser(calculator), []string{root})
-	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1, CacheDir: filepath.Join(root, "cache")})
+	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1, CacheDir: t.TempDir()})
 
 	if _, err := registry.Discover(context.Background()); err != nil {
 		t.Fatal(err)
@@ -95,7 +95,7 @@ func TestRegistryInvalidatesCacheWhenPricingChanges(t *testing.T) {
 	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cacheDir := filepath.Join(root, "cache")
+	cacheDir := t.TempDir()
 	discoverCost := func(inputRate float64) float64 {
 		calculator := cost.NewCalculator(cost.Table{"claude-opus-4-8": {Input: inputRate}})
 		adapter := claude.NewSource(claude.NewParser(calculator), []string{root})

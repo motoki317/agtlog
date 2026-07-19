@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/motoki317/agtlog/internal/model"
 )
@@ -21,12 +22,22 @@ type cacheEntry struct {
 
 const cacheVersion = 2
 
+const maxSummaryCacheBytes = 64 << 20
+
 type fingerprinter interface {
 	Fingerprint(string) (string, error)
 }
 
 func (r *Registry) loadCached(adapter Source, path, fingerprint string) (*model.Session, bool) {
-	data, err := os.ReadFile(r.cachePath(adapter, path))
+	if !r.cacheDirSafe() {
+		return nil, false
+	}
+	cachePath := r.cachePath(adapter, path)
+	info, err := os.Lstat(cachePath)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() > maxSummaryCacheBytes {
+		return nil, false
+	}
+	data, err := os.ReadFile(cachePath)
 	if err != nil {
 		return nil, false
 	}
@@ -38,11 +49,14 @@ func (r *Registry) loadCached(adapter Source, path, fingerprint string) (*model.
 }
 
 func (r *Registry) storeCached(adapter Source, path, fingerprint string, session *model.Session) {
-	if r.options.CacheDir == "" {
+	if r.options.CacheDir == "" || !r.cacheDirSafe() {
 		return
 	}
 	data, err := json.Marshal(cacheEntry{Version: cacheVersion, Agent: adapter.Agent(), Fingerprint: fingerprint, Session: session})
 	if err != nil || os.MkdirAll(r.options.CacheDir, 0o700) != nil {
+		return
+	}
+	if !r.cacheDirSafe() {
 		return
 	}
 	temporary, err := os.CreateTemp(r.options.CacheDir, "summary-*.tmp")
@@ -63,6 +77,68 @@ func (r *Registry) storeCached(adapter Source, path, fingerprint string, session
 		return
 	}
 	_ = os.Rename(temporaryPath, r.cachePath(adapter, path))
+}
+
+func (r *Registry) cacheDirSafe() bool {
+	var roots []string
+	for _, adapter := range r.sources {
+		roots = append(roots, adapter.Roots()...)
+	}
+	return CacheDirOutsideRoots(r.options.CacheDir, roots)
+}
+
+func CacheDirOutsideRoots(cacheDir string, roots []string) bool {
+	_, ok := ResolveCacheDir(cacheDir, roots)
+	return ok
+}
+
+func ResolveCacheDir(cacheDir string, roots []string) (string, bool) {
+	cachePath, err := resolveExistingPath(cacheDir)
+	if err != nil {
+		return "", false
+	}
+	for _, root := range roots {
+		rootPath, resolveErr := resolveExistingPath(root)
+		if resolveErr != nil {
+			return "", false
+		}
+		if pathWithin(cachePath, rootPath) || pathWithin(rootPath, cachePath) {
+			return "", false
+		}
+	}
+	return cachePath, true
+}
+
+func pathWithin(path, root string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && (relative == "." || relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)))
+}
+
+func resolveExistingPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	current := absolute
+	var missing []string
+	for {
+		resolved, resolveErr := filepath.EvalSymlinks(current)
+		if resolveErr == nil {
+			for index := len(missing) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, missing[index])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !os.IsNotExist(resolveErr) {
+			return "", resolveErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", resolveErr
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 func (r *Registry) discoverSession(adapter Source, path string) (*model.Session, error) {

@@ -174,7 +174,7 @@ func (r *Registry) topLevelRemoved(paths []string) []string {
 			}
 			if affected == path {
 				removed = append(removed, path)
-				if r.options.CacheDir != "" {
+				if r.options.CacheDir != "" && r.cacheDirSafe() {
 					_ = os.Remove(r.cachePath(adapter, path))
 				}
 			}

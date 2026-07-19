@@ -50,6 +50,17 @@ type Registry struct {
 }
 
 func NewRegistry(sources []Source, options Options) *Registry {
+	var roots []string
+	for _, adapter := range sources {
+		roots = append(roots, adapter.Roots()...)
+	}
+	if options.CacheDir != "" {
+		if resolved, ok := ResolveCacheDir(options.CacheDir, roots); ok {
+			options.CacheDir = resolved
+		} else {
+			options.CacheDir = ""
+		}
+	}
 	return &Registry{sources: sources, options: options}
 }
 
