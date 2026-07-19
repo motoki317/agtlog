@@ -22,3 +22,7 @@ trade-offs and alternatives that led to each choice.
 | Date | ADR | Summary |
 | --- | --- | --- |
 | 2026-07-19 | [Coding-agent tool landscape](./20260719-tool-landscape.md) | Build a read-only Go TUI that unifies transcript browsing, cost, and recursive subagent rollup |
+| 2026-07-19 | [Architecture overview](./20260719-architecture-overview.md) | Normalize different log shapes into one recursive session pipeline |
+| 2026-07-19 | [Cost model](./20260719-cost-model.md) | Estimate usage with ccusage-compatible API rates and explicit uncertainty |
+| 2026-07-19 | [Live-follow watching](./20260719-live-follow-watching.md) | Combine recursive fsnotify watches with a stat-based recovery scan |
+| 2026-07-19 | [TUI stack](./20260719-tui-stack.md) | Use Bubble Tea and Bubbles for a testable keyboard-first terminal UI |
