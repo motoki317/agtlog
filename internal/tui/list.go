@@ -577,6 +577,8 @@ func styleSessionCell(cell string, session *model.Session, presentation sessionP
 		return agentStyle.Render(cell)
 	case columnAge, columnMessages:
 		return styles.muted.Render(cell)
+	case columnSubagents:
+		return styles.accent.Render(cell)
 	case columnCost:
 		if presentation.cost.Estimated {
 			return styles.estimated.Render(cell)

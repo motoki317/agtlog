@@ -177,6 +177,21 @@ func TestSelectedRowUsesOneFullWidthStyle(t *testing.T) {
 	}
 }
 
+func TestSubagentColumnUsesAccentStyle(t *testing.T) {
+	unsetEnv(t, "NO_COLOR")
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	styleSet := newStyles(themes["dracula"])
+	column := listColumn{kind: columnSubagents, width: listSubagentsWidth, right: true}
+	cell := fitPlain("17", column.width, column.right)
+	presentation := newSessionPresentation(&model.Session{ID: "lunar", Subagents: []*model.Session{{ID: "scout"}}})
+
+	if got, want := styleSessionCell(cell, &model.Session{ID: "lunar"}, presentation, column, styleSet), styleSet.accent.Render(cell); got != want {
+		t.Fatalf("subagent cell style = %q, want accent %q", got, want)
+	}
+}
+
 func TestHumanTokensUsesCompactTiers(t *testing.T) {
 	tests := []struct {
 		name   string
