@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -139,12 +140,17 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				input = record.Payload.Input
 			}
 			event.ToolInput = codexToolInput(record.Payload.Name, input)
+			event.Detail = codexToolDetail(record.Payload.Name, input)
 			calls[event.CallID] = len(session.Events)
 		case "function_call_output", "custom_tool_call_output":
 			event.Kind, event.CallID = model.EventToolResult, record.Payload.CallID
-			event.Text = model.BoundedDetailText(codexResultSummary(codexOutputText(record.Payload.Output)))
+			output := codexOutputText(record.Payload.Output)
+			event.Text = model.BoundedDetailText(codexResultSummary(output))
 			if index, ok := calls[event.CallID]; ok {
 				call := &session.Events[index]
+				if call.Detail != nil && event.CallID != "" {
+					call.Detail.Output = model.BoundedDetailText(output)
+				}
 				call.ResultSummary = event.Text
 				if !timestamp.Before(call.Timestamp) {
 					call.Duration = timestamp.Sub(call.Timestamp)
@@ -258,13 +264,37 @@ func joinCodexText(blocks []codexTextBlock) string {
 }
 
 func codexOutputText(output json.RawMessage) string {
-	var text string
-	if json.Unmarshal(output, &text) == nil {
+	raw := bytes.TrimSpace(output)
+	if len(raw) == 0 {
+		return ""
+	}
+	if raw[0] == '"' {
+		var text string
+		if json.Unmarshal(raw, &text) != nil {
+			return strings.TrimSpace(string(output))
+		}
 		return text
 	}
-	var blocks []codexTextBlock
-	if json.Unmarshal(output, &blocks) == nil {
-		return joinCodexText(blocks)
+	if raw[0] == '[' {
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		if _, err := decoder.Token(); err == nil {
+			var text strings.Builder
+			first := true
+			for decoder.More() {
+				var block codexTextBlock
+				if decoder.Decode(&block) != nil {
+					return strings.TrimSpace(string(output))
+				}
+				if !first {
+					text.WriteByte('\n')
+				}
+				text.WriteString(block.Text)
+				first = false
+			}
+			if _, err := decoder.Token(); err == nil {
+				return text.String()
+			}
+		}
 	}
 	return strings.TrimSpace(string(output))
 }
@@ -298,6 +328,73 @@ func codexToolInput(name, input string) string {
 		}
 	}
 	return strings.Join(strings.Fields(input), " ")
+}
+
+func codexToolDetail(name, input string) *model.ToolDetail {
+	detail := &model.ToolDetail{}
+	switch name {
+	case "apply_patch":
+		detail.Diff = model.BoundedDetailText(input)
+	case "exec_command":
+		var fields struct {
+			Command string `json:"cmd"`
+		}
+		if json.Unmarshal([]byte(input), &fields) == nil {
+			detail.Input = model.BoundedDetailText(fields.Command)
+		} else {
+			detail.Input = model.BoundedDetailText(input)
+		}
+	default:
+		detail.Input = model.BoundedDetailText(codexPrettyInput(input))
+	}
+	return detail
+}
+
+func codexPrettyInput(input string) string {
+	if bounded := model.BoundedDetailText(input); bounded != input {
+		return bounded
+	}
+	raw := bytes.TrimSpace([]byte(input))
+	if !codexJSONNestingWithin(raw, 32) {
+		return input
+	}
+	var formatted bytes.Buffer
+	if json.Indent(&formatted, raw, "", "  ") == nil {
+		return formatted.String()
+	}
+	return input
+}
+
+func codexJSONNestingWithin(input []byte, limit int) bool {
+	depth := 0
+	inString := false
+	escaped := false
+	for _, char := range input {
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if char == '\\' {
+				escaped = true
+			} else if char == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch char {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+			if depth > limit {
+				return false
+			}
+		case '}', ']':
+			depth--
+		}
+	}
+	return true
 }
 
 func codexResultSummary(output string) string {

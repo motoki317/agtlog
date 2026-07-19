@@ -469,10 +469,158 @@ func TestCodexToolInputSummarizesPatchDiff(t *testing.T) {
 	}
 }
 
+func TestLoadEventsPreservesCodexPatchDetail(t *testing.T) {
+	path := filepath.Join("testdata", "tool-detail", "rollout-tool-detail.jsonl")
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	call := session.Events[0]
+	if call.ToolInput != "+1 −1" {
+		t.Fatalf("ToolInput = %q, want unchanged diff statistic", call.ToolInput)
+	}
+	want := "*** Begin Patch\n*** Update File: /workspace/lunar-lab/route.txt\n@@\n-ridge\n+valley\n*** End Patch"
+	if call.Detail == nil || call.Detail.Diff != want {
+		t.Fatalf("Detail = %#v, want unchanged patch body", call.Detail)
+	}
+}
+
+func TestLoadEventsPreservesCodexExecInputDetail(t *testing.T) {
+	path := filepath.Join("testdata", "tool-detail", "rollout-tool-detail.jsonl")
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	want := "survey-route --all\nprintf 'done\\n'"
+	call := session.Events[2]
+	if call.ToolInput != want {
+		t.Fatalf("ToolInput = %q, want unchanged command", call.ToolInput)
+	}
+	if call.Detail == nil || call.Detail.Input != want {
+		t.Fatalf("Detail = %#v, want multiline command", call.Detail)
+	}
+}
+
+func TestLoadEventsPreservesCodexExecOutputDetail(t *testing.T) {
+	path := filepath.Join("testdata", "tool-detail", "rollout-tool-detail.jsonl")
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	call := session.Events[2]
+	if call.ResultSummary != "exit 3" {
+		t.Fatalf("ResultSummary = %q, want unchanged exit summary", call.ResultSummary)
+	}
+	want := "Process exited with code 3\nFinal output:\nroute blocked\nretry advised"
+	if call.Detail == nil || call.Detail.Output != want {
+		t.Fatalf("Detail = %#v, want newline-preserving output", call.Detail)
+	}
+}
+
+func TestCodexToolDetailPrettyPrintsOtherInputs(t *testing.T) {
+	detail := codexToolDetail("view_image", `{"path":"/workspace/lunar-lab/map.png","detail":"high"}`)
+	want := "{\n  \"path\": \"/workspace/lunar-lab/map.png\",\n  \"detail\": \"high\"\n}"
+	if detail == nil || detail.Input != want {
+		t.Fatalf("codexToolDetail() = %#v, want pretty multiline input", detail)
+	}
+}
+
+func TestCodexToolDetailLeavesDeepJSONRaw(t *testing.T) {
+	input := `{"query":` + strings.Repeat("[", 100) + "0" + strings.Repeat("]", 100) + "}"
+	detail := codexToolDetail("custom_tool", input)
+	if detail == nil || detail.Input != input {
+		t.Fatalf("codexToolDetail() expanded deeply nested input to %d bytes", len(detail.Input))
+	}
+}
+
+func TestCodexToolDetailPreservesRawInputWhitespace(t *testing.T) {
+	input := "  custom call\n    indented body\n"
+	detail := codexToolDetail("custom_tool", input)
+	if detail == nil || detail.Input != input {
+		t.Fatalf("codexToolDetail() = %#v, want exact raw input", detail)
+	}
+}
+
+func TestCodexToolDetailBoundsEveryField(t *testing.T) {
+	value := "start\n" + strings.Repeat("界", 5000) + "\nend"
+	execInput, err := json.Marshal(map[string]string{"cmd": value})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := codexToolDetail("exec_command", string(execInput)).Input, model.BoundedDetailText(value); got != want {
+		t.Fatalf("bounded Input has %d runes, want %d", len([]rune(got)), len([]rune(want)))
+	}
+	if got, want := codexToolDetail("apply_patch", value).Diff, model.BoundedDetailText(value); got != want {
+		t.Fatalf("bounded Diff has %d runes, want %d", len([]rune(got)), len([]rune(want)))
+	}
+
+	path := filepath.Join(t.TempDir(), "rollout-bounded-output.jsonl")
+	call := map[string]any{
+		"type": "response_item",
+		"payload": map[string]any{
+			"type": "function_call", "call_id": "call-exec", "name": "exec_command",
+			"arguments": string(execInput),
+		},
+	}
+	result := map[string]any{
+		"type": "response_item",
+		"payload": map[string]any{
+			"type": "function_call_output", "call_id": "call-exec", "output": value,
+		},
+	}
+	callLine, err := json.Marshal(call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultLine, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(append(callLine, '\n'), append(resultLine, '\n')...), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := session.Events[0].Detail.Output, model.BoundedDetailText(value); got != want {
+		t.Fatalf("bounded Output has %d runes, want %d", len([]rune(got)), len([]rune(want)))
+	}
+}
+
 func TestCodexResultAcceptsContentBlockOutput(t *testing.T) {
 	output := json.RawMessage(`[{"type":"output_text","text":"Process exited with code 7\nFinal output:\nfailed"}]`)
 	if got := codexResultSummary(codexOutputText(output)); got != "exit 7" {
 		t.Fatalf("content-block result = %q, want exit summary", got)
+	}
+}
+
+func TestCodexOutputTextPreservesBlockBoundaryNewlines(t *testing.T) {
+	output := json.RawMessage(`[{"type":"output_text","text":"\nfirst\n"},{"type":"output_text","text":"second\n"}]`)
+	if got := codexOutputText(output); got != "\nfirst\n\nsecond\n" {
+		t.Fatalf("codexOutputText() = %q, want exact joined blocks", got)
+	}
+}
+
+func TestLoadEventsDoesNotAttachCodexDetailWithoutCallID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-missing-call-id.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:00:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"survey-route\"}"}}`,
+		`{"timestamp":"2026-01-02T03:00:02Z","type":"response_item","payload":{"type":"function_call_output","output":"unrelated output"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if output := session.Events[0].Detail.Output; output != "" {
+		t.Fatalf("Detail.Output = %q, want unlinked result", output)
 	}
 }
 

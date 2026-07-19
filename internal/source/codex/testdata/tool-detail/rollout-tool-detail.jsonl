@@ -1,0 +1,4 @@
+{"timestamp":"2026-01-02T03:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-patch","name":"apply_patch","input":"*** Begin Patch\n*** Update File: /workspace/lunar-lab/route.txt\n@@\n-ridge\n+valley\n*** End Patch"}}
+{"timestamp":"2026-01-02T03:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-patch","output":"Done!"}}
+{"timestamp":"2026-01-02T03:00:03Z","type":"response_item","payload":{"type":"function_call","call_id":"call-exec","name":"exec_command","arguments":"{\"cmd\":\"survey-route --all\\nprintf 'done\\\\n'\"}"}}
+{"timestamp":"2026-01-02T03:00:04Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-exec","output":"Process exited with code 3\nFinal output:\nroute blocked\nretry advised"}}
