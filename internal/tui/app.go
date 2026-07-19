@@ -182,13 +182,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if key.Matches(keyMsg, m.keys.Quit) && keyMsg.String() == "ctrl+c" {
+		if key.Matches(keyMsg, m.keys.Quit) && (!m.filtering || keyMsg.String() == "ctrl+c") {
 			return m, tea.Quit
 		}
 		if m.helpOpen {
-			if key.Matches(keyMsg, m.keys.Quit) {
-				return m, tea.Quit
-			}
 			if key.Matches(keyMsg, m.keys.Help, m.keys.Back) {
 				m.helpOpen = false
 			}
@@ -206,9 +203,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, m.detail.update(msg)
-	}
-	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.Matches(keyMsg, m.keys.Quit) {
-		return m, tea.Quit
 	}
 	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.Matches(keyMsg, m.keys.Refresh) && m.registry != nil {
 		m.status = "refreshing…"

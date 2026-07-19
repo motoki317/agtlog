@@ -17,6 +17,95 @@ type refreshTestSource struct {
 	session *model.Session
 }
 
+func TestEmptyListExplainsWhereToFindSessions(t *testing.T) {
+	view := NewModel(nil, nil).View()
+	for _, text := range []string{"No sessions found", "~/.claude", "~/.codex", "press ? for keys"} {
+		if !strings.Contains(view, text) {
+			t.Fatalf("empty list missing %q:\n%s", text, view)
+		}
+	}
+	for _, line := range strings.Split(view, "\n") {
+		if width := ansi.StringWidth(line); width > 80 {
+			t.Fatalf("empty list line width = %d, want <= 80: %q", width, line)
+		}
+	}
+}
+
+func TestHumanTokensUsesCompactTiers(t *testing.T) {
+	tests := []struct {
+		name   string
+		tokens int64
+		want   string
+	}{
+		{name: "plain", tokens: 999, want: "999"},
+		{name: "thousands", tokens: 88_000, want: "88k"},
+		{name: "millions", tokens: 1_200_000, want: "1.2M"},
+		{name: "billions", tokens: 1_021_000_000, want: "1.0B"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := humanTokens(test.tokens); got != test.want {
+				t.Fatalf("humanTokens(%d) = %q, want %q", test.tokens, got, test.want)
+			}
+		})
+	}
+}
+
+func TestBillionTokenRowKeepsTwoDigitSubagentIndicator(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	subagents := make([]*model.Session, 16)
+	for index := range subagents {
+		subagents[index] = &model.Session{ID: fmt.Sprintf("worker-%d", index)}
+	}
+	session := &model.Session{
+		ID:        "lunar",
+		Agent:     model.AgentCodex,
+		Usage:     []model.Usage{{InputTokens: 1_021_000_000}},
+		Subagents: subagents,
+	}
+	m := NewModel([]*model.Session{session}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 8})
+
+	if view := ansi.Strip(updated.(Model).View()); !strings.Contains(view, "1.0B ⑃16") {
+		t.Fatalf("billion-token row truncated subagent indicator:\n%s", view)
+	}
+}
+
+func TestNumericCellsFitStandardColumns(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	subagents := func(count int) []*model.Session {
+		result := make([]*model.Session, count)
+		for index := range result {
+			result[index] = &model.Session{ID: fmt.Sprintf("worker-%d", index)}
+		}
+		return result
+	}
+	tests := []struct {
+		name    string
+		session *model.Session
+	}{
+		{name: "representative", session: &model.Session{UpdatedAt: now.Add(-1_000 * 24 * time.Hour), Messages: 1_000_000, Usage: []model.Usage{{InputTokens: 1_021_000_000}}, Cost: model.Cost{USD: 1_000_000_000, Estimated: true}}},
+		{name: "rounding boundary", session: &model.Session{Messages: 999_999, Usage: []model.Usage{{InputTokens: 999_999_999}}, Cost: model.Cost{USD: 9_999, Estimated: true}, Subagents: subagents(16)}},
+		{name: "maximum scale", session: &model.Session{Messages: int(^uint(0) >> 1), Usage: []model.Usage{{InputTokens: int64(^uint64(0) >> 1)}}, Cost: model.Cost{USD: 9_000_000_000_000_000_000, Estimated: true, MissingPricingModels: []string{"future-model"}}, Subagents: subagents(100)}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			test.session.ID = "lunar"
+			test.session.Agent = model.AgentCodex
+			row := sessionRow(test.session, now, newStyles())
+			columns := listColumns(80)
+			for index := 4; index < len(columns); index++ {
+				if width := ansi.StringWidth(row[index]); width > columns[index].Width {
+					t.Errorf("%s cell width = %d, want <= %d: %q", columns[index].Title, width, columns[index].Width, row[index])
+				}
+			}
+		})
+	}
+}
+
 func (s *refreshTestSource) Agent() model.AgentKind { return model.AgentClaude }
 func (s *refreshTestSource) Roots() []string        { return []string{"/workspace"} }
 func (s *refreshTestSource) Discover(context.Context) ([]string, error) {
@@ -69,6 +158,30 @@ func TestEscapeClearsActiveFilter(t *testing.T) {
 
 	if m.filtering || m.filter.Value() != "" || len(m.visible) != 2 {
 		t.Fatalf("filter state = active %v, value %q, visible %d", m.filtering, m.filter.Value(), len(m.visible))
+	}
+}
+
+func TestQRemainsFilterTextAndControlCQuits(t *testing.T) {
+	m := NewModel([]*model.Session{{ID: "lunar", Title: "Map lunar craters"}}, nil)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = updated.(Model)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	m = updated.(Model)
+	if cmd != nil {
+		if _, ok := cmd().(tea.QuitMsg); ok {
+			t.Fatal("q quit while filter input was active")
+		}
+	}
+	if got := m.filter.Value(); got != "q" {
+		t.Fatalf("filter value = %q, want q", got)
+	}
+
+	_, cmd = m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd == nil {
+		t.Fatal("control-c from filter returned no quit command")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatal("control-c from filter did not return tea.QuitMsg")
 	}
 }
 
@@ -192,6 +305,21 @@ func TestEscapeReturnsFromDetailToList(t *testing.T) {
 
 	if m.screen != screenList || m.detail != nil {
 		t.Fatalf("screen = %v, detail = %#v", m.screen, m.detail)
+	}
+}
+
+func TestQQuitsFromDetail(t *testing.T) {
+	m := NewModel([]*model.Session{{ID: "lunar", Agent: model.AgentClaude}}, nil)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	if cmd == nil {
+		t.Fatal("q from detail returned no quit command")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.QuitMsg); !ok {
+		t.Fatalf("q from detail command returned %T, want tea.QuitMsg", msg)
 	}
 }
 

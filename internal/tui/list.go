@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -11,16 +13,23 @@ import (
 	"github.com/motoki317/agtlog/internal/model"
 )
 
+const (
+	listAgeWidth      = 4
+	listMessagesWidth = 5
+	listTokensWidth   = 8
+	listCostWidth     = 6
+)
+
 func listColumns(width int) []table.Column {
 	columns := []table.Column{
 		{Title: "AGENT", Width: 7},
 		{Title: "PROJECT", Width: 10},
 		{Title: "TITLE", Width: 20},
 		{Title: "MODEL", Width: 12},
-		{Title: "AGE", Width: 4},
-		{Title: "MSGS", Width: 5},
-		{Title: "TOKENS", Width: 8},
-		{Title: "$", Width: 6},
+		{Title: "AGE", Width: listAgeWidth},
+		{Title: "MSGS", Width: listMessagesWidth},
+		{Title: "TOKENS", Width: listTokensWidth},
+		{Title: "$", Width: listCostWidth},
 	}
 	total := 0
 	for _, column := range columns {
@@ -38,16 +47,18 @@ func listColumns(width int) []table.Column {
 
 func sessionRow(session *model.Session, now time.Time, styles styles) table.Row {
 	usage := session.TotalUsage()
-	tokens := humanTokens(usage.TotalTokens())
+	tokenSuffix := ""
+	tokenWidth := 4
 	if count := subagentCount(session); count > 0 {
-		tokens += fmt.Sprintf(" ⑃%d", count)
+		tokenSuffix = " ⑃" + compactCount(int64(count), 3)
+		tokenWidth = min(tokenWidth, listTokensWidth-ansi.StringWidth(tokenSuffix))
 	}
-	tokens = fmt.Sprintf("%8s", tokens)
+	tokens := fmt.Sprintf("%*s", listTokensWidth, compactCount(usage.TotalTokens(), tokenWidth)+tokenSuffix)
 	agent := styles.agentLabel(session.Agent)
 	if session.HasError {
 		agent += styles.warning.Render("⚠")
 	}
-	cost := fmt.Sprintf("%6s", formatCost(session.TotalCost()))
+	cost := fmt.Sprintf("%*s", listCostWidth, formatCost(session.TotalCost()))
 	if session.TotalCost().Estimated {
 		cost = styles.estimated.Render(cost)
 	}
@@ -57,7 +68,7 @@ func sessionRow(session *model.Session, now time.Time, styles styles) table.Row 
 		terminalText(session.Title, 160),
 		terminalText(shortModels(session), 96),
 		styles.muted.Render(formatAge(now, session.UpdatedAt)),
-		styles.muted.Render(fmt.Sprintf("%5d", session.Messages)),
+		styles.muted.Render(fmt.Sprintf("%*s", listMessagesWidth, compactCount(int64(session.Messages), listMessagesWidth))),
 		tokens,
 		cost,
 	}
@@ -134,22 +145,49 @@ func formatAge(now, updated time.Time) string {
 		return fmt.Sprintf("%dm", int(age.Minutes()))
 	case age < 24*time.Hour:
 		return fmt.Sprintf("%dh", int(age.Hours()))
-	default:
+	case age < 365*24*time.Hour:
 		return fmt.Sprintf("%dd", int(age.Hours()/24))
+	case age < 10*365*24*time.Hour:
+		return fmt.Sprintf("%.1fy", age.Hours()/(24*365))
+	default:
+		return fmt.Sprintf("%.0fy", age.Hours()/(24*365))
 	}
 }
 
 func humanTokens(tokens int64) string {
-	switch {
-	case tokens >= 10_000_000:
-		return fmt.Sprintf("%.0fM", float64(tokens)/1_000_000)
-	case tokens >= 1_000_000:
-		return fmt.Sprintf("%.1fM", float64(tokens)/1_000_000)
-	case tokens >= 1_000:
-		return fmt.Sprintf("%.0fk", float64(tokens)/1_000)
-	default:
-		return fmt.Sprintf("%d", tokens)
+	return compactCount(tokens, 4)
+}
+
+func compactCount(value int64, maxWidth int) string {
+	if value < 0 {
+		value = 0
 	}
+	exact := strconv.FormatInt(value, 10)
+	if len(exact) <= maxWidth {
+		return exact
+	}
+	units := []string{"", "k", "M", "B", "T", "P", "E"}
+	divisor := float64(1)
+	unit := 0
+	for unit+1 < len(units) && float64(value) >= divisor*1_000 {
+		divisor *= 1_000
+		unit++
+	}
+	for unit < len(units) {
+		scaled := float64(value) / divisor
+		for precision := 1; precision >= 0; precision-- {
+			if precision == 1 && scaled >= 10 {
+				continue
+			}
+			candidate := fmt.Sprintf("%.*f%s", precision, scaled, units[unit])
+			if len(candidate) <= maxWidth {
+				return candidate
+			}
+		}
+		unit++
+		divisor *= 1_000
+	}
+	return strings.Repeat("9", max(1, maxWidth))
 }
 
 func formatCost(cost model.Cost) string {
@@ -157,22 +195,46 @@ func formatCost(cost model.Cost) string {
 	if cost.Estimated {
 		prefix = "~$"
 	}
+	suffix := ""
 	if len(cost.MissingPricingModels) > 0 {
-		if cost.Estimated {
-			if cost.USD < 10 {
-				return fmt.Sprintf("~$%.1f!", cost.USD)
+		suffix = "!"
+	}
+	amountWidth := listCostWidth - len(prefix) - len(suffix)
+	return prefix + compactDollars(cost.USD, amountWidth) + suffix
+}
+
+func compactDollars(usd float64, maxWidth int) string {
+	if math.IsNaN(usd) || usd < 0 {
+		usd = 0
+	}
+	if math.IsInf(usd, 1) {
+		return "∞"
+	}
+	units := []string{"", "k", "M", "B", "T", "P", "E"}
+	divisor := float64(1)
+	unit := 0
+	for unit+1 < len(units) && usd >= divisor*1_000 {
+		divisor *= 1_000
+		unit++
+	}
+	for unit < len(units) {
+		scaled := usd / divisor
+		precision := 0
+		if unit == 0 && scaled < 10 {
+			precision = 2
+		} else if unit > 0 && scaled < 10 {
+			precision = 1
+		}
+		for ; precision >= 0; precision-- {
+			candidate := fmt.Sprintf("%.*f%s", precision, scaled, units[unit])
+			if len(candidate) <= maxWidth {
+				return candidate
 			}
-			return fmt.Sprintf("~$%.0f!", cost.USD)
 		}
-		if cost.USD < 10 {
-			return fmt.Sprintf("$%.2f!", cost.USD)
-		}
-		return fmt.Sprintf("$%.0f!", cost.USD)
+		unit++
+		divisor *= 1_000
 	}
-	if cost.USD < 10 {
-		return fmt.Sprintf("%s%.2f", prefix, cost.USD)
-	}
-	return fmt.Sprintf("%s%.0f", prefix, cost.USD)
+	return strings.Repeat("9", max(1, maxWidth))
 }
 
 func terminalText(value string, maxRunes int) string {
@@ -196,7 +258,11 @@ func (m Model) listView() string {
 	if m.filtering {
 		footer = "filter: " + m.filter.View() + "  [enter] apply  [esc] clear"
 	}
-	return m.table.View() + "\n" + ansi.Truncate(footer, m.width, "…")
+	body := m.table.View()
+	if len(m.sessions) == 0 {
+		body = "No sessions found.\n" + ansi.Truncate("Check ~/.claude, ~/.codex, or configured agent roots; press ? for keys.", m.width, "…")
+	}
+	return body + "\n" + ansi.Truncate(footer, m.width, "…")
 }
 
 func (m Model) listFooter() string {
