@@ -2,7 +2,10 @@ module github.com/motoki317/agtlog
 
 go 1.26.2
 
-require k8s.io/client-go v0.34.0
+require (
+	github.com/fsnotify/fsnotify v1.10.1
+	k8s.io/client-go v0.34.0
+)
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
