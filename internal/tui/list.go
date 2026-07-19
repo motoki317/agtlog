@@ -630,12 +630,12 @@ func styleSessionCell(cell string, session *model.Session, presentation sessionP
 }
 
 func (m Model) renderKeyBar() string {
-	hints := []string{"/ filter", "s sort", "a agent", "↵ open", "r refresh", "mouse scroll/click"}
+	hints := []string{"↑/↓ move", "/ filter", "s sort", "a agent", "↵ open", "r refresh", "mouse scroll/click"}
 	if !m.styles.mono {
 		hints = append(hints, "t theme")
 	}
 	hints = append(hints, "? help", "q quit")
-	plain := fitKeyHints(m.width, hints, []string{"mouse scroll/click", "t theme", "r refresh", "a agent", "s sort", "/ filter", "? help", "q quit", "↵ open"})
+	plain := fitKeyHints(m.width, hints, []string{"mouse scroll/click", "t theme", "r refresh", "a agent", "s sort", "? help", "/ filter", "↑/↓ move", "q quit", "↵ open"})
 	return m.styles.keyHint.Render(fitPlain(plain, m.width, false))
 }
 

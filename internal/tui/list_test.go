@@ -198,6 +198,18 @@ func TestListRowsReserveFixedCursorMarkerWidth(t *testing.T) {
 	}
 }
 
+func TestListFooterKeepsMovementHintUnderPressure(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	m := NewModel([]*model.Session{{ID: "lunar"}}, nil)
+	m.width = 50
+	footer := ansi.Strip(m.renderKeyBar())
+
+	move, filter := strings.Index(footer, "↑/↓ move"), strings.Index(footer, "/ filter")
+	if move < 0 || filter < 0 || move > filter || ansi.StringWidth(footer) > m.width || strings.Contains(footer, "…") {
+		t.Fatalf("50-column list footer = %q", footer)
+	}
+}
+
 func TestSubagentColumnUsesAccentStyle(t *testing.T) {
 	unsetEnv(t, "NO_COLOR")
 	profile := lipgloss.ColorProfile()

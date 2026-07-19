@@ -13,4 +13,4 @@
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-/ filter   s sort   a agent   ↵ open   r refresh   ? help   q quit
+↑/↓ move   / filter   s sort   a agent   ↵ open   r refresh   ? help   q quit
