@@ -378,6 +378,27 @@ func TestLoadEventsCoalescesMirroredMessages(t *testing.T) {
 	}
 }
 
+func TestLoadEventsCoalescesLongMirroredUserMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-long-mirrored-message.jsonl")
+	message := strings.TrimSpace(strings.Repeat("  lunar telemetry segment\n", 300))
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:00:00.000Z","type":"event_msg","payload":{"type":"user_message","message":` + strconv.Quote(message) + `}}`,
+		`{"timestamp":"2026-01-02T03:00:00.009Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":` + strconv.Quote(message) + `}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	want := model.BoundedDetailText(model.CleanTimelineText(message))
+	if len(session.Events) != 1 || session.Events[0].Kind != model.EventUser || session.Events[0].Text != want {
+		t.Fatalf("long mirrored events = %#v, want one normalized user event", session.Events)
+	}
+}
+
 func TestAppendCodexMessagePreservesDistinctSameKindMessages(t *testing.T) {
 	session := &model.Session{}
 	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: "Survey the northern ridge"}, false)

@@ -96,11 +96,11 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 			switch record.Payload.Type {
 			case "user_message":
 				message := codexTimelineUserMessage(record.Payload.Message)
-				if message != "" && !model.IsHardNoise(message) {
+				if message != "" {
 					appendCodexMessage(session, model.Event{Timestamp: timestamp, Kind: model.EventUser, Text: message, Model: currentModel}, false)
 				}
 			case "agent_message":
-				if record.Payload.Message != "" && !model.IsHardNoise(record.Payload.Message) {
+				if record.Payload.Message != "" {
 					appendCodexMessage(session, model.Event{Timestamp: timestamp, Kind: model.EventAssistantText, Text: record.Payload.Message, Model: currentModel}, false)
 				}
 			case "sub_agent_activity":
@@ -132,7 +132,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 			if event.Kind == model.EventUser {
 				event.Text = codexTimelineUserMessage(event.Text)
 			}
-			if event.Text == "" || model.IsHardNoise(event.Text) {
+			if event.Text == "" {
 				return
 			}
 		case "reasoning":
@@ -163,14 +163,16 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 		default:
 			return
 		}
-		event.Text = model.BoundedDetailText(event.Text)
 		event.ToolInput = model.BoundedDetailText(event.ToolInput)
 		if event.Kind == model.EventUser || event.Kind == model.EventAssistantText {
 			if event.Text != "" {
 				appendCodexMessage(session, event, true)
 			}
-		} else if event.Text != "" || event.Kind == model.EventToolCall || event.Kind == model.EventToolResult {
-			session.Events = append(session.Events, event)
+		} else {
+			event.Text = model.BoundedDetailText(event.Text)
+			if event.Text != "" || event.Kind == model.EventToolCall || event.Kind == model.EventToolResult {
+				session.Events = append(session.Events, event)
+			}
 		}
 	})
 	if err != nil {
