@@ -28,6 +28,9 @@ the bottom. The tab panel leads with the active `Timeline` or `Subagents` name a
 inactive name faint when space permits. The help view is a full-width rounded panel. Every view
 recomputes its panel, viewport, and column geometry after a terminal resize, including detail
 screens stored beneath a drilled child.
+The navigation stack stores session details and item views behind the same `detailScreen`
+interface (`update`, `view`, `resize`, and `setWrap`). Push, pop, resize, and wrap inheritance
+therefore use one path for both concrete screen types.
 
 When the terminal is too short to hold complete stacked regions, list and detail switch to one
 rounded compact panel (plus a key line when it fits). This preserves both borders and the
@@ -149,9 +152,17 @@ Timeline rows truncate by default. `w` switches the current detail screen betwee
 hard wrapping. Wrapping operates on plain text before color is applied; every visual row retains
 the logical row's role, and selection highlights all wrapped rows belonging to the selected item.
 
+`space` is the only in-place expansion key. `enter`, `→`, or `l` opens the focused row: a
+subagent opens its session detail, while a turn, tool, thinking row, user message, compaction, or
+system event opens a pushed item view. A tool item shows its full input, diff, and output, bounded
+only by the model's per-field limit rather than the timeline preview cap. Other item views show the
+event's full text. The item title extends the session breadcrumb with a short event label. Its
+viewport supports `j`, `k`, `g`, `G`, and `w`; the normal back keys restore the parent detail.
+
 ## Key budget
 
 Bindings stay single-key and follow terminal and Vim conventions:
+The detail key bar states the primary split as `space expand · enter open`.
 
 | Screen | Keys | Action |
 | --- | --- | --- |
@@ -165,11 +176,14 @@ Bindings stay single-key and follow terminal and Vim conventions:
 | List | `r` | Rediscover sessions |
 | Detail | `j`/`k`, `↑`/`↓`, `g`/`G` | Move and scroll; `g`/`G` jumps to top or bottom |
 | Detail | `space` | Expand or collapse the selected turn or tool; no-op on subagents |
-| Detail | `enter`, `→`, `l` | Drill into a focused subagent; `enter` otherwise expands a turn or tool in place |
+| Detail | `enter`, `→`, `l` | Open the focused row; subagents open session detail and other rows open an item view |
 | Detail | `tab`/`shift+tab` | Cycle Timeline and Subagents |
 | Detail | `w` | Toggle timeline wrapping; truncation is the default |
 | Detail | `J`/`K` | Next or previous subagent |
 | Detail | `esc`/`←`/`h` | Pop the current detail screen; return to the list at the root |
+| Item | `j`/`k`, `↑`/`↓`, `g`/`G` | Scroll by a row or jump to an edge |
+| Item | `w` | Toggle wrapping; truncation is the default |
+| Item | `esc`/`←`/`h` | Restore the parent detail screen |
 | Both | `t` | Cycle color themes; no-op in mono |
 | Both | `?` | Toggle full help |
 | Both | `q`/`ctrl-c` | Quit |
@@ -177,8 +191,8 @@ Bindings stay single-key and follow terminal and Vim conventions:
 ## Terseness rules
 
 1. Each screen answers one question without opening another view.
-2. Turns and tools start collapsed and expand in place; subagents open as focused screens.
+2. Turns and tools start collapsed and expand in place; `enter` opens every focused row as its own screen.
 3. Lists use human-scale numbers and relative time, not raw counters or timestamps.
 4. Parent rows show recursive totals; detail shows the breakdown.
 5. Hard noise such as permission preambles and synthetic reminders does not enter the timeline.
-6. Headers, list rows, and key bars truncate. Detail timeline rows wrap only while `w` is active.
+6. Headers, list rows, and key bars truncate. Timeline and item rows wrap only while `w` is active.
