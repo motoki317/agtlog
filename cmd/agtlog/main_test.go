@@ -4,73 +4,47 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/motoki317/agtlog/internal/model"
 	"github.com/motoki317/agtlog/internal/source"
+	"github.com/motoki317/agtlog/internal/tui"
 )
 
-func TestFormatSessionMarksEstimatedCost(t *testing.T) {
-	session := &model.Session{
-		Agent:    model.AgentCodex,
-		Project:  "starship",
-		Title:    "Design a rover",
-		Models:   []string{"gpt-5.6-sol"},
-		Messages: 1,
-		Usage:    []model.Usage{{InputTokens: 250, OutputTokens: 40, CacheReadTokens: 50, InputIncludesCacheRead: true}},
-		Cost:     model.Cost{USD: 1.25, Estimated: true},
-	}
-
-	want := "codex\tstarship\tDesign a rover\tgpt-5.6-sol\t1 msgs\t290 tokens\t~$1.2500"
-	if got := formatSession(session); got != want {
-		t.Fatalf("formatSession() = %q, want %q", got, want)
-	}
-}
-
-func TestFormatSessionKeepsTitleOnOneLine(t *testing.T) {
-	session := &model.Session{
-		Agent:   model.AgentClaude,
-		Project: "starship",
-		Title:   "Plan the launch\nwithout delay",
-		Models:  []string{"claude-opus-4-8"},
-	}
-
-	want := "claude\tstarship\tPlan the launch without delay\tclaude-opus-4-8\t0 msgs\t0 tokens\t$0.0000"
-	if got := formatSession(session); got != want {
-		t.Fatalf("formatSession() = %q, want %q", got, want)
-	}
-}
-
-func TestFormatSessionSanitizesEveryExternalField(t *testing.T) {
-	session := &model.Session{
-		Agent:   model.AgentKind("claude\nforged"),
-		Project: "starship\x1b]8;;https://invalid.example\a\nforged",
-		Title:   "safe\u202ereversed\rtitle",
-		Models:  []string{"claude\tforged", "model\x1b[31mred"},
-	}
-
-	got := formatSession(session)
-	if strings.Count(got, "\t") != 6 || strings.ContainsAny(got, "\r\n\x1b\a") || strings.ContainsRune(got, '\u202e') {
-		t.Fatalf("formatSession() emitted unsafe row %q", got)
-	}
-}
-
-func TestFormatSessionMarksMissingPricing(t *testing.T) {
-	session := &model.Session{
-		Agent:  model.AgentClaude,
-		Models: []string{"unknown-model"},
-		Cost:   model.Cost{MissingPricingModels: []string{"unknown-model"}},
-	}
-
-	if got := formatSession(session); !strings.HasSuffix(got, "$unpriced(unknown-model)") {
-		t.Fatalf("formatSession() = %q, want explicit unpriced marker", got)
+func TestTerminalFieldSanitizesDiagnostics(t *testing.T) {
+	got := terminalField("safe\u202ereversed\r\n\x1bforged", 200)
+	if strings.ContainsAny(got, "\r\n\x1b") || strings.ContainsRune(got, '\u202e') {
+		t.Fatalf("terminalField() emitted unsafe text %q", got)
 	}
 }
 
 type staticSource struct {
 	session *model.Session
+}
+
+type reconcilingSource struct {
+	root      string
+	discovers int
+}
+
+func (s *reconcilingSource) Agent() model.AgentKind { return model.AgentClaude }
+func (s *reconcilingSource) Roots() []string        { return []string{s.root} }
+func (s *reconcilingSource) Discover(context.Context) ([]string, error) {
+	s.discovers++
+	return []string{filepath.Join(s.root, "session.jsonl")}, nil
+}
+func (s *reconcilingSource) Parse(path string) (*model.Session, error) {
+	title := "Initial"
+	if s.discovers > 1 {
+		title = "Reconciled"
+	}
+	return &model.Session{ID: "session-a", Agent: model.AgentClaude, Path: path, Title: title}, nil
 }
 
 func (s staticSource) Agent() model.AgentKind { return s.session.Agent }
@@ -79,29 +53,6 @@ func (s staticSource) Discover(context.Context) ([]string, error) {
 	return []string{"session.jsonl"}, nil
 }
 func (s staticSource) Parse(string) (*model.Session, error) { return s.session, nil }
-
-func TestRunPrintsDiscoveredSessions(t *testing.T) {
-	session := &model.Session{
-		ID:       "session-a",
-		Agent:    model.AgentClaude,
-		Project:  "starship",
-		Title:    "Plan the launch",
-		Models:   []string{"claude-opus-4-8"},
-		Messages: 2,
-		Usage:    []model.Usage{{InputTokens: 10, OutputTokens: 2}},
-		Cost:     model.Cost{USD: 0.5},
-	}
-	registry := source.NewRegistry([]source.Source{staticSource{session: session}}, source.Options{Workers: 1})
-	var output bytes.Buffer
-
-	if err := run(context.Background(), nil, &output, registry); err != nil {
-		t.Fatalf("run() error = %v", err)
-	}
-	want := "claude\tstarship\tPlan the launch\tclaude-opus-4-8\t2 msgs\t12 tokens\t$0.5000\n"
-	if output.String() != want {
-		t.Fatalf("run() output = %q, want %q", output.String(), want)
-	}
-}
 
 func TestRunPrintsVersionWithoutDiscovery(t *testing.T) {
 	registry := source.NewRegistry(nil, source.Options{})
@@ -118,7 +69,7 @@ func TestRunPrintsVersionWithoutDiscovery(t *testing.T) {
 func TestExecutePrintsVersionBeforeBuildingRegistry(t *testing.T) {
 	var output bytes.Buffer
 	called := false
-	err := execute(context.Background(), []string{"--version"}, &output, func() (*source.Registry, error) {
+	err := execute(context.Background(), []string{"--version"}, &output, func(string) (*source.Registry, error) {
 		called = true
 		return nil, errors.New("registry unavailable")
 	})
@@ -150,9 +101,107 @@ func TestRunRejectsUnexpectedArguments(t *testing.T) {
 	}
 }
 
+func TestParseOptionsReadsWatchAndAgentSelection(t *testing.T) {
+	options, err := parseOptions([]string{"--no-watch", "--agent", "codex"}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseOptions() error = %v", err)
+	}
+	if !options.noWatch || options.agent != "codex" {
+		t.Fatalf("parseOptions() = %#v", options)
+	}
+}
+
+func TestExecuteApplicationPassesAgentToRegistryFactory(t *testing.T) {
+	selected := ""
+	factory := func(agent string) (*source.Registry, error) {
+		selected = agent
+		return source.NewRegistry(nil, source.Options{}), nil
+	}
+	runner := func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error { return nil }
+
+	err := executeApplication(context.Background(), []string{"--no-watch", "--agent", "codex"}, strings.NewReader(""), io.Discard, io.Discard, factory, runner)
+	if err != nil {
+		t.Fatalf("executeApplication() error = %v", err)
+	}
+	if selected != "codex" {
+		t.Fatalf("factory agent = %q, want codex", selected)
+	}
+}
+
+func TestExecuteTUIUsesStaticSnapshotWithoutWatch(t *testing.T) {
+	session := &model.Session{ID: "session-a", Agent: model.AgentClaude, Project: "starship", Title: "Plan the launch"}
+	registry := source.NewRegistry([]source.Source{staticSource{session: session}}, source.Options{Workers: 1})
+	called := false
+	runner := func(_ context.Context, _ io.Reader, _ io.Writer, initial tui.Model, updates <-chan source.SessionUpdate) error {
+		called = true
+		if updates != nil {
+			t.Fatal("static launch received live update channel")
+		}
+		if !strings.Contains(initial.View(), "Plan the launch") {
+			t.Fatalf("initial view missing discovered session:\n%s", initial.View())
+		}
+		return nil
+	}
+
+	if err := executeTUI(context.Background(), cliOptions{noWatch: true}, strings.NewReader(""), io.Discard, registry, runner); err != nil {
+		t.Fatalf("executeTUI() error = %v", err)
+	}
+	if !called {
+		t.Fatal("runner was not called")
+	}
+}
+
+func TestExecuteTUIReconcilesAfterWatcherStarts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "session.jsonl"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &reconcilingSource{root: root}
+	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1})
+	runner := func(_ context.Context, _ io.Reader, _ io.Writer, initial tui.Model, _ <-chan source.SessionUpdate) error {
+		if !strings.Contains(initial.View(), "Reconciled") {
+			t.Fatalf("initial view was not reconciled after watcher setup:\n%s", initial.View())
+		}
+		return nil
+	}
+
+	if err := executeTUI(context.Background(), cliOptions{}, strings.NewReader(""), io.Discard, registry, runner); err != nil {
+		t.Fatalf("executeTUI() error = %v", err)
+	}
+}
+
+func TestBubbleTeaRunnerDegradesToStaticFrameOffTerminal(t *testing.T) {
+	session := &model.Session{ID: "session-a", Agent: model.AgentClaude, Title: "Plan the launch"}
+	initial := tui.NewModel([]*model.Session{session}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	var output bytes.Buffer
+
+	if err := runBubbleTea(ctx, strings.NewReader(""), &output, initial, nil); err != nil {
+		t.Fatalf("runBubbleTea() error = %v", err)
+	}
+	if !strings.Contains(output.String(), "Plan the launch") || strings.Contains(output.String(), "\x1b[?1049h") {
+		t.Fatalf("non-terminal output = %q", output.String())
+	}
+}
+
+func TestBubbleTeaRunnerPrintsEverySessionOffTerminal(t *testing.T) {
+	sessions := make([]*model.Session, 20)
+	for index := range sessions {
+		sessions[index] = &model.Session{ID: fmt.Sprintf("session-%02d", index), Agent: model.AgentClaude, Title: fmt.Sprintf("Survey %02d", index)}
+	}
+	var output bytes.Buffer
+	if err := runBubbleTea(context.Background(), strings.NewReader(""), &output, tui.NewModel(sessions, nil), nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "Survey 00") || !strings.Contains(output.String(), "Survey 19") {
+		t.Fatalf("static output omitted sessions:\n%s", output.String())
+	}
+}
+
 func TestExecuteWritesInvalidFlagUsageOnlyToDiagnostics(t *testing.T) {
 	var output, diagnostics bytes.Buffer
-	err := executeWithDiagnostics(context.Background(), []string{"--definitely-unknown"}, &output, &diagnostics, func() (*source.Registry, error) {
+	err := executeWithDiagnostics(context.Background(), []string{"--definitely-unknown"}, &output, &diagnostics, func(string) (*source.Registry, error) {
 		return source.NewRegistry(nil, source.Options{}), nil
 	})
 	if err == nil {

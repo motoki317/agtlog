@@ -10,13 +10,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"unicode"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/motoki317/agtlog/internal/cost"
 	"github.com/motoki317/agtlog/internal/model"
 	"github.com/motoki317/agtlog/internal/source"
 	"github.com/motoki317/agtlog/internal/source/claude"
 	"github.com/motoki317/agtlog/internal/source/codex"
+	"github.com/motoki317/agtlog/internal/tui"
+	"golang.org/x/term"
 )
 
 var version = "dev"
@@ -29,7 +34,7 @@ func main() {
 	}
 }
 
-func defaultRegistry() (*source.Registry, error) {
+func defaultRegistry(agent string) (*source.Registry, error) {
 	table, err := cost.EmbeddedTable()
 	if err != nil {
 		return nil, err
@@ -39,15 +44,18 @@ func defaultRegistry() (*source.Registry, error) {
 		return nil, err
 	}
 	calculator := cost.NewCalculator(table)
-	adapters := []source.Source{
-		claude.NewSource(
+	var adapters []source.Source
+	if agent == "" || agent == string(model.AgentClaude) {
+		adapters = append(adapters, claude.NewSource(
 			claude.NewParser(calculator),
 			claude.DefaultRoots(home, os.Getenv("CLAUDE_CONFIG_DIR")),
-		),
-		codex.NewSource(
+		))
+	}
+	if agent == "" || agent == string(model.AgentCodex) {
+		adapters = append(adapters, codex.NewSource(
 			codex.NewParser(calculator, "gpt-5"),
 			codex.DefaultRoots(home, os.Getenv("CODEX_HOME")),
-		),
+		))
 	}
 	cacheDir := ""
 	if userCacheDir, err := os.UserCacheDir(); err == nil {
@@ -57,21 +65,56 @@ func defaultRegistry() (*source.Registry, error) {
 }
 
 func run(ctx context.Context, args []string, output io.Writer, registry *source.Registry) error {
-	return execute(ctx, args, output, func() (*source.Registry, error) { return registry, nil })
+	return execute(ctx, args, output, func(string) (*source.Registry, error) { return registry, nil })
 }
 
 type cliOptions struct {
 	showVersion bool
 	help        bool
+	noWatch     bool
+	agent       string
+}
+
+type tuiRunner func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error
+
+type registryFactory func(string) (*source.Registry, error)
+
+func executeTUI(ctx context.Context, options cliOptions, input io.Reader, output io.Writer, registry *source.Registry, runner tuiRunner) error {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	sessions, err := registry.Discover(runCtx)
+	if err != nil {
+		return err
+	}
+	var follower *source.Follower
+	var updates <-chan source.SessionUpdate
+	if !options.noWatch {
+		follower, err = registry.Follow(runCtx, source.WatchOptions{})
+		if err != nil {
+			return err
+		}
+		defer func() {
+			cancel()
+			_ = follower.Close()
+		}()
+		updates = follower.Updates()
+		sessions, err = registry.Discover(runCtx)
+		if err != nil {
+			return err
+		}
+	}
+	return runner(runCtx, input, output, tui.NewModelWithContext(runCtx, sessions, registry), updates)
 }
 
 func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 	flags := flag.NewFlagSet("agtlog", flag.ContinueOnError)
 	flags.SetOutput(output)
 	showVersion := flags.Bool("version", false, "print version")
-	_ = flags.Bool("no-watch", false, "disable live session following")
+	noWatch := flags.Bool("no-watch", false, "disable live session following")
+	agent := flags.String("agent", "", "limit sessions to claude or codex")
 	flags.Usage = func() {
-		_, _ = fmt.Fprintln(output, "Usage: agtlog [--no-watch] [--version]")
+		_, _ = fmt.Fprintln(output, "Usage: agtlog [--no-watch] [--agent claude|codex] [--version]")
+		_, _ = fmt.Fprintln(output, "  --agent     limit sessions to claude or codex")
 		_, _ = fmt.Fprintln(output, "  --no-watch  disable live session following")
 		_, _ = fmt.Fprintln(output, "  --version   print version")
 	}
@@ -85,14 +128,22 @@ func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 		flags.Usage()
 		return cliOptions{}, fmt.Errorf("unexpected argument %q", flags.Arg(0))
 	}
-	return cliOptions{showVersion: *showVersion}, nil
+	if *agent != "" && *agent != string(model.AgentClaude) && *agent != string(model.AgentCodex) {
+		flags.Usage()
+		return cliOptions{}, fmt.Errorf("invalid agent %q", *agent)
+	}
+	return cliOptions{showVersion: *showVersion, noWatch: *noWatch, agent: *agent}, nil
 }
 
-func execute(ctx context.Context, args []string, output io.Writer, registryFactory func() (*source.Registry, error)) error {
+func execute(ctx context.Context, args []string, output io.Writer, registryFactory registryFactory) error {
 	return executeWithDiagnostics(ctx, args, output, output, registryFactory)
 }
 
-func executeWithDiagnostics(ctx context.Context, args []string, output, diagnostics io.Writer, registryFactory func() (*source.Registry, error)) error {
+func executeWithDiagnostics(ctx context.Context, args []string, output, diagnostics io.Writer, factory registryFactory) error {
+	return executeApplication(ctx, args, os.Stdin, output, diagnostics, factory, runBubbleTea)
+}
+
+func executeApplication(ctx context.Context, args []string, input io.Reader, output, diagnostics io.Writer, factory registryFactory, runner tuiRunner) error {
 	var parsedOutput bytes.Buffer
 	options, err := parseOptions(args, &parsedOutput)
 	if options.help {
@@ -107,46 +158,44 @@ func executeWithDiagnostics(ctx context.Context, args []string, output, diagnost
 		_, err := fmt.Fprintln(output, version)
 		return err
 	}
-	registry, err := registryFactory()
+	registry, err := factory(options.agent)
 	if err != nil {
 		return err
 	}
-	sessions, err := registry.Discover(ctx)
-	if err != nil {
-		return err
-	}
-	for _, session := range sessions {
-		if _, err := fmt.Fprintln(output, formatSession(session)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return executeTUI(ctx, options, input, output, registry, runner)
 }
 
-func formatSession(session *model.Session) string {
-	usage := session.TotalUsage()
-	cost := session.TotalCost()
-	costPrefix := "$"
-	if cost.Estimated {
-		costPrefix = "~$"
+func runBubbleTea(ctx context.Context, input io.Reader, output io.Writer, initial tui.Model, updates <-chan source.SessionUpdate) error {
+	inputFD, inputIsFile := input.(interface{ Fd() uintptr })
+	outputFD, outputIsFile := output.(interface{ Fd() uintptr })
+	if !inputIsFile || !outputIsFile || !term.IsTerminal(int(inputFD.Fd())) || !term.IsTerminal(int(outputFD.Fd())) {
+		_, err := fmt.Fprintln(output, ansi.Strip(initial.StaticView()))
+		return err
 	}
-	costField := fmt.Sprintf("%s%.4f", costPrefix, cost.USD)
-	if len(cost.MissingPricingModels) > 0 {
-		costField = costPrefix + "unpriced(" + terminalField(strings.Join(cost.MissingPricingModels, ","), 200) + ")"
+	program := tea.NewProgram(initial, tea.WithAltScreen(), tea.WithContext(ctx), tea.WithInput(input), tea.WithOutput(output))
+	done := make(chan struct{})
+	var group sync.WaitGroup
+	if updates != nil {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for {
+				select {
+				case <-done:
+					return
+				case update, ok := <-updates:
+					if !ok {
+						return
+					}
+					program.Send(update)
+				}
+			}
+		}()
 	}
-	models := make([]string, 0, len(session.Models))
-	for _, name := range session.Models {
-		models = append(models, terminalField(name, 200))
-	}
-	return fmt.Sprintf("%s\t%s\t%s\t%s\t%d msgs\t%d tokens\t%s",
-		terminalField(string(session.Agent), 32),
-		terminalField(session.Project, 200),
-		terminalField(session.Title, 200),
-		strings.Join(models, ","),
-		session.Messages,
-		usage.TotalTokens(),
-		costField,
-	)
+	_, err := program.Run()
+	close(done)
+	group.Wait()
+	return err
 }
 
 func terminalField(value string, maxRunes int) string {
