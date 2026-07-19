@@ -630,6 +630,26 @@ func TestListNavigationScrollsWindowAndSupportsHomeEnd(t *testing.T) {
 	}
 }
 
+func TestListNavigationSupportsVimEdges(t *testing.T) {
+	sessions := make([]*model.Session, 20)
+	for index := range sessions {
+		sessions[index] = &model.Session{ID: fmt.Sprintf("session-%02d", index), Title: fmt.Sprintf("Survey %02d", index), UpdatedAt: time.Unix(int64(20-index), 0)}
+	}
+	m := NewModel(sessions, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	m = updated.(Model)
+	if m.cursor != 19 || m.listOffset != 15 || !strings.Contains(m.View(), "Survey 19") || strings.Contains(m.View(), "Survey 00") {
+		t.Fatalf("G navigation cursor=%d offset=%d:\n%s", m.cursor, m.listOffset, m.View())
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	m = updated.(Model)
+	if m.cursor != 0 || m.listOffset != 0 || !strings.Contains(m.View(), "Survey 00") {
+		t.Fatalf("g navigation cursor=%d offset=%d:\n%s", m.cursor, m.listOffset, m.View())
+	}
+}
+
 func TestEscapeReturnsFromDetailToList(t *testing.T) {
 	m := NewModel([]*model.Session{{ID: "lunar", Agent: model.AgentClaude}}, nil)
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})

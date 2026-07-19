@@ -296,11 +296,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.moveListSelection(max(1, m.listRowCapacity()))
 		case "pgup":
 			m.moveListSelection(-max(1, m.listRowCapacity()))
-		case "home":
+		case "home", "g":
 			m.cursor = 0
 			m.ensureListSelectionVisible()
 			m.filterSelection = m.selectedIdentity()
-		case "end":
+		case "end", "G":
 			m.cursor = max(0, len(m.visible)-1)
 			m.ensureListSelectionVisible()
 			m.filterSelection = m.selectedIdentity()
