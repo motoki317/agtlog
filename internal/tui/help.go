@@ -13,7 +13,7 @@ func (m Model) helpView() string {
 	}
 	if m.screen == screenDetail {
 		lines = []string{
-			"j/k scroll · space/enter expand",
+			"j/k scroll · g/G edge · space/enter expand",
 			"J/K subagent · esc/h back",
 			"? help · q/ctrl-c quit",
 		}

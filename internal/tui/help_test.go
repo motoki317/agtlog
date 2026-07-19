@@ -22,7 +22,7 @@ func TestDetailHelpIncludesEveryRequiredBinding(t *testing.T) {
 	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
 	m.screen = screenDetail
 	view := m.helpView()
-	for _, want := range []string{"j/k scroll", "space/enter expand", "J/K subagent", "esc/h back", "? help", "ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "space/enter expand", "J/K subagent", "esc/h back", "? help", "ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("detail help missing %q:\n%s", want, view)
 		}
