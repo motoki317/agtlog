@@ -29,6 +29,21 @@ func TestDetailHelpIncludesEveryRequiredBinding(t *testing.T) {
 	}
 }
 
+func TestDetailHelpKeepsBindingsVisibleAtFortyColumns(t *testing.T) {
+	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
+	m.width = 40
+	m.screen = screenDetail
+	view := ansi.Strip(m.helpView())
+	for _, want := range []string{"j/k scroll", "g/G edge", "space/enter expand", "J/K subagent", "esc/h back", "? help", "q/ctrl-c quit"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("40-column detail help missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "…") {
+		t.Fatalf("40-column detail help truncated a binding:\n%s", view)
+	}
+}
+
 func TestHelpRendersAsFullWidthBorderedPanel(t *testing.T) {
 	m := NewModel(nil, nil)
 	lines := strings.Split(ansi.Strip(m.helpView()), "\n")
