@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"os"
@@ -23,7 +24,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v3:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
+	return "codex-parser-v7:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
 }
 
 type tokenUsage struct {
@@ -38,14 +39,17 @@ type logRecord struct {
 	Timestamp string `json:"timestamp"`
 	Type      string `json:"type"`
 	Payload   struct {
-		Type          string `json:"type"`
-		Model         string `json:"model"`
-		SessionID     string `json:"session_id"`
-		CWD           string `json:"cwd"`
-		AgentPath     string `json:"agent_path"`
-		AgentThreadID string `json:"agent_thread_id"`
-		Kind          string `json:"kind"`
-		Git           struct {
+		Type           string `json:"type"`
+		Model          string `json:"model"`
+		ID             string `json:"id"`
+		SessionID      string `json:"session_id"`
+		CWD            string `json:"cwd"`
+		AgentPath      string `json:"agent_path"`
+		AgentThreadID  string `json:"agent_thread_id"`
+		ParentThreadID string `json:"parent_thread_id"`
+		Kind           string `json:"kind"`
+		ThreadSource   string `json:"thread_source"`
+		Git            struct {
 			Branch string `json:"branch"`
 		} `json:"git"`
 		Info struct {
@@ -105,10 +109,15 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 			return
 		}
 		if record.Type == "session_meta" {
-			session.ID = record.Payload.SessionID
+			session.ID = record.Payload.ID
+			if session.ID == "" {
+				session.ID = record.Payload.SessionID
+			}
 			session.CWD = record.Payload.CWD
 			session.Project = filepath.Base(record.Payload.CWD)
 			session.GitBranch = record.Payload.Git.Branch
+			session.AgentPath = record.Payload.AgentPath
+			session.ParentID = record.Payload.ParentThreadID
 		}
 		if record.Type == "turn_context" && record.Payload.Model != "" {
 			currentModel = record.Payload.Model
@@ -121,7 +130,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 			if session.Title == "" {
 				var user userMessageRecord
 				if json.Unmarshal(line, &user) == nil {
-					session.Title = user.Payload.Message
+					session.Title = titleFromUserMessage(user.Payload.Message)
 				}
 			}
 			session.Messages++
@@ -179,6 +188,10 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 		}
 		session.Usage = append(session.Usage, usage)
 		calculated := p.calculator.CalculateCodex(usage, p.defaultPricingModel)
+		if session.ModelCosts == nil {
+			session.ModelCosts = make(map[string]float64)
+		}
+		session.ModelCosts[usage.Model] += calculated.USD
 		session.Cost.USD += calculated.USD
 		session.Cost.Estimated = true
 		for _, name := range calculated.MissingPricingModels {
@@ -188,7 +201,79 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 			}
 		}
 	}
+	if session.Title == "" && session.AgentPath != "" {
+		session.Title = model.CleanTitle(filepath.Base(session.AgentPath))
+	}
 	return session, nil
+}
+
+func titleFromUserMessage(message string) string {
+	var fallback, skippedTag string
+	for _, line := range strings.Split(message, "\n") {
+		line = strings.TrimSpace(line)
+		lower := strings.ToLower(line)
+		if skippedTag != "" {
+			if strings.Contains(lower, "</"+skippedTag+">") {
+				skippedTag = ""
+			}
+			continue
+		}
+		if tag := codexPreambleTag(lower); tag != "" {
+			if !strings.Contains(lower, "</"+tag+">") {
+				skippedTag = tag
+			}
+			continue
+		}
+		heading := ""
+		if strings.HasPrefix(line, "#") {
+			heading = strings.TrimSpace(strings.TrimLeft(line, "#"))
+		}
+		if strings.HasPrefix(strings.ToLower(heading), "brief") {
+			heading = strings.TrimLeft(heading[len("brief"):], " —-:")
+			if title := model.CleanTitle(heading); title != "" {
+				return title
+			}
+		}
+		candidate := line
+		if heading != "" {
+			candidate = heading
+		}
+		if fallback == "" && !codexTitleBoilerplate(candidate) {
+			fallback = model.CleanTitle(candidate)
+		}
+	}
+	return fallback
+}
+
+func codexPreambleTag(line string) string {
+	for _, tag := range []string{"recommended_plugins", "instructions", "environment_context"} {
+		if strings.HasPrefix(line, "<"+tag) {
+			return tag
+		}
+	}
+	return ""
+}
+
+func codexTitleBoilerplate(line string) bool {
+	title := strings.ToLower(model.CleanTitle(line))
+	if title == "" || title == "task" || title == "requirements" || title == "available plugins" {
+		return true
+	}
+	for _, prefix := range []string{
+		"agents.md instructions", "you are an autonomous implementation agent",
+		"deliver the complete implementation", "work from the task below",
+		"you receive no conversation history", "the orchestrator accepts or rejects",
+		"here is a list of plugins", "before the first substantive task",
+	} {
+		if strings.HasPrefix(title, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (p Parser) LoadEvents(ctx context.Context, session *model.Session) error {
+	return p.loadEvents(ctx, session)
 }
 
 func validTokenUsage(usage *tokenUsage) bool {
@@ -222,20 +307,21 @@ const (
 )
 
 func addSubagent(root *model.Session, sourcePath, agentPath, threadID string, timestamp time.Time) {
-	if len(agentPath) > maxAgentPathBytes {
-		return
-	}
-	parts := strings.Split(strings.Trim(agentPath, "/"), "/")
-	if len(parts) > 0 && parts[0] == "root" {
-		parts = parts[1:]
-	}
-	if len(parts) == 0 || len(parts) > maxAgentDepth {
-		return
-	}
-	for _, part := range parts {
-		if part == "" || len(part) > maxAgentComponent {
+	parts := agentPathParts(agentPath)
+	base := agentPathParts(root.AgentPath)
+	if len(base) > 0 {
+		if len(parts) <= len(base) {
 			return
 		}
+		for index := range base {
+			if parts[index] != base[index] {
+				return
+			}
+		}
+		parts = parts[len(base):]
+	}
+	if len(parts) == 0 {
+		return
 	}
 	parent := root
 	for index, name := range parts {
@@ -247,6 +333,7 @@ func addSubagent(root *model.Session, sourcePath, agentPath, threadID string, ti
 			}
 		}
 		if child == nil {
+			childParts := append(append([]string(nil), base...), parts[:index+1]...)
 			child = &model.Session{
 				ID:        name,
 				Agent:     model.AgentCodex,
@@ -254,6 +341,7 @@ func addSubagent(root *model.Session, sourcePath, agentPath, threadID string, ti
 				CWD:       root.CWD,
 				Project:   root.Project,
 				Title:     name,
+				AgentPath: "/root/" + strings.Join(childParts, "/"),
 				StartedAt: timestamp,
 				UpdatedAt: timestamp,
 			}
@@ -261,7 +349,47 @@ func addSubagent(root *model.Session, sourcePath, agentPath, threadID string, ti
 		}
 		if index == len(parts)-1 && threadID != "" {
 			child.ID = threadID
+			if rollout := siblingRollout(sourcePath, threadID); rollout != "" {
+				child.Path = rollout
+			}
 		}
 		parent = child
 	}
+}
+
+func agentPathParts(agentPath string) []string {
+	if len(agentPath) > maxAgentPathBytes {
+		return nil
+	}
+	parts := strings.Split(strings.Trim(agentPath, "/"), "/")
+	if len(parts) > 0 && parts[0] == "root" {
+		parts = parts[1:]
+	}
+	if len(parts) == 0 || len(parts) > maxAgentDepth {
+		return nil
+	}
+	for _, part := range parts {
+		if part == "" || len(part) > maxAgentComponent {
+			return nil
+		}
+	}
+	return parts
+}
+
+func siblingRollout(sourcePath, threadID string) string {
+	if threadID == "" || len(threadID) > maxAgentComponent || strings.ContainsAny(threadID, `/\\`) {
+		return ""
+	}
+	entries, err := os.ReadDir(filepath.Dir(sourcePath))
+	if err != nil {
+		return ""
+	}
+	want := threadID + ".jsonl"
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), want) {
+			continue
+		}
+		return filepath.Join(filepath.Dir(sourcePath), entry.Name())
+	}
+	return ""
 }

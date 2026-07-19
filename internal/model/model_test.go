@@ -3,6 +3,7 @@ package model
 import (
 	"math"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -52,5 +53,33 @@ func TestSessionTotalCostIncludesNestedSubagents(t *testing.T) {
 	want := Cost{USD: 6, Estimated: true, MissingPricingModels: []string{"unknown-a", "unknown-b"}}
 	if got := session.TotalCost(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("TotalCost() = %#v, want %#v", got, want)
+	}
+}
+
+func TestCleanTitleRemovesClosingXMLTag(t *testing.T) {
+	if got := CleanTitle("<command-name>/goal</command-name>"); got != "/goal" {
+		t.Fatalf("CleanTitle() = %q, want command title without XML", got)
+	}
+}
+
+func TestCleanTitleBoundsRepeatedClosingTags(t *testing.T) {
+	value := "Lunar survey" + strings.Repeat("</wrapper>", 100_000)
+	if got := CleanTitle(value); got != "Lunar survey" {
+		t.Fatalf("CleanTitle() = %q, want title without repeated wrappers", got)
+	}
+}
+
+func TestBoundedDetailTextKeepsBothEnds(t *testing.T) {
+	value := "first\n" + strings.Repeat("x", 10_000) + "\nlast"
+	got := BoundedDetailText(value)
+	if !strings.HasPrefix(got, "first\n") || !strings.HasSuffix(got, "\nlast") || len([]rune(got)) != maxDetailRunes {
+		t.Fatalf("BoundedDetailText() did not preserve bounded ends: length %d", len([]rune(got)))
+	}
+}
+
+func TestCleanTimelineTextRemovesEmbeddedHardNoise(t *testing.T) {
+	value := "Keep this line\n<system-reminder>hidden metadata</system-reminder>\nWarmup\nAnd this line"
+	if got := CleanTimelineText(value); got != "Keep this line\nAnd this line" {
+		t.Fatalf("CleanTimelineText() = %q", got)
 	}
 }

@@ -61,29 +61,53 @@ type Cost struct {
 	MissingPricingModels []string
 }
 
+type EventKind string
+
+const (
+	EventUser          EventKind = "user"
+	EventAssistantText EventKind = "assistant-text"
+	EventThinking      EventKind = "thinking"
+	EventToolCall      EventKind = "tool-call"
+	EventToolResult    EventKind = "tool-result"
+	EventSubagent      EventKind = "subagent"
+	EventSystem        EventKind = "system"
+	EventCompact       EventKind = "compact"
+)
+
 type Event struct {
-	Timestamp time.Time
-	Kind      string
-	Text      string
-	AgentID   string
+	Timestamp     time.Time
+	Kind          EventKind
+	Text          string
+	Model         string
+	CallID        string
+	ToolName      string
+	ToolInput     string
+	ResultSummary string
+	Duration      time.Duration
+	AgentID       string
+	Subagent      *Session
 }
 
 type Session struct {
-	ID        string
-	Agent     AgentKind
-	Path      string
-	CWD       string
-	Project   string
-	Title     string
-	Models    []string
-	StartedAt time.Time
-	UpdatedAt time.Time
-	GitBranch string
-	Messages  int
-	Usage     []Usage
-	Cost      Cost
-	Events    []Event
-	Subagents []*Session
+	ID         string
+	Agent      AgentKind
+	Path       string
+	CWD        string
+	Project    string
+	Title      string
+	Models     []string
+	StartedAt  time.Time
+	UpdatedAt  time.Time
+	GitBranch  string
+	AgentPath  string
+	ParentID   string
+	HasError   bool
+	Messages   int
+	Usage      []Usage
+	ModelCosts map[string]float64
+	Cost       Cost
+	Events     []Event
+	Subagents  []*Session
 }
 
 func (s Session) TotalUsage() Usage {

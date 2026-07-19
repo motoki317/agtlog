@@ -1,10 +1,13 @@
 package claude
 
 import (
+	"context"
+	"encoding/json"
 	"math"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +38,24 @@ func TestParseUsesAITitle(t *testing.T) {
 	}
 }
 
+func TestParseCleansAndCapsAITitle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-title.jsonl")
+	title := "  " + strings.Repeat("L", 120) + "\nignored"
+	line := `{"type":"ai-title","timestamp":"2026-01-02T03:04:05Z","sessionId":"session-title","aiTitle":` + strconv.Quote(title) + `}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	want := strings.Repeat("L", 95) + "…"
+	if session.Title != want {
+		t.Fatalf("Parse().Title = %q, want %q", session.Title, want)
+	}
+}
+
 func TestParseFallsBackToFirstUserText(t *testing.T) {
 	path := filepath.Join("testdata", "project-alpha", "session-main", "subagents", "agent-scout.jsonl")
 	session, err := testParser().Parse(path)
@@ -54,6 +75,22 @@ func TestParseReadsUserTextBlocks(t *testing.T) {
 	}
 	if session.Title != "Prepare the vehicle" {
 		t.Fatalf("Parse().Title = %q, want %q", session.Title, "Prepare the vehicle")
+	}
+}
+
+func TestParseFlagsAPIErrorSession(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-error.jsonl")
+	line := `{"type":"assistant","timestamp":"2026-01-02T03:04:05Z","sessionId":"session-error","isApiErrorMessage":true,"apiErrorStatus":529,"error":{"message":"overloaded"},"message":{"id":"msg-error","model":"claude-opus-4-8","usage":{"input_tokens":1,"output_tokens":1}}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !session.HasError {
+		t.Fatalf("Parse().HasError = false for API error record")
 	}
 }
 
@@ -231,5 +268,167 @@ func TestParseSkipsNegativeUsageRecord(t *testing.T) {
 	}
 	if len(session.Usage) != 1 || session.Usage[0].InputTokens != 3 {
 		t.Fatalf("Parse().Usage = %#v, want only valid usage", session.Usage)
+	}
+}
+
+func TestLoadEventsBuildsLinkedClaudeTurn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-detail.jsonl")
+	content := strings.Join([]string{
+		`{"type":"user","timestamp":"2026-01-02T03:00:00Z","message":{"content":"Inspect the engine"}}`,
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:01Z","message":{"model":"claude-opus-4-8","content":[{"type":"thinking","thinking":"Check the engine state"},{"type":"tool_use","id":"tool-read","name":"Read","input":{"file_path":"/workspace/starship/engine.go"}}]}}`,
+		`{"type":"user","timestamp":"2026-01-02T03:00:03Z","message":{"content":[{"type":"tool_result","tool_use_id":"tool-read","content":"engine ready"}]}}`,
+		`{"type":"system","timestamp":"2026-01-02T03:00:04Z","message":{"content":"<system-reminder>ignore this</system-reminder>"}}`,
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:05Z","message":{"model":"claude-opus-4-8","content":[{"type":"text","text":"The engine is ready."}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	wantKinds := []model.EventKind{model.EventUser, model.EventThinking, model.EventToolCall, model.EventToolResult, model.EventAssistantText}
+	gotKinds := make([]model.EventKind, 0, len(session.Events))
+	for _, event := range session.Events {
+		gotKinds = append(gotKinds, event.Kind)
+	}
+	if !reflect.DeepEqual(gotKinds, wantKinds) {
+		t.Fatalf("LoadEvents() kinds = %v, want %v", gotKinds, wantKinds)
+	}
+	call := session.Events[2]
+	if call.ToolName != "Read" || call.ToolInput != "/workspace/starship/engine.go" || call.ResultSummary != "engine ready" || call.Duration != 2*time.Second {
+		t.Fatalf("linked tool call = %#v", call)
+	}
+}
+
+func TestLoadEventsLinksAndLoadsSubagentAtSpawn(t *testing.T) {
+	dir := t.TempDir()
+	parentPath := filepath.Join(dir, "session-detail.jsonl")
+	subagentPath := filepath.Join(dir, "agent-scout.jsonl")
+	parent := strings.Join([]string{
+		`{"type":"user","timestamp":"2026-01-02T03:00:00Z","message":{"content":"Survey the route"}}`,
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:01Z","message":{"model":"claude-opus-4-8","content":[{"type":"tool_use","id":"tool-agent","name":"Agent","input":{"description":"Scout terrain","subagent_type":"Explore"}}]}}`,
+	}, "\n") + "\n"
+	child := `{"type":"user","timestamp":"2026-01-02T03:00:02Z","message":{"content":"Inspect the ridge"}}` + "\n"
+	if err := os.WriteFile(parentPath, []byte(parent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(subagentPath, []byte(child), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	subagent := &model.Session{ID: "scout", Title: "Scout terrain", Path: subagentPath, Agent: model.AgentClaude}
+	session := &model.Session{Path: parentPath, Agent: model.AgentClaude, Subagents: []*model.Session{subagent}}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 2 || session.Events[1].Kind != model.EventSubagent || session.Events[1].Subagent != subagent {
+		t.Fatalf("spawn event = %#v", session.Events)
+	}
+	if len(subagent.Events) != 1 || subagent.Events[0].Text != "Inspect the ridge" {
+		t.Fatalf("subagent events = %#v", subagent.Events)
+	}
+}
+
+func TestLoadEventsUsesAgentIDToDisambiguateSpawn(t *testing.T) {
+	dir := t.TempDir()
+	parentPath := filepath.Join(dir, "session-detail.jsonl")
+	for _, name := range []string{"builder", "scout"} {
+		path := filepath.Join(dir, "agent-"+name+".jsonl")
+		if err := os.WriteFile(path, []byte(`{"type":"user","message":{"content":"Work"}}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parent := strings.Join([]string{
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:01Z","message":{"content":[{"type":"tool_use","id":"tool-agent","name":"Agent","input":{"description":"Investigate"}}]}}`,
+		`{"type":"user","timestamp":"2026-01-02T03:00:02Z","toolUseResult":{"agentId":"scout"},"message":{"content":[{"type":"tool_result","tool_use_id":"tool-agent","content":"done"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(parentPath, []byte(parent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	builder := &model.Session{ID: "builder", Title: "Build", Path: filepath.Join(dir, "agent-builder.jsonl"), Agent: model.AgentClaude}
+	scout := &model.Session{ID: "scout", Title: "Scout", Path: filepath.Join(dir, "agent-scout.jsonl"), Agent: model.AgentClaude}
+	session := &model.Session{Path: parentPath, Agent: model.AgentClaude, Subagents: []*model.Session{builder, scout}}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Events[0].Subagent != scout {
+		t.Fatalf("spawn linked to %#v, want scout", session.Events[0].Subagent)
+	}
+}
+
+func TestLoadEventsDropsHardNoise(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-noise.jsonl")
+	content := strings.Join([]string{
+		`{"type":"user","timestamp":"2026-01-02T03:00:00Z","message":{"content":"Warmup"}}`,
+		`{"type":"user","timestamp":"2026-01-02T03:00:01Z","message":{"content":"<system-reminder>hidden metadata</system-reminder>"}}`,
+		`{"type":"user","timestamp":"2026-01-02T03:00:02Z","message":{"content":"<permission-preamble>hidden policy</permission-preamble>"}}`,
+		`{"type":"user","timestamp":"2026-01-02T03:00:03Z","message":{"content":"Plot the trajectory"}}`,
+		`{"type":"user","timestamp":"2026-01-02T03:00:04Z","message":{"content":[{"type":"text","text":"<system-reminder>hidden metadata</system-reminder>"},{"type":"text","text":"Confirm the orbit"}]}}`,
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:05Z","message":{"model":"claude-opus-4-8","content":[{"type":"text","text":"Trajectory ready\n<system-reminder>hidden metadata</system-reminder>"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	want := []string{"Plot the trajectory", "Confirm the orbit", "Trajectory ready"}
+	if len(session.Events) != len(want) {
+		t.Fatalf("LoadEvents() = %#v, want %d meaningful events", session.Events, len(want))
+	}
+	for index, text := range want {
+		if session.Events[index].Text != text {
+			t.Fatalf("event %d text = %q, want %q", index, session.Events[index].Text, text)
+		}
+	}
+	if session.Events[1].Kind != model.EventUser || session.Events[2].Kind != model.EventAssistantText {
+		t.Fatalf("mixed-content event kinds = %q, %q", session.Events[1].Kind, session.Events[2].Kind)
+	}
+}
+
+func TestClaudeToolInputSummarizesEditDiff(t *testing.T) {
+	input := json.RawMessage(`{"file_path":"/workspace/starship/engine.go","old_string":"old one\nold two","new_string":"new one\nnew two\nnew three"}`)
+	if got := claudeToolInput("Edit", input); got != "/workspace/starship/engine.go · +3 −2" {
+		t.Fatalf("claudeToolInput() = %q, want terse diff stat", got)
+	}
+}
+
+func TestLoadEventsSummarizesBashExit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-bash.jsonl")
+	content := strings.Join([]string{
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:01Z","message":{"content":[{"type":"tool_use","id":"tool-bash","name":"Bash","input":{"command":"check-route"}}]}}`,
+		`{"type":"user","timestamp":"2026-01-02T03:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"tool-bash","content":"Error: Exit code 7\nroute blocked"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Events[0].ResultSummary != "exit 7" {
+		t.Fatalf("ResultSummary = %q, want exit 7", session.Events[0].ResultSummary)
+	}
+}
+
+func TestLoadEventsKeepsCompactionBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-compact.jsonl")
+	line := `{"type":"system","subtype":"compact_boundary","timestamp":"2026-01-02T03:00:00Z","content":"Context compacted"}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Events) != 1 || session.Events[0].Kind != model.EventCompact || session.Events[0].Text != "Context compacted" {
+		t.Fatalf("events = %#v, want compact boundary", session.Events)
 	}
 }

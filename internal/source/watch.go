@@ -122,6 +122,17 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 				changed := append([]string(nil), change.Paths...)
 				changed = append(changed, r.removedParentPaths(change.RemovedPaths)...)
 				sessions := r.refresh(ctx, changed)
+				needsSnapshot := r.pathsUseAgent(change.RemovedPaths, model.AgentCodex)
+				for _, session := range sessions {
+					needsSnapshot = needsSnapshot || session.Agent == model.AgentCodex
+				}
+				if needsSnapshot {
+					if snapshot, discoverErr := r.Discover(ctx); discoverErr == nil {
+						sessions = snapshot
+					} else {
+						sessions = nil
+					}
+				}
 				removed := r.topLevelRemoved(change.RemovedPaths)
 				if len(sessions) == 0 && len(removed) == 0 {
 					continue
@@ -137,6 +148,17 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 		}
 	}()
 	return follower, nil
+}
+
+func (r *Registry) pathsUseAgent(paths []string, agent model.AgentKind) bool {
+	for _, path := range paths {
+		for _, adapter := range r.sources {
+			if adapter.Agent() == agent && insideAnyRoot(path, adapter.Roots()) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (r *Registry) topLevelRemoved(paths []string) []string {

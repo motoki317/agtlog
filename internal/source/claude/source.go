@@ -104,6 +104,10 @@ func (s Source) Parse(path string) (*model.Session, error) {
 	return s.parser.Parse(path)
 }
 
+func (s Source) LoadEvents(ctx context.Context, session *model.Session) error {
+	return s.parser.LoadEvents(ctx, session)
+}
+
 func (s Source) Fingerprint(path string) (string, error) {
 	hash := sha256.New()
 	_, _ = fmt.Fprintln(hash, s.parser.CacheFingerprint())

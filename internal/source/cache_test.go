@@ -5,20 +5,38 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	"github.com/motoki317/agtlog/internal/model"
 )
 
 type countingSource struct {
-	path   string
-	parses int
+	path    string
+	parses  int
+	details int
 }
 
 type changingFingerprintSource struct {
 	countingSource
 	fingerprints int
 }
+
+type graphSource struct {
+	sessions map[string]*model.Session
+}
+
+func (s graphSource) Agent() model.AgentKind { return model.AgentCodex }
+func (s graphSource) Roots() []string        { return []string{"/fictional"} }
+func (s graphSource) Discover(context.Context) ([]string, error) {
+	paths := make([]string, 0, len(s.sessions))
+	for path := range s.sessions {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+func (s graphSource) Parse(path string) (*model.Session, error) { return s.sessions[path], nil }
 
 func (s *changingFingerprintSource) Fingerprint(string) (string, error) {
 	s.fingerprints++
@@ -37,6 +55,11 @@ func (s *countingSource) Parse(path string) (*model.Session, error) {
 	s.parses++
 	return &model.Session{ID: "cached-session", Agent: model.AgentClaude, Path: path}, nil
 }
+func (s *countingSource) LoadEvents(_ context.Context, session *model.Session) error {
+	s.details++
+	session.Events = []model.Event{{Kind: model.EventUser, Text: "Inspect the horizon"}}
+	return nil
+}
 
 func TestRegistryReusesUnchangedCachedSummary(t *testing.T) {
 	root := t.TempDir()
@@ -54,6 +77,108 @@ func TestRegistryReusesUnchangedCachedSummary(t *testing.T) {
 	}
 	if adapter.parses != 1 {
 		t.Fatalf("Parse() called %d times, want once for unchanged file", adapter.parses)
+	}
+}
+
+func TestRegistryLoadsDetailOnlyWhenRequested(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1})
+	sessions, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adapter.details != 0 || len(sessions[0].Events) != 0 {
+		t.Fatalf("Discover() eagerly loaded detail")
+	}
+
+	if err := registry.LoadDetail(context.Background(), sessions[0]); err != nil {
+		t.Fatalf("LoadDetail() error = %v", err)
+	}
+	if adapter.details != 1 || len(sessions[0].Events) != 1 {
+		t.Fatalf("detail calls = %d, events = %#v", adapter.details, sessions[0].Events)
+	}
+}
+
+func TestRegistryRefusesDetailOutsideRegisteredRoots(t *testing.T) {
+	root := t.TempDir()
+	adapter := &countingSource{path: filepath.Join(root, "session.jsonl")}
+	registry := NewRegistry([]Source{adapter}, Options{})
+	outside := &model.Session{ID: "outside", Agent: model.AgentClaude, Path: filepath.Join(t.TempDir(), "outside.jsonl")}
+
+	if err := registry.LoadDetail(context.Background(), outside); err == nil {
+		t.Fatal("LoadDetail() accepted a session outside registered roots")
+	}
+	if adapter.details != 0 {
+		t.Fatalf("outside detail invoked loader %d times", adapter.details)
+	}
+}
+
+func TestRegistryLinksSubagentSummariesAndKeepsOnlyTopLevel(t *testing.T) {
+	child := &model.Session{ID: "child", ParentID: "root", Agent: model.AgentCodex, Path: "/fictional/child.jsonl", Usage: []model.Usage{{InputTokens: 20}}, Cost: model.Cost{USD: 2, Estimated: true}}
+	parent := &model.Session{ID: "root", Agent: model.AgentCodex, Path: "/fictional/root.jsonl", Usage: []model.Usage{{InputTokens: 10}}, Cost: model.Cost{USD: 1, Estimated: true}, Subagents: []*model.Session{{ID: "child", Agent: model.AgentCodex}}}
+	adapter := graphSource{sessions: map[string]*model.Session{parent.Path: parent, child.Path: child}}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 2})
+
+	sessions, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0] != parent || sessions[0].Subagents[0] != child {
+		t.Fatalf("top-level graph = %#v, want linked parent only", sessions)
+	}
+	if got := sessions[0].TotalUsage().InputTokens; got != 30 {
+		t.Fatalf("rolled-up input = %d, want 30", got)
+	}
+	if got := sessions[0].TotalCost().USD; got != 3 {
+		t.Fatalf("rolled-up cost = %v, want 3", got)
+	}
+}
+
+func TestRegistryKeepsOrphanedCodexChildInspectable(t *testing.T) {
+	orphan := &model.Session{
+		ID:       "child",
+		ParentID: "missing-parent",
+		Agent:    model.AgentCodex,
+		Path:     "/fictional/orphan.jsonl",
+		Title:    "orphaned scout",
+	}
+	adapter := graphSource{sessions: map[string]*model.Session{orphan.Path: orphan}}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1})
+
+	sessions, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0] != orphan {
+		t.Fatalf("orphan discovery = %#v, want inspectable child", sessions)
+	}
+}
+
+func TestLinkSessionGraphsRevertsMissingCachedChildToSpawnPlaceholder(t *testing.T) {
+	root := t.TempDir()
+	parentPath := filepath.Join(root, "root.jsonl")
+	missingChildPath := filepath.Join(root, "child.jsonl")
+	parent := &model.Session{
+		ID:    "root",
+		Agent: model.AgentCodex,
+		Path:  parentPath,
+		Subagents: []*model.Session{{
+			ID:        "child",
+			Agent:     model.AgentCodex,
+			Path:      missingChildPath,
+			AgentPath: "/root/scout",
+		}},
+	}
+
+	linkSessionGraphs([]*model.Session{parent})
+
+	if got := parent.Subagents[0].Path; got != parentPath+"#scout" {
+		t.Fatalf("missing cached child path = %q, want spawn placeholder", got)
 	}
 }
 

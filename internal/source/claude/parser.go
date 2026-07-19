@@ -2,6 +2,7 @@ package claude
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,18 +22,21 @@ type Parser struct {
 }
 
 type logRecord struct {
-	Type        string   `json:"type"`
-	AITitle     string   `json:"aiTitle"`
-	Timestamp   string   `json:"timestamp"`
-	SessionID   string   `json:"sessionId"`
-	AgentID     string   `json:"agentId"`
-	CWD         string   `json:"cwd"`
-	GitBranch   string   `json:"gitBranch"`
-	RequestID   string   `json:"requestId"`
-	IsSidechain bool     `json:"isSidechain"`
-	Speed       string   `json:"speed"`
-	CostUSD     *float64 `json:"costUSD"`
-	Message     struct {
+	Type              string          `json:"type"`
+	AITitle           string          `json:"aiTitle"`
+	Timestamp         string          `json:"timestamp"`
+	SessionID         string          `json:"sessionId"`
+	AgentID           string          `json:"agentId"`
+	CWD               string          `json:"cwd"`
+	GitBranch         string          `json:"gitBranch"`
+	RequestID         string          `json:"requestId"`
+	IsSidechain       bool            `json:"isSidechain"`
+	Speed             string          `json:"speed"`
+	CostUSD           *float64        `json:"costUSD"`
+	Error             json.RawMessage `json:"error"`
+	APIErrorStatus    json.RawMessage `json:"apiErrorStatus"`
+	IsAPIErrorMessage bool            `json:"isApiErrorMessage"`
+	Message           struct {
 		ID    string `json:"id"`
 		Model string `json:"model"`
 		Usage struct {
@@ -59,11 +63,249 @@ func NewParser(calculator cost.Calculator) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v3:" + p.calculator.Fingerprint()
+	return "claude-parser-v8:" + p.calculator.Fingerprint()
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
 	return p.parse(path, 0, make(map[string]bool))
+}
+
+func (p Parser) LoadEvents(ctx context.Context, session *model.Session) error {
+	return p.loadEvents(ctx, session, 0, make(map[*model.Session]bool))
+}
+
+func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth int, visited map[*model.Session]bool) error {
+	if depth > maxSubagentDepth || visited[session] {
+		return errors.New("subagent event cycle detected")
+	}
+	visited[session] = true
+	defer delete(visited, session)
+
+	info, err := os.Lstat(session.Path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return errors.New("session path is not a regular file")
+	}
+	file, err := os.Open(session.Path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	session.Events = nil
+	calls := make(map[string]int)
+	linkedSubagents := make(map[*model.Session]bool)
+	err = jsonl.ForEachContext(ctx, file, func(line []byte) {
+		var record struct {
+			Type      string `json:"type"`
+			Subtype   string `json:"subtype"`
+			Content   string `json:"content"`
+			Timestamp string `json:"timestamp"`
+			Message   struct {
+				Model   string          `json:"model"`
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+			ToolUseResult json.RawMessage `json:"toolUseResult"`
+		}
+		if json.Unmarshal(line, &record) != nil {
+			return
+		}
+		timestamp, _ := time.Parse(time.RFC3339Nano, record.Timestamp)
+		if record.Type == "system" {
+			if record.Subtype == "compact_boundary" {
+				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: model.BoundedDetailText(record.Content)})
+			}
+			return
+		}
+		if record.Type != "user" && record.Type != "assistant" {
+			return
+		}
+		if record.Type == "user" {
+			if text := userText(record.Message.Content); text != "" {
+				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventUser, Text: model.BoundedDetailText(text)})
+			}
+		}
+		var blocks []struct {
+			Type      string          `json:"type"`
+			Text      string          `json:"text"`
+			Thinking  string          `json:"thinking"`
+			ID        string          `json:"id"`
+			Name      string          `json:"name"`
+			Input     json.RawMessage `json:"input"`
+			ToolUseID string          `json:"tool_use_id"`
+			Content   json.RawMessage `json:"content"`
+			IsError   bool            `json:"is_error"`
+		}
+		if json.Unmarshal(record.Message.Content, &blocks) != nil {
+			return
+		}
+		for _, block := range blocks {
+			event := model.Event{Timestamp: timestamp, Model: record.Message.Model}
+			switch block.Type {
+			case "text":
+				if record.Type != "assistant" {
+					continue
+				}
+				event.Kind, event.Text = model.EventAssistantText, model.CleanTimelineText(block.Text)
+				if event.Text == "" {
+					continue
+				}
+			case "thinking":
+				if record.Type != "assistant" {
+					continue
+				}
+				event.Kind, event.Text = model.EventThinking, block.Thinking
+			case "tool_use":
+				if record.Type != "assistant" {
+					continue
+				}
+				event.Kind, event.CallID, event.ToolName = model.EventToolCall, block.ID, block.Name
+				event.ToolInput = model.BoundedDetailText(claudeToolInput(block.Name, block.Input))
+				if block.Name == "Agent" || block.Name == "Task" {
+					event.Kind = model.EventSubagent
+					event.Subagent = matchClaudeSubagent(session.Subagents, block.Input, linkedSubagents)
+					if event.Subagent != nil {
+						event.AgentID = event.Subagent.ID
+						linkedSubagents[event.Subagent] = true
+					}
+				}
+				calls[block.ID] = len(session.Events)
+			case "tool_result":
+				event.Kind, event.CallID = model.EventToolResult, block.ToolUseID
+				event.Text = rawText(block.Content)
+				if index, ok := calls[block.ToolUseID]; ok {
+					call := &session.Events[index]
+					if agentID := toolResultAgentID(record.ToolUseResult); call.Kind == model.EventSubagent && agentID != "" {
+						if subagent := subagentByID(session.Subagents, agentID); subagent != nil {
+							delete(linkedSubagents, call.Subagent)
+							call.Subagent, call.AgentID = subagent, subagent.ID
+							linkedSubagents[subagent] = true
+						}
+					}
+					event.Text = model.BoundedDetailText(claudeResultSummary(call.ToolName, event.Text, block.IsError))
+					call.ResultSummary = event.Text
+					if !timestamp.Before(call.Timestamp) {
+						call.Duration = timestamp.Sub(call.Timestamp)
+					}
+				}
+			default:
+				continue
+			}
+			event.Text = model.BoundedDetailText(event.Text)
+			if event.Text != "" || event.Kind == model.EventToolCall || event.Kind == model.EventToolResult || event.Kind == model.EventSubagent {
+				session.Events = append(session.Events, event)
+			}
+		}
+	})
+	if err != nil {
+		return err
+	}
+	for _, subagent := range session.Subagents {
+		if err := p.loadEvents(ctx, subagent, depth+1, visited); err != nil {
+			continue
+		}
+	}
+	return nil
+}
+
+func subagentByID(subagents []*model.Session, id string) *model.Session {
+	for _, subagent := range subagents {
+		if subagent.ID == id {
+			return subagent
+		}
+	}
+	return nil
+}
+
+func toolResultAgentID(result json.RawMessage) string {
+	var fields struct {
+		AgentID string `json:"agentId"`
+	}
+	_ = json.Unmarshal(result, &fields)
+	return fields.AgentID
+}
+
+func matchClaudeSubagent(subagents []*model.Session, input json.RawMessage, linked map[*model.Session]bool) *model.Session {
+	var fields map[string]string
+	_ = json.Unmarshal(input, &fields)
+	candidates := []string{fields["name"], fields["description"], fields["subagent_type"]}
+	for _, subagent := range subagents {
+		if linked[subagent] {
+			continue
+		}
+		for _, candidate := range candidates {
+			if strings.EqualFold(candidate, subagent.ID) || strings.EqualFold(candidate, subagent.Title) {
+				return subagent
+			}
+		}
+	}
+	for _, subagent := range subagents {
+		if !linked[subagent] {
+			return subagent
+		}
+	}
+	return nil
+}
+
+func claudeResultSummary(toolName, result string, isError bool) string {
+	if toolName != "Bash" {
+		return result
+	}
+	const marker = "Exit code "
+	if start := strings.Index(result, marker); start >= 0 {
+		value := result[start+len(marker):]
+		if end := strings.IndexAny(value, " \r\n"); end >= 0 {
+			value = value[:end]
+		}
+		return "exit " + value
+	}
+	if isError {
+		return "error"
+	}
+	return "exit 0"
+}
+
+func claudeToolInput(name string, input json.RawMessage) string {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(input, &fields) == nil {
+		if name == "Edit" {
+			var path, oldText, newText string
+			_ = json.Unmarshal(fields["file_path"], &path)
+			_ = json.Unmarshal(fields["old_string"], &oldText)
+			_ = json.Unmarshal(fields["new_string"], &newText)
+			return fmt.Sprintf("%s · +%d −%d", path, textLineCount(newText), textLineCount(oldText))
+		}
+		key := ""
+		switch name {
+		case "Read", "Edit", "Write":
+			key = "file_path"
+		case "Bash":
+			key = "command"
+		case "Agent", "Task":
+			key = "description"
+		}
+		if key != "" {
+			var value string
+			if json.Unmarshal(fields[key], &value) == nil {
+				return value
+			}
+		}
+	}
+	return rawText(input)
+}
+
+func textLineCount(text string) int {
+	if text == "" {
+		return 0
+	}
+	return strings.Count(text, "\n") + 1
+}
+
+func rawText(value json.RawMessage) string {
+	var text string
+	if json.Unmarshal(value, &text) == nil {
+		return strings.Join(strings.Fields(text), " ")
+	}
+	return strings.Join(strings.Fields(string(value)), " ")
 }
 
 const maxSubagentDepth = 64
@@ -177,8 +419,8 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 				session.UpdatedAt = timestamp
 			}
 		}
-		if envelope.Type != "user" && envelope.Type != "ai-title" &&
-			!(envelope.Type == "assistant" && bytes.Contains(line, []byte(`"usage"`))) {
+		hasUsage := bytes.Contains(line, []byte(`"usage"`))
+		if envelope.Type != "user" && envelope.Type != "ai-title" && envelope.Type != "assistant" {
 			return
 		}
 		var record logRecord
@@ -186,15 +428,18 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 			return
 		}
 		if record.Type == "ai-title" {
-			session.Title = record.AITitle
+			session.Title = model.CleanTitle(record.AITitle)
 		} else if record.Type == "user" && session.Title == "" {
 			var content userContentRecord
 			if json.Unmarshal(line, &content) == nil {
-				session.Title = userText(content.Message.Content)
+				session.Title = model.CleanTitle(userText(content.Message.Content))
 			}
 		}
 		if record.Type == "user" {
 			userMessages++
+		}
+		if record.Type == "assistant" && (record.IsAPIErrorMessage || meaningfulJSON(record.Error) || meaningfulJSON(record.APIErrorStatus)) {
+			session.HasError = true
 		}
 		if session.ID == "" {
 			if record.AgentID != "" {
@@ -210,7 +455,7 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 		if session.GitBranch == "" {
 			session.GitBranch = record.GitBranch
 		}
-		if record.Type == "assistant" && record.Message.Model != "" && record.Message.Model != "<synthetic>" {
+		if record.Type == "assistant" && hasUsage && record.Message.Model != "" && record.Message.Model != "<synthetic>" {
 			usage := model.Usage{
 				Model:           record.Message.Model,
 				InputTokens:     record.Message.Usage.InputTokens,
@@ -248,6 +493,10 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 			seenModels[record.Usage.Model] = true
 		}
 		calculated := p.calculator.Calculate(record.Usage)
+		if session.ModelCosts == nil {
+			session.ModelCosts = make(map[string]float64)
+		}
+		session.ModelCosts[record.Usage.Model] += calculated.USD
 		session.Cost.USD += calculated.USD
 		session.Cost.Estimated = session.Cost.Estimated || calculated.Estimated
 		for _, name := range calculated.MissingPricingModels {
@@ -261,6 +510,19 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 	return session, nil
 }
 
+func meaningfulJSON(value json.RawMessage) bool {
+	value = bytes.TrimSpace(value)
+	if len(value) == 0 {
+		return false
+	}
+	switch string(value) {
+	case "null", "false", "0", `""`:
+		return false
+	default:
+		return true
+	}
+}
+
 func validUsage(usage model.Usage) bool {
 	if usage.InputTokens < 0 || usage.OutputTokens < 0 || usage.CacheCreation5mTokens < 0 ||
 		usage.CacheCreation1hTokens < 0 || usage.CacheReadTokens < 0 {
@@ -272,7 +534,7 @@ func validUsage(usage model.Usage) bool {
 func userText(content json.RawMessage) string {
 	var text string
 	if json.Unmarshal(content, &text) == nil {
-		return text
+		return model.CleanTimelineText(text)
 	}
 	var blocks []struct {
 		Type string `json:"type"`
@@ -283,7 +545,9 @@ func userText(content json.RawMessage) string {
 	}
 	for _, block := range blocks {
 		if block.Type == "text" && block.Text != "" {
-			return block.Text
+			if text := model.CleanTimelineText(block.Text); text != "" {
+				return text
+			}
 		}
 	}
 	return ""

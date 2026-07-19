@@ -114,3 +114,44 @@ func TestRegistryInvalidatesCacheWhenPricingChanges(t *testing.T) {
 		t.Fatalf("cost after pricing change = %v, want 20", got)
 	}
 }
+
+func TestRegistryLoadsDetailThroughBothAdapters(t *testing.T) {
+	cacheRead := 0.5
+	calculator := cost.NewCalculator(cost.Table{
+		"claude-opus-4-8": {Input: 1, Output: 1},
+		"claude-fable-5":  {Input: 1, Output: 1},
+		"claude-sonnet-5": {Input: 1, Output: 1},
+		"gpt-5.6":         {Input: 1, Output: 1, CacheRead: &cacheRead},
+		"gpt-5.4":         {Input: 1, Output: 1, CacheRead: &cacheRead},
+		"gpt-5":           {Input: 1, Output: 1, CacheRead: &cacheRead},
+	})
+	registry := source.NewRegistry([]source.Source{
+		claude.NewSource(claude.NewParser(calculator), []string{filepath.Join("claude", "testdata")}),
+		codex.NewSource(codex.NewParser(calculator, "gpt-5"), []string{filepath.Join("codex", "testdata", "sessions")}),
+	}, source.Options{Workers: 2})
+	sessions, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, session := range sessions {
+		if len(session.Events) != 0 {
+			t.Fatalf("Discover() eagerly populated %s events", session.Agent)
+		}
+	}
+	loaded := map[model.AgentKind]bool{}
+	for _, session := range sessions {
+		if loaded[session.Agent] {
+			continue
+		}
+		if err := registry.LoadDetail(context.Background(), session); err != nil {
+			t.Fatalf("LoadDetail(%s) error = %v", session.Agent, err)
+		}
+		if len(session.Events) == 0 {
+			t.Fatalf("LoadDetail(%s) produced no events", session.Agent)
+		}
+		loaded[session.Agent] = true
+	}
+	if !loaded[model.AgentClaude] || !loaded[model.AgentCodex] {
+		t.Fatalf("loaded agents = %v", loaded)
+	}
+}

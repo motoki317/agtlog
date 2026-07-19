@@ -2,6 +2,7 @@ package jsonl
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 )
@@ -13,10 +14,17 @@ const (
 
 // ForEach bounds memory per record and treats an oversized record like malformed JSON.
 func ForEach(reader io.Reader, visit func([]byte)) error {
+	return ForEachContext(context.Background(), reader, visit)
+}
+
+func ForEachContext(ctx context.Context, reader io.Reader, visit func([]byte)) error {
 	buffered := bufio.NewReaderSize(reader, readerBufferBytes)
 	line := make([]byte, 0, readerBufferBytes)
 	tooLong := false
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		fragment, err := buffered.ReadSlice('\n')
 		if !tooLong {
 			if len(line)+len(fragment) <= maxLineBytes {
