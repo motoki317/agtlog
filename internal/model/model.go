@@ -74,6 +74,14 @@ const (
 	EventCompact       EventKind = "compact"
 )
 
+// ToolDetail is the full tool payload shown when a tool call is expanded.
+// Fields are bounded (BoundedDetailText) and empty when the log lacked them.
+type ToolDetail struct {
+	Input  string // Full invocation; newlines preserved.
+	Diff   string // Unified-diff body for edits, writes, and patches.
+	Output string // Full result; newlines preserved.
+}
+
 type Event struct {
 	Timestamp     time.Time
 	Kind          EventKind
@@ -83,6 +91,7 @@ type Event struct {
 	ToolName      string
 	ToolInput     string
 	ResultSummary string
+	Detail        *ToolDetail
 	Duration      time.Duration
 	AgentID       string
 	Subagent      *Session
