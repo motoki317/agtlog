@@ -248,9 +248,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						crumbs = append(crumbs, subagentCrumbLabels(detail.session, subagent)...)
 					}
 					m.detailStack = append(m.detailStack, m.detail)
-					child := newDetailState(subagent, m.width, m.height, m.styles)
+					child := newDetailStateBase(subagent, m.width, m.height, m.styles)
 					child.crumbs = crumbs
-					child.setWrap(wrap)
+					child.defaultExpanded = detail.defaultExpanded
+					child.wrap = wrap
+					child.focus = -1
+					child.resize(m.width, m.height)
+					child.viewport.GotoBottom()
 					m.detail = child
 					return m, nil
 				}
@@ -514,6 +518,7 @@ func sameItemEvent(previous, replacement model.Event) bool {
 
 func (m *Model) replacementDetailState(previous *detailState, session, root *model.Session) *detailState {
 	offset := previous.viewport.YOffset
+	pinned := previous.tab == tabTimeline && previous.pinnedToBottom()
 	focusKey := ""
 	if len(previous.focusables) > 0 {
 		focusKey = previous.focusables[previous.focus].key
@@ -526,10 +531,14 @@ func (m *Model) replacementDetailState(previous *detailState, session, root *mod
 	}
 	replacement := newDetailStateBase(session, m.width, m.height, m.styles)
 	replacement.wrap = previous.wrap
+	replacement.defaultExpanded = previous.defaultExpanded
 	replacement.crumbs = detailBreadcrumbs(root, session)
 	replacement.tab = previous.tab
 	replacement.subagentSelection = previous.subagentSelection
 	replacement.focus = previous.focus
+	if pinned {
+		replacement.focus = -1
+	}
 	for key, expanded := range previous.expanded {
 		replacement.expanded[key] = expanded
 	}
@@ -543,7 +552,7 @@ func (m *Model) replacementDetailState(previous *detailState, session, root *mod
 				break
 			}
 		}
-	} else if replacement.tab == tabTimeline {
+	} else if replacement.tab == tabTimeline && !pinned {
 		for index, item := range replacement.focusables {
 			if item.key == focusKey && index != replacement.focus {
 				oldLine := replacement.selectedLine
@@ -553,7 +562,11 @@ func (m *Model) replacementDetailState(previous *detailState, session, root *mod
 			}
 		}
 	}
-	replacement.viewport.SetYOffset(offset)
+	if pinned {
+		replacement.viewport.GotoBottom()
+	} else {
+		replacement.viewport.SetYOffset(offset)
+	}
 	return replacement
 }
 

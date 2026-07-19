@@ -779,13 +779,15 @@ func TestMatchingLiveUpdatePreservesDetailAndRemovalReturnsToList(t *testing.T) 
 	m := NewModel([]*model.Session{open}, nil)
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
-	detailStateFromScreen(t, m.detail).expanded["kept"] = true
+	detail := detailStateFromScreen(t, m.detail)
+	detail.expanded["kept"] = true
+	detail.defaultExpanded = false
 
 	replacement := cloneSession(open)
 	replacement.Title = "After"
 	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
 	m = updated.(Model)
-	if m.detail == nil || detailStateFromScreen(t, m.detail).session.Title != "After" || !detailStateFromScreen(t, m.detail).expanded["kept"] {
+	if m.detail == nil || detailStateFromScreen(t, m.detail).session.Title != "After" || !detailStateFromScreen(t, m.detail).expanded["kept"] || detailStateFromScreen(t, m.detail).defaultExpanded {
 		t.Fatalf("matching update lost detail state: %#v", m.detail)
 	}
 
@@ -867,7 +869,7 @@ func TestDetailLoadPreservesWrapToggle(t *testing.T) {
 	m := NewModel([]*model.Session{current}, nil)
 	m.screen = screenDetail
 	m.detail = newDetailState(current, m.width, m.height, m.styles)
-	detailStateFromScreen(t, m.detail).wrap = true
+	detailStateFromScreen(t, m.detail).setWrap(false)
 	m.detailGeneration = 1
 
 	loaded := cloneSession(current)
@@ -875,8 +877,8 @@ func TestDetailLoadPreservesWrapToggle(t *testing.T) {
 	updated, _ := m.Update(detailLoadedMsg{generation: 1, identity: sessionIdentity(current), session: loaded})
 	m = updated.(Model)
 
-	if !detailStateFromScreen(t, m.detail).wrap {
-		t.Fatal("detail load cleared the active wrap toggle")
+	if detailStateFromScreen(t, m.detail).wrap {
+		t.Fatal("detail load cleared the disabled wrap toggle")
 	}
 }
 

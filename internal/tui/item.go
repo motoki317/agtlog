@@ -32,7 +32,7 @@ var (
 func newItemView(event model.Event, agent model.AgentKind, crumbs []string, width, height int, styles styles) *itemView {
 	item := &itemView{
 		event: event, agent: agent, crumbs: append([]string(nil), crumbs...), styles: styles,
-		viewport: viewport.New(max(1, width-2), max(1, height-3)),
+		viewport: viewport.New(max(1, width-2), max(1, height-3)), wrap: true,
 	}
 	item.lines = itemEventLines(event, agent)
 	item.resize(width, height)

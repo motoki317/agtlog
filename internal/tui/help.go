@@ -24,7 +24,7 @@ func (m Model) helpView() string {
 		} else {
 			lines = []string{
 				"j/k scroll · g/G edge",
-				"space expand · enter open",
+				"space toggle · enter open",
 				"tab tabs · w wrap",
 				"J/K subagent · esc/h back",
 				"? help · q/ctrl-c quit",

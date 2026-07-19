@@ -7,12 +7,12 @@
 │  ▸ you: Delegate the survey                                                  │
 │  ▾ ● claude: Survey delegated · 1 thinking · 1 tools · 1 subagents           │
 │    ◇ thinking: Select a safe path                                            │
-│    ▸ ⚙ Read(/workspace/starship/map.go) → map ready · 400ms                  │
+│    ▾ ⚙ Read(/workspace/starship/map.go) → map ready · 400ms                  │
+│      output:                                                                 │
+│      map ready                                                               │
 │    claude: Survey delegated                                                  │
 │›   ⑃ Task(Scout terrain) opus-4.8 · 45k · $0.32                              │
 │                                                                              │
 │                                                                              │
-│                                                                              │
-│                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-j/k scroll   space expand   ↵ open   tab tabs   w wrap   esc back   q quit
+j/k scroll   space toggle   ↵ open   tab tabs   w wrap   esc back   q quit

@@ -66,7 +66,6 @@ func TestGoldenDetailFrame(t *testing.T) {
 	for _, key := range []tea.KeyMsg{
 		{Type: tea.KeyEnter},
 		{Type: tea.KeyDown},
-		{Type: tea.KeySpace},
 		{Type: tea.KeyRunes, Runes: []rune{'J'}},
 	} {
 		tm.Send(key)
@@ -100,9 +99,7 @@ func TestGoldenItemFrame(t *testing.T) {
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 18))
 	for _, key := range []tea.KeyMsg{
 		{Type: tea.KeyEnter},
-		{Type: tea.KeyDown},
-		{Type: tea.KeySpace},
-		{Type: tea.KeyDown},
+		{Type: tea.KeyUp},
 		{Type: tea.KeyEnter},
 	} {
 		tm.Send(key)

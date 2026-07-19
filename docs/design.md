@@ -120,12 +120,13 @@ The header panel uses three lines:
 2. all models, Git branch, and start-to-update time;
 3. recursive tokens and cost, followed by own and subagent splits.
 
-The timeline is chronological and collapsed by default:
+The timeline is chronological and expanded by default:
 
 ```text
 ▸ you: Investigate the failing watcher
-▸ ● claude: The race is fixed · 2 thinking · 4 tools · 1 subagents
-  ⚙ Edit(watch.go) → updated · 0.4s
+▾ ● claude: The race is fixed · 2 thinking · 4 tools · 1 subagents
+  ▾ ⚙ Edit(watch.go) → updated · 0.4s
+      output: watcher tests passed
   ⑃ Task(inspect watcher) opus-4.8 · 420k · $1.02
 ```
 
@@ -148,8 +149,8 @@ token, and estimated-cost cells receive their semantic styles only after the pla
 The tab has its own selection, supports step and edge movement, and drills into the selected
 session on Timeline. A session without descendants shows `No subagents`.
 
-Timeline rows truncate by default. `w` switches the current detail screen between truncation and
-hard wrapping. Wrapping operates on plain text before color is applied; every visual row retains
+Timeline rows wrap by default. `w` switches the current detail screen between hard wrapping and
+truncation. Wrapping operates on plain text before color is applied; every visual row retains
 the logical row's role, and selection highlights all wrapped rows belonging to the selected item.
 
 `space` is the only in-place expansion key. `enter`, `→`, or `l` opens the focused row: a
@@ -162,7 +163,7 @@ viewport supports `j`, `k`, `g`, `G`, and `w`; the normal back keys restore the 
 ## Key budget
 
 Bindings stay single-key and follow terminal and Vim conventions:
-The detail key bar states the primary split as `space expand · enter open`.
+The detail key bar states the primary split as `space toggle · enter open`.
 
 | Screen | Keys | Action |
 | --- | --- | --- |
@@ -178,11 +179,11 @@ The detail key bar states the primary split as `space expand · enter open`.
 | Detail | `space` | Expand or collapse the selected turn or tool; no-op on subagents |
 | Detail | `enter`, `→`, `l` | Open the focused row; subagents open session detail and other rows open an item view |
 | Detail | `tab`/`shift+tab` | Cycle Timeline and Subagents |
-| Detail | `w` | Toggle timeline wrapping; truncation is the default |
+| Detail | `w` | Toggle timeline wrapping; wrapping is the default |
 | Detail | `J`/`K` | Next or previous subagent |
 | Detail | `esc`/`←`/`h` | Pop the current detail screen; return to the list at the root |
 | Item | `j`/`k`, `↑`/`↓`, `g`/`G` | Scroll by a row or jump to an edge |
-| Item | `w` | Toggle wrapping; truncation is the default |
+| Item | `w` | Toggle wrapping; wrapping is the default |
 | Item | `esc`/`←`/`h` | Restore the parent detail screen |
 | Both | `t` | Cycle color themes; no-op in mono |
 | Both | `?` | Toggle full help |
@@ -191,8 +192,8 @@ The detail key bar states the primary split as `space expand · enter open`.
 ## Terseness rules
 
 1. Each screen answers one question without opening another view.
-2. Turns and tools start collapsed and expand in place; `enter` opens every focused row as its own screen.
+2. Turns and tools start expanded and collapse in place; `enter` opens every focused row as its own screen.
 3. Lists use human-scale numbers and relative time, not raw counters or timestamps.
 4. Parent rows show recursive totals; detail shows the breakdown.
 5. Hard noise such as permission preambles and synthetic reminders does not enter the timeline.
-6. Headers, list rows, and key bars truncate. Timeline and item rows wrap only while `w` is active.
+6. Headers, list rows, and key bars truncate. Timeline and item rows wrap by default and truncate while wrapping is disabled.

@@ -18,6 +18,7 @@ type detailState struct {
 	crumbs            []string
 	viewport          viewport.Model
 	expanded          map[string]bool
+	defaultExpanded   bool
 	focus             int
 	focusables        []detailFocus
 	width             int
@@ -31,6 +32,7 @@ type detailState struct {
 	subagents         []flattenedSubagent
 	lines             []detailLine
 	rendered          []renderedRow
+	renderedStarts    []int
 	selectedLine      int
 }
 
@@ -111,17 +113,26 @@ const (
 
 func newDetailState(session *model.Session, width, height int, styles styles) *detailState {
 	state := newDetailStateBase(session, width, height, styles)
+	state.focus = -1
 	state.resize(width, height)
+	state.viewport.GotoBottom()
 	return state
 }
 
 func newDetailStateBase(session *model.Session, width, height int, styles styles) *detailState {
-	state := &detailState{session: session, expanded: make(map[string]bool), styles: styles}
+	state := &detailState{session: session, expanded: make(map[string]bool), defaultExpanded: true, styles: styles, wrap: true}
 	if project := terminalText(session.Project, 96); project != "" {
 		state.crumbs = []string{project}
 	}
 	state.viewport = viewport.New(max(1, width-2), max(1, height-8))
 	return state
+}
+
+func (d *detailState) isExpanded(key string) bool {
+	if expanded, ok := d.expanded[key]; ok {
+		return expanded
+	}
+	return d.defaultExpanded
 }
 
 func (d *detailState) clone() *detailState {
@@ -134,10 +145,12 @@ func (d *detailState) clone() *detailState {
 	copy.crumbs = append([]string(nil), d.crumbs...)
 	copy.lines = append([]detailLine(nil), d.lines...)
 	copy.rendered = append([]renderedRow(nil), d.rendered...)
+	copy.renderedStarts = append([]int(nil), d.renderedStarts...)
 	return &copy
 }
 
 func (d *detailState) resize(width, height int) {
+	pinned := d.tab == tabTimeline && len(d.rendered) > 0 && d.pinnedToBottom()
 	d.width, d.height = max(1, width), max(3, height)
 	layout := newDetailLayout(d.height)
 	d.viewport.Width = max(1, d.width-2)
@@ -147,6 +160,9 @@ func (d *detailState) resize(width, height int) {
 		d.viewport.Height = max(1, layout.timelineHeight-2)
 	}
 	d.rebuild()
+	if pinned {
+		d.viewport.GotoBottom()
+	}
 }
 
 func (d *detailState) setWrap(wrap bool) {
@@ -183,11 +199,12 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		}
 	case "g":
 		if d.tab == tabSubagents {
-			if len(d.subagents) > 0 {
+			if len(d.subagents) > 0 && d.subagentSelection != 0 {
+				oldLine := d.selectedLine
 				d.subagentSelection = 0
-				d.selectedLine = 0
-				d.rebuildRendered()
+				d.updateSelection(oldLine, 0)
 			}
+			d.viewport.GotoTop()
 		} else if len(d.focusables) > 0 {
 			oldLine := d.focusables[d.focus].line
 			d.focus = 0
@@ -195,15 +212,15 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		}
 	case "G":
 		if d.tab == tabSubagents {
-			if len(d.subagents) > 0 {
-				d.subagentSelection = len(d.subagents) - 1
-				d.selectedLine = d.subagentSelection
-				d.rebuildRendered()
+			last := len(d.subagents) - 1
+			if last >= 0 && d.subagentSelection != last {
+				oldLine := d.selectedLine
+				d.subagentSelection = last
+				d.updateSelection(oldLine, last)
 			}
+			d.viewport.GotoBottom()
 		} else if len(d.focusables) > 0 {
-			oldLine := d.focusables[d.focus].line
-			d.focus = len(d.focusables) - 1
-			d.updateSelection(oldLine, d.focusables[d.focus].line)
+			d.gotoBottom()
 		}
 	case "J":
 		if d.tab == tabTimeline {
@@ -216,7 +233,7 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 	case " ":
 		if d.tab == tabTimeline && len(d.focusables) > 0 && d.focusables[d.focus].expandable {
 			item := d.focusables[d.focus]
-			d.expanded[item.key] = !d.expanded[item.key]
+			d.expanded[item.key] = !d.isExpanded(item.key)
 			d.rebuildKeeping(item.key)
 		}
 	case "w":
@@ -229,13 +246,30 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
+func (d *detailState) pinnedToBottom() bool {
+	return d.viewport.AtBottom()
+}
+
+func (d *detailState) gotoBottom() {
+	if len(d.focusables) > 0 {
+		oldLine := d.selectedLine
+		d.focus = len(d.focusables) - 1
+		d.updateSelection(oldLine, d.focusables[d.focus].line)
+	}
+	d.viewport.GotoBottom()
+}
+
 func (d *detailState) moveSubagentSelection(delta int) {
 	if len(d.subagents) == 0 {
 		return
 	}
-	d.subagentSelection = max(0, min(d.subagentSelection+delta, len(d.subagents)-1))
-	d.selectedLine = d.subagentSelection
-	d.rebuildRendered()
+	next := max(0, min(d.subagentSelection+delta, len(d.subagents)-1))
+	if next == d.subagentSelection {
+		return
+	}
+	oldLine := d.selectedLine
+	d.subagentSelection = next
+	d.updateSelection(oldLine, next)
 }
 
 func (d *detailState) moveFocus(direction int, subagentsOnly bool) {
@@ -290,7 +324,7 @@ func (d *detailState) rebuild() {
 	}
 	if len(d.focusables) == 0 {
 		d.focus = 0
-	} else if d.focus >= len(d.focusables) {
+	} else if d.focus < 0 || d.focus >= len(d.focusables) {
 		d.focus = len(d.focusables) - 1
 	}
 	selectedLine := -1
@@ -337,15 +371,41 @@ func flattenSubagents(session *model.Session) []flattenedSubagent {
 }
 
 func (d *detailState) updateSelection(oldLine, newLine int) {
-	_ = oldLine
+	d.updateSelectionMarker(oldLine, false)
 	d.selectedLine = newLine
-	d.rebuildRendered()
+	d.updateSelectionMarker(newLine, true)
+	selectedRow := d.firstRenderedRow(newLine)
+	if selectedRow < d.viewport.YOffset {
+		d.viewport.SetYOffset(selectedRow)
+	} else if selectedRow >= d.viewport.YOffset+d.viewport.Height {
+		d.viewport.SetYOffset(selectedRow - d.viewport.Height + 1)
+	}
+}
+
+func (d *detailState) updateSelectionMarker(detailIndex int, selected bool) {
+	rowIndex := d.firstRenderedRow(detailIndex)
+	if rowIndex < 0 {
+		return
+	}
+	text := d.rendered[rowIndex].text
+	if strings.HasPrefix(text, "› ") {
+		text = strings.TrimPrefix(text, "› ")
+	} else {
+		text = strings.TrimPrefix(text, "  ")
+	}
+	prefix := "  "
+	if selected {
+		prefix = "› "
+	}
+	d.rendered[rowIndex].text = prefix + text
 }
 
 func (d *detailState) rebuildRendered() {
 	d.rendered = d.rendered[:0]
+	d.renderedStarts = d.renderedStarts[:0]
 	content := make([]string, 0, len(d.lines))
 	for detailIndex, line := range d.lines {
+		d.renderedStarts = append(d.renderedStarts, len(d.rendered))
 		prefix := "  "
 		if detailIndex == d.selectedLine {
 			prefix = "› "
@@ -374,12 +434,10 @@ func (d *detailState) rebuildRendered() {
 }
 
 func (d *detailState) firstRenderedRow(detailIndex int) int {
-	for rowIndex, row := range d.rendered {
-		if row.detailIndex == detailIndex {
-			return rowIndex
-		}
+	if detailIndex < 0 || detailIndex >= len(d.renderedStarts) {
+		return -1
 	}
-	return -1
+	return d.renderedStarts[detailIndex]
 }
 
 func (d *detailState) sessionLines(session *model.Session, indent int, path string) []detailLine {
@@ -398,8 +456,9 @@ func (d *detailState) sessionLines(session *model.Session, indent int, path stri
 		}
 		turn := session.Events[start:index]
 		key := fmt.Sprintf("%s/turn/%d", path, start)
-		lines = append(lines, detailLine{text: d.turnSummary(session, turn, indent, d.expanded[key]), key: key, expandable: turnExpandable(turn), role: detailAssistant, agent: session.Agent, event: turnItemEvent(turn)})
-		if d.expanded[key] {
+		expanded := d.isExpanded(key)
+		lines = append(lines, detailLine{text: d.turnSummary(session, turn, indent, expanded), key: key, expandable: turnExpandable(turn), role: detailAssistant, agent: session.Agent, event: turnItemEvent(turn)})
+		if expanded {
 			for eventIndex, item := range turn {
 				lines = append(lines, d.eventLines(session, item, indent+2, fmt.Sprintf("%s/event/%d", key, eventIndex))...)
 			}
@@ -528,13 +587,13 @@ func (d *detailState) toolEventLines(event model.Event, indent int, key string) 
 	text := padding + toolLine(event)
 	if expandable {
 		marker := glyphCollapsed
-		if d.expanded[key] {
+		if d.isExpanded(key) {
 			marker = glyphExpanded
 		}
 		text = padding + marker + " " + toolLine(event)
 	}
 	lines := []detailLine{{text: text, key: key, expandable: expandable, role: detailTool, event: event}}
-	if !d.expanded[key] || event.Detail == nil {
+	if !d.isExpanded(key) || event.Detail == nil {
 		return lines
 	}
 	childPadding := strings.Repeat(" ", indent+2)
@@ -678,7 +737,10 @@ func (d *detailState) view() string {
 	}
 	header := d.header()
 	timelineHeight := layout.timelineHeight
-	visiblePlain := strings.Split(d.viewport.View(), "\n")
+	visiblePlain := make([]string, 0, d.viewport.Height)
+	for rowIndex := d.viewport.YOffset; rowIndex < len(d.rendered) && len(visiblePlain) < d.viewport.Height; rowIndex++ {
+		visiblePlain = append(visiblePlain, d.rendered[rowIndex].text)
+	}
 	visible := make([]panelLine, len(visiblePlain))
 	for index, plain := range visiblePlain {
 		rowIndex := d.viewport.YOffset + index
@@ -776,7 +838,7 @@ func (d *detailState) tabLabel() panelLabel {
 }
 
 func detailKeyText(width int, mono bool, tab detailTab) string {
-	hints := []string{"j/k scroll", "space expand", "↵ open", "tab tabs"}
+	hints := []string{"j/k scroll", "space toggle", "↵ open", "tab tabs"}
 	if tab == tabTimeline {
 		hints = append(hints, "J/K subagent")
 	}
@@ -786,7 +848,7 @@ func detailKeyText(width int, mono bool, tab detailTab) string {
 	}
 	hints = append(hints, "? help", "q quit")
 	return fitKeyHints(width, hints, []string{
-		"t theme", "? help", "J/K subagent", "j/k scroll", "q quit", "tab tabs", "w wrap", "space expand", "↵ open",
+		"t theme", "? help", "J/K subagent", "j/k scroll", "q quit", "tab tabs", "w wrap", "space toggle", "↵ open",
 	})
 }
 

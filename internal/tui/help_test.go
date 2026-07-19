@@ -23,7 +23,7 @@ func TestDetailHelpIncludesEveryRequiredBinding(t *testing.T) {
 	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
 	m.screen = screenDetail
 	view := m.helpView()
-	for _, want := range []string{"j/k scroll", "g/G edge", "space expand", "enter open", "tab tabs", "w wrap", "J/K subagent", "esc/h back", "? help", "ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "space toggle", "enter open", "tab tabs", "w wrap", "J/K subagent", "esc/h back", "? help", "ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("detail help missing %q:\n%s", want, view)
 		}
@@ -35,7 +35,7 @@ func TestDetailHelpKeepsBindingsVisibleAtFortyColumns(t *testing.T) {
 	m.width = 40
 	m.screen = screenDetail
 	view := ansi.Strip(m.helpView())
-	for _, want := range []string{"j/k scroll", "g/G edge", "space expand", "enter open", "tab tabs", "w wrap", "J/K subagent", "esc/h back", "? help", "q/ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "space toggle", "enter open", "tab tabs", "w wrap", "J/K subagent", "esc/h back", "? help", "q/ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("40-column detail help missing %q:\n%s", want, view)
 		}
@@ -55,7 +55,7 @@ func TestItemHelpIncludesOnlyItemBindings(t *testing.T) {
 			t.Fatalf("item help missing %q:\n%s", want, view)
 		}
 	}
-	for _, sessionOnly := range []string{"space expand", "enter open", "tab tabs", "J/K subagent"} {
+	for _, sessionOnly := range []string{"space toggle", "enter open", "tab tabs", "J/K subagent"} {
 		if strings.Contains(view, sessionOnly) {
 			t.Fatalf("item help advertised session-only binding %q:\n%s", sessionOnly, view)
 		}

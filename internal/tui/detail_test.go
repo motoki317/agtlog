@@ -61,7 +61,6 @@ func TestEnterOnSubagentDrillsIntoChild(t *testing.T) {
 	for _, key := range []tea.KeyMsg{
 		{Type: tea.KeyEnter},
 		{Type: tea.KeyDown},
-		{Type: tea.KeySpace},
 		{Type: tea.KeyRunes, Runes: []rune{'J'}},
 		{Type: tea.KeyEnter},
 	} {
@@ -83,8 +82,6 @@ func TestDrilledSubagentInheritsWrap(t *testing.T) {
 	m := NewModel([]*model.Session{parent}, nil)
 	for _, key := range []tea.KeyMsg{
 		{Type: tea.KeyEnter},
-		{Type: tea.KeyRunes, Runes: []rune{'w'}},
-		{Type: tea.KeySpace},
 		{Type: tea.KeyRunes, Runes: []rune{'J'}},
 		{Type: tea.KeyEnter},
 	} {
@@ -97,6 +94,23 @@ func TestDrilledSubagentInheritsWrap(t *testing.T) {
 	}
 }
 
+func TestDrilledSubagentInheritsDefaultExpansion(t *testing.T) {
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude}
+	parent := &model.Session{ID: "route", Agent: model.AgentClaude, Subagents: []*model.Session{child}}
+	m := NewModel([]*model.Session{parent}, nil)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	detailStateFromScreen(t, m.detail).defaultExpanded = false
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyTab}, {Type: tea.KeyEnter}} {
+		updated, _ = m.Update(key)
+		m = updated.(Model)
+	}
+
+	if detailStateFromScreen(t, m.detail).defaultExpanded {
+		t.Fatal("drilled subagent did not inherit disabled default expansion")
+	}
+}
+
 func TestDrillShowsAncestorBreadcrumb(t *testing.T) {
 	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout terrain"}
 	parent := &model.Session{
@@ -106,7 +120,6 @@ func TestDrillShowsAncestorBreadcrumb(t *testing.T) {
 	m := NewModel([]*model.Session{parent}, nil)
 	for _, key := range []tea.KeyMsg{
 		{Type: tea.KeyEnter},
-		{Type: tea.KeySpace},
 		{Type: tea.KeyRunes, Runes: []rune{'J'}},
 		{Type: tea.KeyEnter},
 	} {
@@ -128,7 +141,6 @@ func TestEscapePopsThenReturnsToList(t *testing.T) {
 	m := NewModel([]*model.Session{parent}, nil)
 	for _, key := range []tea.KeyMsg{
 		{Type: tea.KeyEnter},
-		{Type: tea.KeySpace},
 		{Type: tea.KeyRunes, Runes: []rune{'J'}},
 		{Type: tea.KeyEnter},
 		{Type: tea.KeyEsc},
@@ -156,7 +168,7 @@ func TestLeftAndHPopDrilledDetail(t *testing.T) {
 				Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
 			}
 			m := NewModel([]*model.Session{parent}, nil)
-			for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeySpace}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}, back} {
+			for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}, back} {
 				updated, _ := m.Update(key)
 				m = updated.(Model)
 			}
@@ -176,7 +188,6 @@ func TestWindowSizeResizesStackedDetailScreens(t *testing.T) {
 	m := NewModel([]*model.Session{parent}, nil)
 	for _, msg := range []tea.Msg{
 		tea.KeyMsg{Type: tea.KeyEnter},
-		tea.KeyMsg{Type: tea.KeySpace},
 		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'J'}},
 		tea.KeyMsg{Type: tea.KeyEnter},
 		tea.WindowSizeMsg{Width: 104, Height: 31},
@@ -233,7 +244,7 @@ func TestThemeCycleUpdatesStackedDetailScreens(t *testing.T) {
 		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
 	}
 	m := newModelWithClockAndTheme([]*model.Session{parent}, nil, time.Now, themes["default"])
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeySpace}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'t'}}} {
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'t'}}} {
 		updated, _ := m.Update(key)
 		m = updated.(Model)
 	}
@@ -256,7 +267,7 @@ func TestRightAndLDrillIntoSubagents(t *testing.T) {
 				Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
 			}
 			m := NewModel([]*model.Session{parent}, nil)
-			for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeySpace}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, open} {
+			for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, open} {
 				updated, _ := m.Update(key)
 				m = updated.(Model)
 			}
@@ -279,7 +290,7 @@ func TestDrillDownScreenSupportsVimEdges(t *testing.T) {
 		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
 	}
 	m := NewModel([]*model.Session{parent}, nil)
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeySpace}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'G'}}} {
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'G'}}} {
 		updated, _ := m.Update(key)
 		m = updated.(Model)
 	}
@@ -308,7 +319,7 @@ func TestNestedSubagentDrillAccumulatesBreadcrumbs(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
 	for range 2 {
-		for _, key := range []tea.KeyMsg{{Type: tea.KeySpace}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}} {
+		for _, key := range []tea.KeyMsg{{Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}} {
 			updated, _ = m.Update(key)
 			m = updated.(Model)
 		}
@@ -528,7 +539,6 @@ func TestSubagentDrillRestoresParentTabSelectionAndWrap(t *testing.T) {
 	m := NewModel([]*model.Session{root}, nil)
 	for _, key := range []tea.KeyMsg{
 		{Type: tea.KeyEnter},
-		{Type: tea.KeyRunes, Runes: []rune{'w'}},
 		{Type: tea.KeyTab},
 		{Type: tea.KeyRunes, Runes: []rune{'G'}},
 		{Type: tea.KeyEnter},
@@ -579,6 +589,27 @@ func TestSubagentsTabNavigationUsesOwnSelection(t *testing.T) {
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	if detail.subagentSelection != 0 {
 		t.Fatalf("g selection = %d, want 0", detail.subagentSelection)
+	}
+}
+
+func TestSubagentEdgeKeysRestoreViewportEdges(t *testing.T) {
+	session := &model.Session{ID: "route"}
+	for index := range 12 {
+		session.Subagents = append(session.Subagents, &model.Session{ID: fmt.Sprintf("scout-%02d", index), Agent: model.AgentClaude})
+	}
+	detail := newDetailState(session, 40, 10, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	detail.viewport.SetYOffset(4)
+
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	if detail.subagentSelection != 0 || detail.viewport.YOffset != 0 {
+		t.Fatalf("g selection=%d offset=%d, want first row at top", detail.subagentSelection, detail.viewport.YOffset)
+	}
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	detail.viewport.GotoTop()
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	if detail.subagentSelection != len(detail.subagents)-1 || !detail.viewport.AtBottom() {
+		t.Fatalf("G selection=%d/%d bottom=%t, want last row at bottom", detail.subagentSelection, len(detail.subagents)-1, detail.viewport.AtBottom())
 	}
 }
 
@@ -666,8 +697,8 @@ func TestColoredDetailFillsWideTerminalAndBoundsLines(t *testing.T) {
 func TestDetailKeyBarKeepsQuitVisibleAtEightyColumns(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "lunar"}, 80, 12, newStyles())
 	keyBar := strings.Split(ansi.Strip(detail.view()), "\n")[11]
-	if !strings.Contains(keyBar, "space expand") || !strings.Contains(keyBar, "↵ open") || !strings.Contains(keyBar, "tab tabs") || !strings.Contains(keyBar, "w wrap") || !strings.Contains(keyBar, "q quit") || strings.Contains(keyBar, "…") {
-		t.Fatalf("80-column detail key bar = %q, want expand, open, tabs, wrap, and quit hints without truncation", keyBar)
+	if !strings.Contains(keyBar, "space toggle") || !strings.Contains(keyBar, "↵ open") || !strings.Contains(keyBar, "tab tabs") || !strings.Contains(keyBar, "w wrap") || !strings.Contains(keyBar, "q quit") || strings.Contains(keyBar, "…") {
+		t.Fatalf("80-column detail key bar = %q, want toggle, open, tabs, wrap, and quit hints without truncation", keyBar)
 	}
 }
 
@@ -677,7 +708,7 @@ func TestNarrowKeyBarsKeepWholeEssentialHints(t *testing.T) {
 			width int
 			wants []string
 		}{
-			{width: 40, wants: []string{"space expand", "↵ open", "esc back"}},
+			{width: 40, wants: []string{"space toggle", "↵ open", "esc back"}},
 			{width: 20, wants: []string{"↵ open", "esc back"}},
 			{width: 10, wants: []string{"esc back"}},
 		} {
@@ -726,7 +757,6 @@ func TestSpaceOnSubagentDoesNotExpandInline(t *testing.T) {
 	for _, key := range []tea.KeyMsg{
 		{Type: tea.KeyEnter},
 		{Type: tea.KeyDown},
-		{Type: tea.KeySpace},
 		{Type: tea.KeyRunes, Runes: []rune{'J'}},
 		{Type: tea.KeySpace},
 	} {
@@ -746,7 +776,7 @@ func TestSubagentLineHasNoInlineToggle(t *testing.T) {
 		Events: []model.Event{{Kind: model.EventSubagent, ToolInput: "Scout terrain", Subagent: child}},
 	}
 	m := NewModel([]*model.Session{parent}, nil)
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeySpace}} {
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}} {
 		updated, _ := m.Update(key)
 		m = updated.(Model)
 	}
@@ -800,7 +830,7 @@ func TestDrilledDetailFollowsRootLiveUpdate(t *testing.T) {
 		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
 	}
 	m := NewModel([]*model.Session{root}, nil)
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeySpace}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}} {
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}} {
 		updated, _ := m.Update(key)
 		m = updated.(Model)
 	}
@@ -823,7 +853,7 @@ func TestOpenItemFollowsRootLiveUpdate(t *testing.T) {
 		},
 	}
 	m := NewModel([]*model.Session{root}, nil)
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyDown}, {Type: tea.KeySpace}, {Type: tea.KeyDown}, {Type: tea.KeyEnter}} {
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyDown}, {Type: tea.KeyDown}, {Type: tea.KeyEnter}} {
 		updated, _ := m.Update(key)
 		m = updated.(Model)
 	}
@@ -861,7 +891,7 @@ func TestOpenItemFallsBackWhenEventDisappears(t *testing.T) {
 		},
 	}
 	m := NewModel([]*model.Session{root}, nil)
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyDown}, {Type: tea.KeySpace}, {Type: tea.KeyDown}, {Type: tea.KeyEnter}} {
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyDown}, {Type: tea.KeyDown}, {Type: tea.KeyEnter}} {
 		updated, _ := m.Update(key)
 		m = updated.(Model)
 	}
@@ -990,7 +1020,7 @@ func TestRemovingDrilledRootClearsDetailStack(t *testing.T) {
 		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
 	}
 	m := NewModel([]*model.Session{root}, nil)
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeySpace}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}} {
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}} {
 		updated, _ := m.Update(key)
 		m = updated.(Model)
 	}
@@ -1016,7 +1046,7 @@ func TestRemovingActiveDescendantFallsBackToSurvivingAncestor(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
 	for range 2 {
-		for _, key := range []tea.KeyMsg{{Type: tea.KeySpace}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}} {
+		for _, key := range []tea.KeyMsg{{Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}} {
 			updated, _ = m.Update(key)
 			m = updated.(Model)
 		}
@@ -1044,7 +1074,7 @@ func TestDetailSanitizesToolAndModelFields(t *testing.T) {
 		Events: []model.Event{{Kind: model.EventToolCall, ToolName: "Read\x1b]8;;invalid\a", ToolInput: "safe\u202ereversed"}},
 	}
 	m := NewModel([]*model.Session{session}, nil)
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeySpace}} {
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}} {
 		updated, _ := m.Update(key)
 		m = updated.(Model)
 	}
@@ -1105,9 +1135,7 @@ func TestExpandedToolDetailIsPlainTerminalText(t *testing.T) {
 	}}
 	detail := newDetailState(session, 80, 18, newStyles())
 	detail.moveFocus(1, false)
-	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 	detail.moveFocus(1, false)
-	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 
 	var rows []string
 	for _, line := range detail.lines {
@@ -1192,6 +1220,163 @@ func TestBoundLinesElidesMiddleWithHeadAndTail(t *testing.T) {
 	}
 }
 
+func TestDetailTimelineExpandsByDefault(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the crater"},
+		{Kind: model.EventThinking, Text: "Choose the safest route"},
+		{Kind: model.EventToolCall, ToolName: "exec_command", ToolInput: "survey --ridge", Detail: &model.ToolDetail{Output: "route clear"}},
+		{Kind: model.EventAssistantText, Text: "The ridge route is clear."},
+	}}
+	detail := newDetailState(session, 80, 20, newStyles())
+
+	var rows []string
+	for _, line := range detail.lines {
+		rows = append(rows, strings.TrimSpace(line.text))
+	}
+	if !slices.Contains(rows, glyphSecondary+" thinking: Choose the safest route") || !slices.Contains(rows, "route clear") {
+		t.Fatalf("default timeline rows = %#v, want expanded turn and tool output", rows)
+	}
+	if len(detail.expanded) != 0 {
+		t.Fatalf("default expansion overrides = %#v, want empty map", detail.expanded)
+	}
+}
+
+func TestDetailTimelineOpensAtNewestEvent(t *testing.T) {
+	events := []model.Event{{Kind: model.EventUser, Text: "Survey the crater"}}
+	for index := range 8 {
+		events = append(events, model.Event{Kind: model.EventThinking, Text: fmt.Sprintf("Observation %02d", index)})
+	}
+	events = append(events, model.Event{Kind: model.EventAssistantText, Text: "Newest route confirmed"})
+	detail := newDetailState(&model.Session{ID: "lunar", Agent: model.AgentCodex, Events: events}, 80, 10, newStyles())
+
+	wantOffset := max(0, len(detail.rendered)-detail.viewport.Height)
+	if detail.focus != len(detail.focusables)-1 || detail.viewport.YOffset != wantOffset {
+		t.Fatalf("open state = focus %d/%d offset %d/%d, want last focusable at bottom", detail.focus, len(detail.focusables)-1, detail.viewport.YOffset, wantOffset)
+	}
+	if view := ansi.Strip(detail.view()); !strings.Contains(view, "Newest route confirmed") {
+		t.Fatalf("newest event is not visible on open:\n%s", view)
+	}
+}
+
+func TestPinnedDetailTimelineFollowsLiveUpdate(t *testing.T) {
+	events := []model.Event{{Kind: model.EventUser, Text: "Survey the crater"}}
+	for index := range 8 {
+		events = append(events, model.Event{Kind: model.EventThinking, Text: fmt.Sprintf("Observation %02d", index)})
+	}
+	root := &model.Session{ID: "lunar", Agent: model.AgentCodex, Path: "/workspace/crater/rollout.jsonl", Events: events}
+	m := NewModel([]*model.Session{root}, nil)
+	for _, msg := range []tea.Msg{tea.WindowSizeMsg{Width: 80, Height: 10}, tea.KeyMsg{Type: tea.KeyEnter}} {
+		updated, _ := m.Update(msg)
+		m = updated.(Model)
+	}
+	replacement := cloneSession(root)
+	replacement.Events = append(replacement.Events, model.Event{Kind: model.EventAssistantText, Text: "Newest telemetry sample"})
+
+	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	if !detail.viewport.AtBottom() || detail.focus != len(detail.focusables)-1 {
+		t.Fatalf("tail-follow state = bottom %t focus %d/%d", detail.viewport.AtBottom(), detail.focus, len(detail.focusables)-1)
+	}
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "Newest telemetry sample") {
+		t.Fatalf("tail-follow did not reveal newest event:\n%s", view)
+	}
+}
+
+func TestScrolledDetailTimelinePreservesPositionOnLiveUpdate(t *testing.T) {
+	events := []model.Event{{Kind: model.EventUser, Text: "Survey the crater"}}
+	for index := range 8 {
+		events = append(events, model.Event{Kind: model.EventThinking, Text: fmt.Sprintf("Observation %02d", index)})
+	}
+	root := &model.Session{ID: "lunar", Agent: model.AgentCodex, Path: "/workspace/crater/rollout.jsonl", Events: events}
+	m := NewModel([]*model.Session{root}, nil)
+	for _, msg := range []tea.Msg{
+		tea.WindowSizeMsg{Width: 80, Height: 10},
+		tea.KeyMsg{Type: tea.KeyEnter},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}},
+		tea.KeyMsg{Type: tea.KeyDown},
+		tea.KeyMsg{Type: tea.KeyDown},
+	} {
+		updated, _ := m.Update(msg)
+		m = updated.(Model)
+	}
+	before := detailStateFromScreen(t, m.detail)
+	offset := before.viewport.YOffset
+	focusKey := before.focusables[before.focus].key
+	if offset == 0 || before.pinnedToBottom() {
+		t.Fatalf("test setup offset = %d with bottom %t, want a non-bottom scrolled position", offset, before.pinnedToBottom())
+	}
+	replacement := cloneSession(root)
+	replacement.Events = append(replacement.Events, model.Event{Kind: model.EventAssistantText, Text: "Newest telemetry sample"})
+
+	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+	m = updated.(Model)
+	after := detailStateFromScreen(t, m.detail)
+	if after.viewport.YOffset != offset || after.focusables[after.focus].key != focusKey {
+		t.Fatalf("scrolled update moved from offset %d key %q to offset %d key %q", offset, focusKey, after.viewport.YOffset, after.focusables[after.focus].key)
+	}
+}
+
+func TestPinnedDetailTimelineStaysPinnedAcrossResize(t *testing.T) {
+	root := &model.Session{
+		ID: "lunar", Agent: model.AgentCodex, Path: "/workspace/crater/rollout.jsonl",
+		Events: []model.Event{
+			{Kind: model.EventUser, Text: "Survey the crater"},
+			{Kind: model.EventAssistantText, Text: strings.Repeat("Newest wrapped telemetry ", 12)},
+		},
+	}
+	m := NewModel([]*model.Session{root}, nil)
+	for _, msg := range []tea.Msg{
+		tea.WindowSizeMsg{Width: 100, Height: 10},
+		tea.KeyMsg{Type: tea.KeyEnter},
+		tea.WindowSizeMsg{Width: 28, Height: 10},
+	} {
+		updated, _ := m.Update(msg)
+		m = updated.(Model)
+	}
+	if detail := detailStateFromScreen(t, m.detail); !detail.viewport.AtBottom() {
+		t.Fatalf("resized pinned timeline offset = %d/%d, want bottom", detail.viewport.YOffset, len(detail.rendered))
+	}
+
+	replacement := cloneSession(root)
+	replacement.Events = append(replacement.Events, model.Event{Kind: model.EventAssistantText, Text: "Final telemetry sample"})
+	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	view := ansi.Strip(m.View())
+	if !detail.viewport.AtBottom() || !strings.Contains(view, "Final telemetry") || !strings.Contains(view, "sample") {
+		t.Fatalf("post-resize tail-follow bottom=%t:\n%s", detail.viewport.AtBottom(), view)
+	}
+}
+
+func TestSpaceCollapsesDefaultExpandedTurn(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the crater"},
+		{Kind: model.EventThinking, Text: "Choose the safest route"},
+		{Kind: model.EventAssistantText, Text: "The ridge route is clear."},
+	}}
+	detail := newDetailState(session, 80, 20, newStyles())
+	for index, item := range detail.focusables {
+		if strings.Contains(item.key, "/turn/") {
+			detail.focus = index
+			detail.selectedLine = item.line
+			break
+		}
+	}
+	turnKey := detail.focusables[detail.focus].key
+
+	detail.update(tea.KeyMsg{Type: tea.KeySpace})
+
+	if expanded, ok := detail.expanded[turnKey]; !ok || expanded || detail.isExpanded(turnKey) {
+		t.Fatalf("turn override = %v, present %t, effective %t; want explicit collapse", expanded, ok, detail.isExpanded(turnKey))
+	}
+	for _, line := range detail.lines {
+		if strings.Contains(line.text, "Choose the safest route") {
+			t.Fatalf("collapsed turn retained child row %q", line.text)
+		}
+	}
+}
+
 func TestToolExpansionRevealsDiffLinesWithSemanticRoles(t *testing.T) {
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Update the route"},
@@ -1199,9 +1384,10 @@ func TestToolExpansionRevealsDiffLinesWithSemanticRoles(t *testing.T) {
 		{Kind: model.EventAssistantText, Text: "Route updated"},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	detail.moveFocus(1, false)
 	detail.moveFocus(1, false)
 	detail.update(tea.KeyMsg{Type: tea.KeySpace})
-	detail.moveFocus(1, false)
 	toolIndex := detail.focusables[detail.focus].line
 	if line := detail.lines[toolIndex]; !line.expandable || !strings.Contains(line.text, "▸ "+glyphTool+" Edit") {
 		t.Fatalf("collapsed tool line = %#v, want expandable marker", line)
@@ -1237,10 +1423,6 @@ func TestToolExpansionShowsMutedOutputSection(t *testing.T) {
 		{Kind: model.EventToolCall, ToolName: "exec_command", ToolInput: "check-route", Detail: &model.ToolDetail{Input: "check-route", Output: "route clear\ncommand complete"}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
-	detail.moveFocus(1, false)
-	detail.update(tea.KeyMsg{Type: tea.KeySpace})
-	detail.moveFocus(1, false)
-	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 
 	want := map[string]bool{"output:": false, "route clear": false, "command complete": false}
 	for _, line := range detail.lines {
@@ -1266,10 +1448,6 @@ func TestToolExpansionShowsNonFileInputSection(t *testing.T) {
 		{Kind: model.EventToolCall, ToolName: "Grep", ToolInput: "ridge", Detail: &model.ToolDetail{Input: "{\n  \"query\": \"ridge\"\n}"}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
-	detail.moveFocus(1, false)
-	detail.update(tea.KeyMsg{Type: tea.KeySpace})
-	detail.moveFocus(1, false)
-	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 
 	want := map[string]bool{"input:": false, "{": false, `"query": "ridge"`: false, "}": false}
 	for _, line := range detail.lines {
@@ -1295,10 +1473,6 @@ func TestToolExpansionOmitsSingleLineFileInput(t *testing.T) {
 		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/route.go", Detail: &model.ToolDetail{Input: "/workspace/route.go", Output: "route ready"}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
-	detail.moveFocus(1, false)
-	detail.update(tea.KeyMsg{Type: tea.KeySpace})
-	detail.moveFocus(1, false)
-	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 
 	var rows []string
 	for _, line := range detail.lines {
@@ -1319,8 +1493,8 @@ func TestEnterDoesNotExpandToolInPlace(t *testing.T) {
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
 	detail.moveFocus(1, false)
-	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 	detail.moveFocus(1, false)
+	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 	toolKey := detail.focusables[detail.focus].key
 
 	detail.update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -1355,9 +1529,7 @@ func TestEnterOnToolOpensFullItemView(t *testing.T) {
 	for _, msg := range []tea.Msg{
 		tea.WindowSizeMsg{Width: 80, Height: 140},
 		tea.KeyMsg{Type: tea.KeyEnter},
-		tea.KeyMsg{Type: tea.KeyDown},
-		tea.KeyMsg{Type: tea.KeySpace},
-		tea.KeyMsg{Type: tea.KeyDown},
+		tea.KeyMsg{Type: tea.KeyUp},
 		tea.KeyMsg{Type: tea.KeyEnter},
 	} {
 		updated, _ := m.Update(msg)
@@ -1509,13 +1681,8 @@ func TestItemViewScrollsWithStepAndEdgeKeys(t *testing.T) {
 func TestItemViewWrapToggleRebuildsFlatPlainRows(t *testing.T) {
 	text := strings.Repeat("charted route ", 12)
 	item := newItemView(model.Event{Kind: model.EventAssistantText, Text: text}, model.AgentClaude, nil, 24, 8, newStyles())
-	if len(item.rendered) != 1 {
-		t.Fatalf("unwrapped item rows = %d, want 1", len(item.rendered))
-	}
-
-	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
 	if !item.wrap || len(item.rendered) <= 1 {
-		t.Fatalf("wrapped item state = wrap %t rows %d, want multiple rows", item.wrap, len(item.rendered))
+		t.Fatalf("default item state = wrap %t rows %d, want wrapped rows", item.wrap, len(item.rendered))
 	}
 	for index, row := range item.rendered {
 		if strings.Contains(row.text, "\x1b") || ansi.StringWidth(row.text) != item.viewport.Width {
@@ -1525,7 +1692,21 @@ func TestItemViewWrapToggleRebuildsFlatPlainRows(t *testing.T) {
 
 	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
 	if item.wrap || len(item.rendered) != 1 {
-		t.Fatalf("second wrap toggle state = wrap %t rows %d, want one truncated row", item.wrap, len(item.rendered))
+		t.Fatalf("first wrap toggle state = wrap %t rows %d, want one truncated row", item.wrap, len(item.rendered))
+	}
+
+	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	if !item.wrap || len(item.rendered) <= 1 {
+		t.Fatalf("second wrap toggle state = wrap %t rows %d, want wrapped rows", item.wrap, len(item.rendered))
+	}
+}
+
+func TestDetailAndItemWrapByDefault(t *testing.T) {
+	detail := newDetailState(&model.Session{ID: "lunar", Agent: model.AgentCodex}, 80, 12, newStyles())
+	item := newItemView(model.Event{Kind: model.EventAssistantText, Text: "Route ready"}, model.AgentCodex, nil, 80, 12, newStyles())
+
+	if !detail.wrap || !item.wrap {
+		t.Fatalf("default wrap = detail %t, item %t; want both enabled", detail.wrap, item.wrap)
 	}
 }
 
@@ -1627,8 +1808,8 @@ func TestDetailScrollVisitsExpandedToolRows(t *testing.T) {
 		{Kind: model.EventAssistantText, Text: "Done"},
 	}}
 	detail := newDetailState(session, 80, 8, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	detail.moveFocus(1, false)
-	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 	detail.moveFocus(1, false)
 	if !strings.Contains(detail.focusables[detail.focus].key, "/event/0") {
 		t.Fatalf("first expanded focus = %#v, want thinking row", detail.focusables[detail.focus])
@@ -1654,7 +1835,7 @@ func TestDetailNavigationSupportsVimEdges(t *testing.T) {
 	if want := detail.focusables[detail.focus].line; detail.selectedLine != want || detail.viewport.YOffset == 0 || want < detail.viewport.YOffset || want >= detail.viewport.YOffset+detail.viewport.Height {
 		t.Fatalf("G selection line=%d offset=%d height=%d, want visible line %d below top", detail.selectedLine, detail.viewport.YOffset, detail.viewport.Height, want)
 	}
-	if view := ansi.Strip(detail.view()); !strings.Contains(view, "›   ● claude: The valley is clear") {
+	if view := ansi.Strip(detail.view()); !strings.Contains(view, "›   claude: The valley is clear") {
 		t.Fatalf("G did not keep the last focusable visible:\n%s", view)
 	}
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
@@ -1669,6 +1850,28 @@ func TestDetailNavigationSupportsVimEdges(t *testing.T) {
 	}
 }
 
+func TestDetailNavigationMovesTheVisibleSelectionMarker(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the northern ridge"},
+		{Kind: model.EventAssistantText, Text: "Northern ridge is clear"},
+		{Kind: model.EventUser, Text: "Survey the southern ridge"},
+		{Kind: model.EventAssistantText, Text: "Southern ridge is clear"},
+	}}
+	detail := newDetailState(session, 80, 20, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+	oldText := detail.lines[detail.selectedLine].text
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	newText := detail.lines[detail.selectedLine].text
+	view := ansi.Strip(detail.view())
+
+	if strings.Contains(view, "› "+oldText) {
+		t.Fatalf("navigation left the visible marker on %q:\n%s", oldText, view)
+	}
+	if !strings.Contains(view, "› "+newText) {
+		t.Fatalf("navigation did not move the visible marker to %q:\n%s", newText, view)
+	}
+}
+
 func TestWrapToggleUsesFlatRowsAndHighlightsEverySelectedRow(t *testing.T) {
 	profile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
@@ -1678,13 +1881,8 @@ func TestWrapToggleUsesFlatRowsAndHighlightsEverySelectedRow(t *testing.T) {
 		Kind: model.EventUser, Text: strings.Repeat("charted route ", 12),
 	}}}
 	detail := newDetailState(session, 28, 16, newStyles(Theme{Name: "mono"}))
-	if len(detail.rendered) != 1 {
-		t.Fatalf("truncated rendered rows = %d, want one per detail line", len(detail.rendered))
-	}
-
-	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
 	if !detail.wrap || len(detail.rendered) < 3 {
-		t.Fatalf("wrapped state = %v with %d rows, want multiple flat rows", detail.wrap, len(detail.rendered))
+		t.Fatalf("default wrapped state = %v with %d rows, want multiple flat rows", detail.wrap, len(detail.rendered))
 	}
 	selectedRows := 0
 	for _, row := range detail.rendered {
@@ -1701,7 +1899,12 @@ func TestWrapToggleUsesFlatRowsAndHighlightsEverySelectedRow(t *testing.T) {
 
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
 	if detail.wrap || len(detail.rendered) != 1 {
-		t.Fatalf("second toggle left wrap=%v with %d rows, want truncation", detail.wrap, len(detail.rendered))
+		t.Fatalf("first toggle left wrap=%v with %d rows, want truncation", detail.wrap, len(detail.rendered))
+	}
+
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	if !detail.wrap || len(detail.rendered) < 3 {
+		t.Fatalf("second toggle left wrap=%v with %d rows, want wrapped rows", detail.wrap, len(detail.rendered))
 	}
 }
 
@@ -1711,12 +1914,14 @@ func TestWrappedEdgeNavigationUsesFlatRowOffsets(t *testing.T) {
 		{Kind: model.EventAssistantText, Text: strings.Repeat("charted southern route ", 10)},
 	}}
 	detail := newDetailState(session, 28, 10, newStyles())
-	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
 
-	selectedRow := detail.firstRenderedRow(detail.selectedLine)
-	if selectedRow <= 0 || selectedRow < detail.viewport.YOffset || selectedRow >= detail.viewport.YOffset+detail.viewport.Height {
-		t.Fatalf("G selected flat row %d outside offset=%d height=%d", selectedRow, detail.viewport.YOffset, detail.viewport.Height)
+	selectedVisible := false
+	for rowIndex := detail.viewport.YOffset; rowIndex < min(len(detail.rendered), detail.viewport.YOffset+detail.viewport.Height); rowIndex++ {
+		selectedVisible = selectedVisible || detail.rendered[rowIndex].detailIndex == detail.selectedLine
+	}
+	if !selectedVisible || !detail.viewport.AtBottom() {
+		t.Fatalf("G selected line %d visibility=%t bottom=%t", detail.selectedLine, selectedVisible, detail.viewport.AtBottom())
 	}
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	if selectedRow := detail.firstRenderedRow(detail.selectedLine); selectedRow != 0 || detail.viewport.YOffset != 0 {
