@@ -77,6 +77,24 @@ func defaultCacheDir(home, xdg string) string {
 	return filepath.Join(home, ".cache", "agtlog")
 }
 
+func configuredWatchRootCount(home, claudeConfig, codexHome, agent string) int {
+	var roots []string
+	if agent == "" || agent == string(model.AgentClaude) {
+		roots = append(roots, claude.DefaultRoots(home, claudeConfig)...)
+	}
+	if agent == "" || agent == string(model.AgentCodex) {
+		roots = append(roots, codex.DefaultRoots(home, codexHome)...)
+	}
+	existing := make(map[string]bool, len(roots))
+	for _, root := range roots {
+		info, err := os.Stat(root)
+		if err == nil && info.IsDir() {
+			existing[filepath.Clean(root)] = true
+		}
+	}
+	return len(existing)
+}
+
 func run(ctx context.Context, args []string, output io.Writer, registry *source.Registry) error {
 	return execute(ctx, args, output, func(string, bool) (*source.Registry, error) { return registry, nil })
 }
@@ -87,6 +105,7 @@ type cliOptions struct {
 	offline     bool
 	noWatch     bool
 	agent       string
+	theme       string
 }
 
 type tuiRunner func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error
@@ -94,6 +113,10 @@ type tuiRunner func(context.Context, io.Reader, io.Writer, tui.Model, <-chan sou
 type registryFactory func(string, bool) (*source.Registry, error)
 
 func executeTUI(ctx context.Context, options cliOptions, input io.Reader, output io.Writer, registry *source.Registry, runner tuiRunner) error {
+	theme, err := tui.ResolveTheme(options.theme)
+	if err != nil {
+		return err
+	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	sessions, err := registry.Discover(runCtx)
@@ -102,6 +125,7 @@ func executeTUI(ctx context.Context, options cliOptions, input io.Reader, output
 	}
 	var follower *source.Follower
 	var updates <-chan source.SessionUpdate
+	watchingRoots := 0
 	if !options.noWatch {
 		follower, err = registry.Follow(runCtx, source.WatchOptions{})
 		if err != nil {
@@ -112,12 +136,18 @@ func executeTUI(ctx context.Context, options cliOptions, input io.Reader, output
 			_ = follower.Close()
 		}()
 		updates = follower.Updates()
+		home, homeErr := os.UserHomeDir()
+		if homeErr != nil {
+			return homeErr
+		}
+		watchingRoots = configuredWatchRootCount(home, os.Getenv("CLAUDE_CONFIG_DIR"), os.Getenv("CODEX_HOME"), options.agent)
 		sessions, err = registry.Discover(runCtx)
 		if err != nil {
 			return err
 		}
 	}
-	return runner(runCtx, input, output, tui.NewModelWithContext(runCtx, sessions, registry), updates)
+	initial := tui.NewModelWithContextAndTheme(runCtx, sessions, registry, theme).WithWatchingRoots(watchingRoots)
+	return runner(runCtx, input, output, initial, updates)
 }
 
 func parseOptions(args []string, output io.Writer) (cliOptions, error) {
@@ -127,11 +157,14 @@ func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 	offline := flags.Bool("offline", false, "skip pricing refresh")
 	noWatch := flags.Bool("no-watch", false, "disable live session following")
 	agent := flags.String("agent", "", "limit sessions to claude or codex")
+	theme := flags.String("theme", "", "color theme: default, nord, or dracula")
 	flags.Usage = func() {
-		_, _ = fmt.Fprintln(output, "Usage: agtlog [--offline] [--no-watch] [--agent claude|codex] [--version]")
+		_, _ = fmt.Fprintln(output, "Usage: agtlog [--offline] [--no-watch] [--agent claude|codex] [--theme default|nord|dracula] [--version]")
 		_, _ = fmt.Fprintln(output, "  --agent     limit sessions to claude or codex")
 		_, _ = fmt.Fprintln(output, "  --no-watch  disable live session following")
 		_, _ = fmt.Fprintln(output, "  --offline   skip pricing refresh")
+		_, _ = fmt.Fprintln(output, "  --theme     color theme: default, nord, or dracula")
+		_, _ = fmt.Fprintln(output, "              precedence: --theme > AGTLOG_THEME > default; NO_COLOR forces mono")
 		_, _ = fmt.Fprintln(output, "  --version   print version")
 	}
 	if err := flags.Parse(args); err != nil {
@@ -148,7 +181,7 @@ func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 		flags.Usage()
 		return cliOptions{}, fmt.Errorf("invalid agent %q", *agent)
 	}
-	return cliOptions{showVersion: *showVersion, offline: *offline, noWatch: *noWatch, agent: *agent}, nil
+	return cliOptions{showVersion: *showVersion, offline: *offline, noWatch: *noWatch, agent: *agent, theme: *theme}, nil
 }
 
 func execute(ctx context.Context, args []string, output io.Writer, registryFactory registryFactory) error {
@@ -172,6 +205,9 @@ func executeApplication(ctx context.Context, args []string, input io.Reader, out
 	}
 	if options.showVersion {
 		_, err := fmt.Fprintln(output, currentVersion())
+		return err
+	}
+	if _, err := tui.ResolveTheme(options.theme); err != nil {
 		return err
 	}
 	registry, err := factory(options.agent, options.offline)

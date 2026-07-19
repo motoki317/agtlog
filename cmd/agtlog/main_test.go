@@ -44,6 +44,29 @@ func TestDefaultCacheDirUsesXDGThenHome(t *testing.T) {
 	}
 }
 
+func TestConfiguredWatchRootCountUsesSelectedAgent(t *testing.T) {
+	home := t.TempDir()
+	claudeA := filepath.Join(home, "claude-a")
+	claudeB := filepath.Join(home, "claude-b")
+	missing := filepath.Join(home, "missing")
+	codexHome := filepath.Join(home, "codex")
+	for _, root := range []string{filepath.Join(claudeA, "projects"), filepath.Join(claudeB, "projects"), filepath.Join(codexHome, "sessions")} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claudeConfig := strings.Join([]string{claudeA, missing, claudeB}, ",")
+	if got := configuredWatchRootCount(home, claudeConfig, codexHome, ""); got != 3 {
+		t.Fatalf("all-agent root count = %d, want 3", got)
+	}
+	if got := configuredWatchRootCount(home, claudeConfig, codexHome, "codex"); got != 1 {
+		t.Fatalf("Codex root count = %d, want 1", got)
+	}
+	if got := configuredWatchRootCount(home, missing, missing, ""); got != 0 {
+		t.Fatalf("missing root count = %d, want 0", got)
+	}
+}
+
 func TestDefaultRegistryProtectsUnselectedAgentRootFromCache(t *testing.T) {
 	home := t.TempDir()
 	claudeRoot := filepath.Join(home, "claude")
@@ -172,8 +195,11 @@ func TestRunHelpPrintsUsageAndSucceeds(t *testing.T) {
 	if err := run(context.Background(), []string{"--help"}, &output, registry); err != nil {
 		t.Fatalf("run() error = %v", err)
 	}
-	if !strings.Contains(output.String(), "Usage: agtlog") || !strings.Contains(output.String(), "--version") {
+	if !strings.Contains(output.String(), "Usage: agtlog") || !strings.Contains(output.String(), "--version") || !strings.Contains(output.String(), "--theme default|nord|dracula") {
 		t.Fatalf("run() help = %q, want usage and flags", output.String())
+	}
+	if !strings.Contains(output.String(), "--theme > AGTLOG_THEME > default; NO_COLOR forces mono") {
+		t.Fatalf("run() help does not explain theme precedence: %q", output.String())
 	}
 }
 
@@ -186,11 +212,11 @@ func TestRunRejectsUnexpectedArguments(t *testing.T) {
 }
 
 func TestParseOptionsReadsOfflineWatchAndAgentSelection(t *testing.T) {
-	options, err := parseOptions([]string{"--offline", "--no-watch", "--agent", "codex"}, io.Discard)
+	options, err := parseOptions([]string{"--offline", "--no-watch", "--agent", "codex", "--theme", "nord"}, io.Discard)
 	if err != nil {
 		t.Fatalf("parseOptions() error = %v", err)
 	}
-	if !options.offline || !options.noWatch || options.agent != "codex" {
+	if !options.offline || !options.noWatch || options.agent != "codex" || options.theme != "nord" {
 		t.Fatalf("parseOptions() = %#v", options)
 	}
 }
@@ -217,6 +243,34 @@ func TestExecuteApplicationReportsFlagErrorsOnce(t *testing.T) {
 	}
 }
 
+func TestExecuteApplicationRejectsUnknownThemeBeforeDiscovery(t *testing.T) {
+	noColor, hadNoColor := os.LookupEnv("NO_COLOR")
+	if err := os.Unsetenv("NO_COLOR"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if hadNoColor {
+			_ = os.Setenv("NO_COLOR", noColor)
+		}
+	})
+	called := false
+	err := executeApplication(
+		context.Background(),
+		[]string{"--theme", "solarized"},
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+		func(string, bool) (*source.Registry, error) {
+			called = true
+			return nil, nil
+		},
+		func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error { return nil },
+	)
+	if err == nil || !strings.Contains(err.Error(), "unknown theme") || called {
+		t.Fatalf("executeApplication() error = %v, factory called = %v", err, called)
+	}
+}
+
 func TestExecuteApplicationPassesOptionsToRegistryFactory(t *testing.T) {
 	selected := ""
 	offline := false
@@ -233,6 +287,31 @@ func TestExecuteApplicationPassesOptionsToRegistryFactory(t *testing.T) {
 	}
 	if selected != "codex" || !offline {
 		t.Fatalf("factory options = agent %q, offline %v", selected, offline)
+	}
+}
+
+func TestExecuteApplicationPassesSelectedThemeToTUI(t *testing.T) {
+	noColor, hadNoColor := os.LookupEnv("NO_COLOR")
+	if err := os.Unsetenv("NO_COLOR"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if hadNoColor {
+			_ = os.Setenv("NO_COLOR", noColor)
+		}
+	})
+	factory := func(string, bool) (*source.Registry, error) {
+		return source.NewRegistry(nil, source.Options{}), nil
+	}
+	runner := func(_ context.Context, _ io.Reader, _ io.Writer, initial tui.Model, _ <-chan source.SessionUpdate) error {
+		if got := initial.ThemeName(); got != "nord" {
+			t.Fatalf("TUI theme = %q, want nord", got)
+		}
+		return nil
+	}
+
+	if err := executeApplication(context.Background(), []string{"--no-watch", "--theme", "nord"}, strings.NewReader(""), io.Discard, io.Discard, factory, runner); err != nil {
+		t.Fatal(err)
 	}
 }
 

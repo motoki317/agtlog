@@ -10,6 +10,7 @@ type keyMap struct {
 	Agent     key.Binding
 	Open      key.Binding
 	Refresh   key.Binding
+	Theme     key.Binding
 	Help      key.Binding
 	Quit      key.Binding
 	Back      key.Binding
@@ -27,6 +28,7 @@ func defaultKeys() keyMap {
 		Agent:     key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "agent")),
 		Open:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 		Refresh:   key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		Theme:     key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
 		Help:      key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 		Back:      key.NewBinding(key.WithKeys("esc", "h"), key.WithHelp("esc/h", "back")),
@@ -43,7 +45,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.MoveDown, k.MoveUp, k.Filter, k.Sort, k.Agent},
-		{k.Open, k.Refresh, k.Toggle, k.NextAgent, k.PrevAgent},
+		{k.Open, k.Refresh, k.Theme, k.Toggle, k.NextAgent, k.PrevAgent},
 		{k.Back, k.Help, k.Quit},
 	}
 }

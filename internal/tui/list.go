@@ -8,70 +8,215 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/motoki317/agtlog/internal/model"
 )
 
 const (
-	listAgeWidth      = 4
-	listMessagesWidth = 5
-	listTokensWidth   = 8
-	listCostWidth     = 6
+	listAgentWidth     = 6
+	listProjectWidth   = 8
+	listProjectCap     = 18
+	listTitleWidth     = 20
+	listTitlePreferred = 40
+	listModelWidth     = 13
+	listAgeWidth       = 4
+	listMessagesWidth  = 5
+	listTokensWidth    = 9
+	listCostWidth      = 7
 )
 
-func listColumns(width int) []table.Column {
-	columns := []table.Column{
-		{Title: "AGENT", Width: 7},
-		{Title: "PROJECT", Width: 10},
-		{Title: "TITLE", Width: 20},
-		{Title: "MODEL", Width: 12},
-		{Title: "AGE", Width: listAgeWidth},
-		{Title: "MSGS", Width: listMessagesWidth},
-		{Title: "TOKENS", Width: listTokensWidth},
-		{Title: "$", Width: listCostWidth},
+type listColumnKind int
+
+const (
+	columnAgent listColumnKind = iota
+	columnProject
+	columnTitle
+	columnModel
+	columnAge
+	columnMessages
+	columnTokens
+	columnCost
+)
+
+type listColumn struct {
+	kind  listColumnKind
+	title string
+	width int
+	right bool
+}
+
+type sessionPresentation struct {
+	usage         model.Usage
+	cost          model.Cost
+	subagentCount int
+	model         string
+}
+
+func newSessionPresentation(session *model.Session) sessionPresentation {
+	cost := session.TotalCost()
+	return sessionPresentation{
+		usage: session.TotalUsage(), cost: cost, subagentCount: subagentCount(session),
+		model: shortModelsWithCost(session, cost),
 	}
-	total := 0
-	for _, column := range columns {
-		total += column.Width + 1
+}
+
+type listLayout struct {
+	contextHeight      int
+	sessionsHeight     int
+	keyBarHeight       int
+	rowCapacity        int
+	compact            bool
+	compactPanelHeight int
+}
+
+func newListLayout(height int, filtering bool) listLayout {
+	height = max(3, height)
+	contextHeight := 3
+	if filtering {
+		contextHeight++
 	}
-	for total > width && len(columns) > 1 {
-		total -= columns[len(columns)-1].Width + 1
-		columns = columns[:len(columns)-1]
+	if height < contextHeight+5 {
+		keyBarHeight := 1
+		if height == 3 {
+			keyBarHeight = 0
+		}
+		panelHeight := height - keyBarHeight
+		rowCapacity := 0
+		if panelHeight >= 4 {
+			rowCapacity = 1
+		}
+		return listLayout{compact: true, compactPanelHeight: panelHeight, keyBarHeight: keyBarHeight, rowCapacity: rowCapacity}
 	}
-	if len(columns) == 1 && total > width {
-		columns[0].Width = max(0, width-1)
+	sessionsHeight := height - contextHeight - 1
+	return listLayout{
+		contextHeight: contextHeight, sessionsHeight: sessionsHeight, keyBarHeight: 1,
+		rowCapacity: max(0, sessionsHeight-3),
+	}
+}
+
+func listColumns(width int) []listColumn {
+	if width <= 0 {
+		return nil
+	}
+	columns := []listColumn{
+		{kind: columnAgent, title: "AGENT", width: listAgentWidth},
+		{kind: columnProject, title: "PROJECT", width: listProjectWidth},
+		{kind: columnTitle, title: "TITLE", width: listTitleWidth},
+		{kind: columnModel, title: "MODEL", width: listModelWidth},
+		{kind: columnAge, title: "AGE", width: listAgeWidth, right: true},
+		{kind: columnMessages, title: "MSGS", width: listMessagesWidth, right: true},
+		{kind: columnTokens, title: "TOKENS", width: listTokensWidth, right: true},
+		{kind: columnCost, title: "$", width: listCostWidth, right: true},
+	}
+	for _, kind := range []listColumnKind{columnModel, columnMessages, columnProject, columnAge} {
+		if listColumnsWidth(columns) <= width {
+			break
+		}
+		columns = removeListColumn(columns, kind)
+	}
+	if listColumnsWidth(columns) > width {
+		for index := range columns {
+			if columns[index].kind == columnTitle {
+				columns[index].width = max(1, columns[index].width-(listColumnsWidth(columns)-width))
+				break
+			}
+		}
+	}
+	for _, kind := range []listColumnKind{columnCost, columnTokens, columnAgent} {
+		if listColumnsWidth(columns) <= width {
+			break
+		}
+		columns = removeListColumn(columns, kind)
+	}
+	if len(columns) == 1 && listColumnsWidth(columns) > width {
+		columns[0].width = width
+	}
+
+	slack := width - listColumnsWidth(columns)
+	for index := range columns {
+		if columns[index].kind == columnTitle {
+			growth := min(slack, listTitlePreferred-columns[index].width)
+			columns[index].width += growth
+			slack -= growth
+			break
+		}
+	}
+	for index := range columns {
+		if columns[index].kind == columnProject {
+			growth := min(slack, listProjectCap-columns[index].width)
+			columns[index].width += growth
+			slack -= growth
+			break
+		}
+	}
+	for index := range columns {
+		if columns[index].kind == columnTitle {
+			columns[index].width += slack
+			break
+		}
 	}
 	return columns
 }
 
-func sessionRow(session *model.Session, now time.Time, styles styles) table.Row {
-	usage := session.TotalUsage()
-	tokenSuffix := ""
-	tokenWidth := 4
-	if count := subagentCount(session); count > 0 {
-		tokenSuffix = " ⑃" + compactCount(int64(count), 3)
-		tokenWidth = min(tokenWidth, listTokensWidth-ansi.StringWidth(tokenSuffix))
+func listColumnsWidth(columns []listColumn) int {
+	total := max(0, len(columns)-1)
+	for _, column := range columns {
+		total += column.width
 	}
-	tokens := fmt.Sprintf("%*s", listTokensWidth, compactCount(usage.TotalTokens(), tokenWidth)+tokenSuffix)
-	agent := styles.agentLabel(session.Agent)
-	if session.HasError {
-		agent += styles.warning.Render("⚠")
+	return total
+}
+
+func removeListColumn(columns []listColumn, kind listColumnKind) []listColumn {
+	for index, column := range columns {
+		if column.kind == kind {
+			return append(columns[:index:index], columns[index+1:]...)
+		}
 	}
-	cost := fmt.Sprintf("%*s", listCostWidth, formatCost(session.TotalCost()))
-	if session.TotalCost().Estimated {
-		cost = styles.estimated.Render(cost)
+	return columns
+}
+
+func sessionCell(session *model.Session, now time.Time, column listColumn) string {
+	return sessionCellWithPresentation(session, newSessionPresentation(session), now, column)
+}
+
+func sessionCellWithPresentation(session *model.Session, presentation sessionPresentation, now time.Time, column listColumn) string {
+	switch column.kind {
+	case columnAgent:
+		label := terminalText(string(session.Agent), 32)
+		if session.HasError {
+			label = ansi.Truncate(label, max(0, column.width-1), "") + glyphWarning
+		}
+		return label
+	case columnProject:
+		return terminalText(session.Project, 96)
+	case columnTitle:
+		return terminalText(session.Title, 160)
+	case columnModel:
+		return terminalText(presentation.model, 96)
+	case columnAge:
+		return formatAge(now, session.UpdatedAt)
+	case columnMessages:
+		return compactCount(int64(session.Messages), column.width)
+	case columnTokens:
+		return formatPresentedTokens(presentation, column.width)
+	case columnCost:
+		return formatCostWidth(presentation.cost, column.width)
+	default:
+		return ""
 	}
-	return table.Row{
-		agent,
-		terminalText(session.Project, 96),
-		terminalText(session.Title, 160),
-		terminalText(shortModels(session), 96),
-		styles.muted.Render(formatAge(now, session.UpdatedAt)),
-		styles.muted.Render(fmt.Sprintf("%*s", listMessagesWidth, compactCount(int64(session.Messages), listMessagesWidth))),
-		tokens,
-		cost,
+}
+
+func formatTokens(session *model.Session, width int) string {
+	return formatPresentedTokens(newSessionPresentation(session), width)
+}
+
+func formatPresentedTokens(presentation sessionPresentation, width int) string {
+	suffix := ""
+	if count := presentation.subagentCount; count > 0 {
+		suffix = " " + glyphSubagent + compactCount(int64(count), 3)
 	}
+	return compactCount(presentation.usage.TotalTokens(), min(4, max(1, width-ansi.StringWidth(suffix)))) + suffix
 }
 
 func sessionIdentity(session *model.Session) string {
@@ -87,6 +232,10 @@ func subagentCount(session *model.Session) int {
 }
 
 func shortModels(session *model.Session) string {
+	return shortModelsWithCost(session, session.TotalCost())
+}
+
+func shortModelsWithCost(session *model.Session, cost model.Cost) string {
 	if len(session.Models) == 0 {
 		return "—"
 	}
@@ -112,7 +261,7 @@ func shortModels(session *model.Session) string {
 	if len(session.Models) > 1 {
 		name += fmt.Sprintf(" +%d", len(session.Models)-1)
 	}
-	for _, missing := range session.TotalCost().MissingPricingModels {
+	for _, missing := range cost.MissingPricingModels {
 		if missing == selected || len(session.Models) == 1 {
 			name += "!"
 			break
@@ -191,6 +340,10 @@ func compactCount(value int64, maxWidth int) string {
 }
 
 func formatCost(cost model.Cost) string {
+	return formatCostWidth(cost, listCostWidth)
+}
+
+func formatCostWidth(cost model.Cost, width int) string {
 	prefix := "$"
 	if cost.Estimated {
 		prefix = "~$"
@@ -199,7 +352,7 @@ func formatCost(cost model.Cost) string {
 	if len(cost.MissingPricingModels) > 0 {
 		suffix = "!"
 	}
-	amountWidth := listCostWidth - len(prefix) - len(suffix)
+	amountWidth := width - len(prefix) - len(suffix)
 	return prefix + compactDollars(cost.USD, amountWidth) + suffix
 }
 
@@ -254,39 +407,200 @@ func terminalText(value string, maxRunes int) string {
 }
 
 func (m Model) listView() string {
-	footer := m.listFooter()
+	layout := newListLayout(m.height, m.filtering)
+	if layout.compact {
+		return m.compactListView(layout)
+	}
+	context := m.listSummary()
+	innerWidth := max(0, m.width-2)
+	contextLine := fitPlain(context, innerWidth, false)
+	contextLines := []panelLine{{plain: contextLine, styled: m.styles.row.Render(contextLine)}}
+	contextHeight := layout.contextHeight
 	if m.filtering {
-		footer = "filter: " + m.filter.View() + "  [enter] apply  [esc] clear"
+		filterLine := m.filterInputLine(innerWidth)
+		contextLines = append(contextLines, panelLine{plain: filterLine, styled: m.styles.accent.Render(filterLine)})
 	}
-	body := m.table.View()
-	if len(m.sessions) == 0 {
-		body = "No sessions found.\n" + ansi.Truncate("Check ~/.claude, ~/.codex, or configured agent roots; press ? for keys.", m.width, "…")
-	}
-	return body + "\n" + ansi.Truncate(footer, m.width, "…")
+	contextPanel := renderPanel("agtlog", "", contextLines, m.width, contextHeight, m.styles)
+	sessionsPanel := m.sessionsPanel(layout.sessionsHeight)
+	keyBar := m.renderKeyBar()
+	return strings.Join([]string{contextPanel, sessionsPanel, keyBar}, "\n")
 }
 
-func (m Model) listFooter() string {
-	projects := make(map[string]bool)
-	var total model.Cost
-	missing := make(map[string]bool)
-	for _, session := range m.visible {
-		projects[session.Project] = true
-		cost := session.TotalCost()
-		total.USD += cost.USD
-		total.Estimated = total.Estimated || cost.Estimated
-		for _, name := range cost.MissingPricingModels {
-			if !missing[name] {
-				total.MissingPricingModels = append(total.MissingPricingModels, name)
-				missing[name] = true
-			}
+func (m Model) compactListView(layout listLayout) string {
+	innerWidth := max(0, m.width-2)
+	summary := fitPlain(m.listSummary(), innerWidth, false)
+	content := make([]panelLine, 0, max(0, layout.compactPanelHeight-2))
+	if m.filtering {
+		plain := m.filterInputLine(innerWidth)
+		content = append(content, panelLine{plain: plain, styled: m.styles.accent.Render(plain)})
+	}
+	if len(content) < layout.compactPanelHeight-2 {
+		content = append(content, panelLine{plain: summary, styled: m.styles.row.Render(summary)})
+	}
+	if len(content) < layout.compactPanelHeight-2 {
+		if len(m.visible) > 0 {
+			columns := listColumns(innerWidth)
+			content = append(content, renderSessionPanelLine(m.visible[min(m.cursor, len(m.visible)-1)], m.now(), columns, innerWidth, true, m.styles))
+		} else {
+			plain := fitPlain("No sessions found.", innerWidth, false)
+			content = append(content, panelLine{plain: plain, styled: m.styles.muted.Render(plain)})
 		}
 	}
-	totalLabel := formatCost(total)
-	if len(total.MissingPricingModels) > 0 {
+	for len(content) < layout.compactPanelHeight-2 {
+		plain := strings.Repeat(" ", innerWidth)
+		content = append(content, panelLine{plain: plain, styled: m.styles.row.Render(plain)})
+	}
+	panel := renderPanel("agtlog · Sessions", "", content, m.width, layout.compactPanelHeight, m.styles)
+	if layout.keyBarHeight == 0 {
+		return panel
+	}
+	return panel + "\n" + m.renderKeyBar()
+}
+
+func (m Model) filterInputLine(width int) string {
+	if width <= 0 {
+		return ""
+	}
+	runes := []rune(m.filter.Value())
+	for index, r := range runes {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			runes[index] = ' '
+		}
+	}
+	position := max(0, min(m.filter.Position(), len(runes)))
+	before, after := string(runes[:position]), string(runes[position:])
+	available := max(0, width-1)
+	input := before + "▊" + after
+	cursorColumn := ansi.StringWidth(before)
+	start := max(0, cursorColumn-max(0, available-2))
+	visible := ansi.Cut(input, start, start+available)
+	if start > 0 && available > 0 {
+		visible = "…" + ansi.Cut(input, start+1, start+available)
+	}
+	return fitPlain("/"+visible, width, false)
+}
+
+func (m Model) sessionsPanel(height int) string {
+	innerWidth := max(0, m.width-2)
+	innerHeight := max(0, height-2)
+	columns := listColumns(innerWidth)
+	content := make([]panelLine, 0, innerHeight)
+	if innerHeight > 0 {
+		content = append(content, renderListHeaderLine(columns, innerWidth, m.styles))
+	}
+	rowCapacity := max(0, innerHeight-1)
+	start := min(max(0, m.listOffset), max(0, len(m.visible)-rowCapacity))
+	end := min(len(m.visible), start+rowCapacity)
+	for index := start; index < end; index++ {
+		content = append(content, renderSessionPanelLine(m.visible[index], m.now(), columns, innerWidth, index == m.cursor, m.styles))
+	}
+	if len(m.visible) == 0 && rowCapacity > 0 {
+		plain := fitPlain("No sessions found.", innerWidth, false)
+		content = append(content, panelLine{plain: plain, styled: m.styles.muted.Render(plain)})
+		if len(m.sessions) == 0 && rowCapacity > 1 {
+			plain := fitPlain("Check ~/.claude, ~/.codex, or configured agent roots; press ? for keys.", innerWidth, false)
+			content = append(content, panelLine{plain: plain, styled: m.styles.muted.Render(plain)})
+		}
+	}
+	for len(content) < innerHeight {
+		plain := strings.Repeat(" ", innerWidth)
+		content = append(content, panelLine{plain: plain, styled: m.styles.row.Render(plain)})
+	}
+	title := "Sessions"
+	if m.filter.Value() != "" || m.agent != agentAll {
+		title += " · filtered"
+	}
+	hint := ""
+	if len(m.visible) > rowCapacity && len(m.visible) > 0 {
+		hint = fmt.Sprintf("%d/%d", m.cursor+1, len(m.visible))
+	}
+	return renderPanel(title, hint, content, m.width, height, m.styles)
+}
+
+func renderListHeader(columns []listColumn, width int, styles styles) string {
+	return renderListHeaderLine(columns, width, styles).styled
+}
+
+func renderListHeaderLine(columns []listColumn, width int, styles styles) panelLine {
+	plainCells := make([]string, len(columns))
+	cells := make([]string, len(columns))
+	for index, column := range columns {
+		plain := fitPlain(column.title, column.width, column.right)
+		plainCells[index] = plain
+		cells[index] = styles.header.Render(plain)
+	}
+	if len(columns) == 0 {
+		plain := strings.Repeat(" ", width)
+		return panelLine{plain: plain, styled: styles.header.Render(plain)}
+	}
+	return panelLine{plain: strings.Join(plainCells, " "), styled: strings.Join(cells, styles.header.Render(" "))}
+}
+
+func renderSessionRow(session *model.Session, now time.Time, columns []listColumn, width int, selected bool, styles styles) string {
+	return renderSessionPanelLine(session, now, columns, width, selected, styles).styled
+}
+
+func renderSessionPanelLine(session *model.Session, now time.Time, columns []listColumn, width int, selected bool, styles styles) panelLine {
+	presentation := newSessionPresentation(session)
+	plainCells := make([]string, len(columns))
+	for index, column := range columns {
+		plainCells[index] = fitPlain(sessionCellWithPresentation(session, presentation, now, column), column.width, column.right)
+	}
+	plainRow := strings.Join(plainCells, " ")
+	plainRow = fitPlain(plainRow, width, false)
+	if selected {
+		return panelLine{plain: plainRow, styled: styles.selected.Render(plainRow)}
+	}
+	styledCells := make([]string, len(columns))
+	for index, column := range columns {
+		styledCells[index] = styleSessionCell(plainCells[index], session, presentation, column, styles)
+	}
+	return panelLine{plain: plainRow, styled: strings.Join(styledCells, styles.row.Render(" "))}
+}
+
+func styleSessionCell(cell string, session *model.Session, presentation sessionPresentation, column listColumn, styles styles) string {
+	switch column.kind {
+	case columnAgent:
+		agentStyle := styles.row
+		if session.Agent == model.AgentClaude {
+			agentStyle = styles.claude
+		} else if session.Agent == model.AgentCodex {
+			agentStyle = styles.codex
+		}
+		if marker := strings.Index(cell, glyphWarning); marker >= 0 {
+			return agentStyle.Render(cell[:marker]) + styles.warning.Render(glyphWarning) + agentStyle.Render(cell[marker+len(glyphWarning):])
+		}
+		return agentStyle.Render(cell)
+	case columnAge, columnMessages:
+		return styles.muted.Render(cell)
+	case columnCost:
+		if presentation.cost.Estimated {
+			return styles.estimated.Render(cell)
+		}
+	case columnModel:
+		if len(presentation.cost.MissingPricingModels) > 0 {
+			return styles.warning.Render(cell)
+		}
+	}
+	return styles.row.Render(cell)
+}
+
+func (m Model) renderKeyBar() string {
+	plain := "/ filter   s sort   a agent   ↵ open   r refresh"
+	if !m.styles.mono {
+		plain += "   t theme"
+	}
+	plain += "   ? help   q quit"
+	return m.styles.keyHint.Render(fitPlain(plain, m.width, false))
+}
+
+func (m Model) listSummary() string {
+	totalLabel := formatCost(m.visibleCost)
+	if len(m.visibleCost.MissingPricingModels) > 0 {
 		totalLabel += " partial"
 	}
-	state := fmt.Sprintf("— %d sessions · %d projects · %s", len(m.visible), len(projects), m.styles.emphasis.Render(totalLabel))
-	if query := terminalText(m.filter.Value(), 24); query != "" {
+	state := fmt.Sprintf("%d sessions · %d projects · %s total · watching %d roots", len(m.visible), m.visibleProjects, totalLabel, m.watchedRootCount())
+	if query := terminalText(m.filter.Value(), 24); query != "" && !m.filtering {
 		state += " · /" + query
 	}
 	if m.sort != sortAge {
@@ -306,14 +620,87 @@ func (m Model) listFooter() string {
 	if m.status != "" {
 		state += " · " + m.status
 	}
-	hints := []string{"[/] filter", "[s] sort", "[a] agent", "[↵] open", "[?] help", "[q] quit"}
-	footer := state
-	for _, hint := range hints {
-		candidate := footer + " " + hint
-		if ansi.StringWidth(candidate) > m.width {
-			break
-		}
-		footer = candidate
+	if m.theme.Name == "mono" {
+		state += " · theme:mono"
 	}
-	return footer
+	return state
+}
+
+func (m Model) watchedRootCount() int {
+	return m.watchingRoots
+}
+
+type panelLine struct {
+	plain  string
+	styled string
+}
+
+func renderPanel(title, bottomHint string, content []panelLine, width, height int, styles styles) string {
+	width, height = max(1, width), max(1, height)
+	if width == 1 {
+		return strings.TrimSuffix(strings.Repeat("|\n", height), "\n")
+	}
+	if height == 1 {
+		return ansi.Truncate(title, width, "…")
+	}
+	border := widthSafeBorder(lipgloss.RoundedBorder())
+	innerWidth := width - 2
+	lines := make([]string, 0, height)
+	lines = append(lines, styles.border.Render(border.TopLeft)+panelRule(border.Top, title, innerWidth, false, styles)+styles.border.Render(border.TopRight))
+	for index := 0; index < height-2; index++ {
+		line := panelLine{}
+		if index < len(content) {
+			line = content[index]
+		}
+		fitted := fitPlain(line.plain, innerWidth, false)
+		rendered := line.styled
+		if rendered == "" || fitted != line.plain {
+			rendered = styles.row.Render(fitted)
+		}
+		lines = append(lines, styles.border.Render(border.Left)+rendered+styles.border.Render(border.Right))
+	}
+	lines = append(lines, styles.border.Render(border.BottomLeft)+panelRule(border.Bottom, bottomHint, innerWidth, true, styles)+styles.border.Render(border.BottomRight))
+	return strings.Join(lines, "\n")
+}
+
+func widthSafeBorder(candidate lipgloss.Border) lipgloss.Border {
+	glyphs := []string{
+		candidate.Top, candidate.Bottom, candidate.Left, candidate.Right,
+		candidate.TopLeft, candidate.TopRight, candidate.BottomLeft, candidate.BottomRight,
+	}
+	for _, glyph := range glyphs {
+		if ansi.StringWidth(glyph) != 1 {
+			return lipgloss.Border{
+				Top: "-", Bottom: "-", Left: "|", Right: "|",
+				TopLeft: "+", TopRight: "+", BottomLeft: "+", BottomRight: "+",
+				MiddleLeft: "+", MiddleRight: "+", Middle: "+", MiddleTop: "+", MiddleBottom: "+",
+			}
+		}
+	}
+	return candidate
+}
+
+func panelRule(rule, label string, width int, right bool, styles styles) string {
+	if label == "" || width < 4 {
+		return styles.border.Render(strings.Repeat(rule, width))
+	}
+	label = ansi.Truncate(terminalText(label, 256), max(1, width-3), "…")
+	decorated := " " + label + " "
+	remaining := max(0, width-ansi.StringWidth(decorated))
+	if right {
+		return styles.border.Render(strings.Repeat(rule, remaining)) + styles.title.Render(decorated)
+	}
+	return styles.border.Render(rule) + styles.title.Render(decorated) + styles.border.Render(strings.Repeat(rule, max(0, remaining-1)))
+}
+
+func fitPlain(value string, width int, right bool) string {
+	if width <= 0 {
+		return ""
+	}
+	value = ansi.Truncate(value, width, "…")
+	padding := strings.Repeat(" ", max(0, width-ansi.StringWidth(value)))
+	if right {
+		return padding + value
+	}
+	return value + padding
 }

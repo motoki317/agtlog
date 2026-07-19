@@ -7,8 +7,11 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/motoki317/agtlog/internal/model"
 	"github.com/motoki317/agtlog/internal/source"
+	"github.com/muesli/termenv"
 )
 
 type detailTestSource struct {
@@ -56,6 +59,40 @@ func TestDetailExpandsNestedSubagent(t *testing.T) {
 
 	if view := m.View(); !strings.Contains(view, "Inspect the ridge") {
 		t.Fatalf("detail view did not expand nested subagent:\n%s", view)
+	}
+}
+
+func TestColoredDetailFillsWideTerminalAndBoundsLines(t *testing.T) {
+	unsetEnv(t, "NO_COLOR")
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	session := &model.Session{
+		ID: "lunar", Agent: model.AgentClaude, Project: "observatory", CWD: "/workspace/observatory", Models: []string{"claude-opus-4-8"},
+		Events: []model.Event{{Kind: model.EventUser, Text: strings.Repeat("Map lunar craters ", 30)}},
+	}
+	detail := newDetailState(session, 160, 40, newStyles(themes["default"]))
+	raw := detail.view()
+	if !strings.Contains(raw, "\x1b[") {
+		t.Fatal("colored-path detail render emitted no ANSI styling")
+	}
+	plain := ansi.Strip(raw)
+	lines := strings.Split(plain, "\n")
+	if !strings.HasPrefix(lines[0], "╭") || !strings.HasSuffix(lines[0], "╮") || ansi.StringWidth(lines[0]) != 160 {
+		t.Fatalf("detail header top = %q (width %d), want rounded full-width border", lines[0], ansi.StringWidth(lines[0]))
+	}
+	for index, line := range lines {
+		if width := ansi.StringWidth(line); width > 160 {
+			t.Fatalf("detail line %d width = %d, want <= 160", index+1, width)
+		}
+	}
+}
+
+func TestDetailKeyBarKeepsQuitVisibleAtEightyColumns(t *testing.T) {
+	detail := newDetailState(&model.Session{ID: "lunar"}, 80, 12, newStyles())
+	keyBar := strings.Split(ansi.Strip(detail.view()), "\n")[11]
+	if !strings.Contains(keyBar, "q quit") || strings.Contains(keyBar, "…") {
+		t.Fatalf("80-column detail key bar = %q, want visible quit hint without truncation", keyBar)
 	}
 }
 

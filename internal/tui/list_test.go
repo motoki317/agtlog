@@ -8,9 +8,11 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/motoki317/agtlog/internal/model"
 	"github.com/motoki317/agtlog/internal/source"
+	"github.com/muesli/termenv"
 )
 
 type refreshTestSource struct {
@@ -28,6 +30,150 @@ func TestEmptyListExplainsWhereToFindSessions(t *testing.T) {
 		if width := ansi.StringWidth(line); width > 80 {
 			t.Fatalf("empty list line width = %d, want <= 80: %q", width, line)
 		}
+	}
+}
+
+func TestListSummaryReportsWatchingRoots(t *testing.T) {
+	m := NewModel(nil, nil).WithWatchingRoots(3)
+	if summary := m.listSummary(); !strings.Contains(summary, "watching 3 roots") {
+		t.Fatalf("list summary = %q, want watched root count", summary)
+	}
+}
+
+func TestColoredListFillsWideTerminal(t *testing.T) {
+	unsetEnv(t, "NO_COLOR")
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	m := NewModel([]*model.Session{{ID: "lunar", Agent: model.AgentClaude, Project: "observatory", Title: "Map lunar craters"}}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+
+	firstLine := strings.Split(ansi.Strip(updated.(Model).View()), "\n")[0]
+	if !strings.HasPrefix(firstLine, "╭") || !strings.HasSuffix(firstLine, "╮") || ansi.StringWidth(firstLine) != 160 {
+		t.Fatalf("context panel top = %q (width %d), want rounded full-width border", firstLine, ansi.StringWidth(firstLine))
+	}
+}
+
+func TestCompactListAndDetailKeepCompletePanelsAtLowHeights(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Project: "observatory", Title: "Map lunar craters"}
+	for height := 3; height <= 8; height++ {
+		t.Run(fmt.Sprintf("height-%d", height), func(t *testing.T) {
+			m := newModelWithClockAndTheme([]*model.Session{session}, nil, time.Now, themes["default"])
+			updated, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: height})
+			m = updated.(Model)
+			for name, view := range map[string]string{
+				"list":   m.View(),
+				"detail": newDetailState(session, 60, height, m.styles).view(),
+			} {
+				plain := ansi.Strip(view)
+				lines := strings.Split(plain, "\n")
+				if len(lines) != height {
+					t.Fatalf("%s lines = %d, want %d:\n%s", name, len(lines), height, plain)
+				}
+				for index, line := range lines {
+					if got := ansi.StringWidth(line); got != 60 {
+						t.Fatalf("%s line %d width = %d, want 60: %q", name, index+1, got, line)
+					}
+				}
+				if strings.Count(plain, "╭") != strings.Count(plain, "╰") {
+					t.Fatalf("%s has a clipped panel at height %d:\n%s", name, height, plain)
+				}
+			}
+		})
+	}
+}
+
+func TestColoredWideListKeepsAccountingCellsVisible(t *testing.T) {
+	unsetEnv(t, "NO_COLOR")
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	now := time.Date(2026, 1, 2, 6, 0, 0, 0, time.UTC)
+	subagents := make([]*model.Session, 17)
+	for index := range subagents {
+		subagents[index] = &model.Session{ID: fmt.Sprintf("worker-%02d", index)}
+	}
+	session := &model.Session{
+		ID: "lunar", Agent: model.AgentClaude, Project: "observatory", Title: "Map lunar craters", Models: []string{"claude-opus-4-8"},
+		UpdatedAt: now.Add(-12 * time.Minute), Messages: 42, Usage: []model.Usage{{InputTokens: 1_021_000_000}}, Cost: model.Cost{USD: 12.34}, Subagents: subagents,
+	}
+	m := newModelWithClock([]*model.Session{session}, nil, func() time.Time { return now })
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	plain := ansi.Strip(updated.(Model).View())
+
+	for _, want := range []string{"claude", "12m", "42", "$12", "1.0B " + glyphSubagent + "17"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("colored row lost %q after ANSI stripping:\n%s", want, plain)
+		}
+	}
+}
+
+func TestColoredWideListRowsAlignWithHeader(t *testing.T) {
+	unsetEnv(t, "NO_COLOR")
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	now := time.Date(2026, 1, 2, 6, 0, 0, 0, time.UTC)
+	sessions := []*model.Session{
+		{ID: "one", Agent: model.AgentClaude, Project: "観測所", Title: "Map cafe\u0301 craters", Models: []string{"claude-opus-4-8"}, UpdatedAt: now.Add(-time.Minute), Messages: 7, Usage: []model.Usage{{InputTokens: 88_000}}, Cost: model.Cost{USD: 1.23}},
+		{ID: "two", Agent: model.AgentCodex, Project: "harbor", Title: "Chart route", Models: []string{"gpt-5.6-sol"}, UpdatedAt: now.Add(-2 * time.Hour), Messages: 42, Usage: []model.Usage{{InputTokens: 1_021_000_000}}, Cost: model.Cost{USD: 9.87, Estimated: true}},
+	}
+	m := newModelWithClockAndTheme(sessions, nil, func() time.Time { return now }, themes["default"])
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	raw := updated.(Model).View()
+	if !strings.Contains(raw, "\x1b[") {
+		t.Fatal("colored-path render emitted no ANSI styling")
+	}
+
+	var rendered []string
+	for _, line := range strings.Split(raw, "\n") {
+		plain := ansi.Strip(line)
+		if strings.HasPrefix(plain, "│AGENT") || strings.HasPrefix(plain, "│claude") || strings.HasPrefix(plain, "│codex") {
+			if ansi.StringWidth(plain) != 160 {
+				t.Fatalf("rendered table line width = %d, want 160: %q", ansi.StringWidth(plain), plain)
+			}
+			rendered = append(rendered, ansi.Cut(plain, 1, 159))
+		}
+	}
+	if len(rendered) != len(sessions)+1 {
+		t.Fatalf("rendered header/rows = %d, want %d", len(rendered), len(sessions)+1)
+	}
+	columns := listColumns(158)
+	separator := 0
+	for index, column := range columns[:len(columns)-1] {
+		separator += column.width
+		for lineIndex, line := range rendered {
+			if got := ansi.Cut(line, separator, separator+1); got != " " {
+				t.Errorf("line %d separator after column %d = %q, want space at display column %d", lineIndex, index, got, separator)
+			}
+		}
+		separator++
+	}
+	for rowIndex, row := range rendered[1:] {
+		start := 0
+		for _, column := range columns {
+			if column.kind == columnAgent || column.kind == columnAge || column.kind == columnMessages || column.kind == columnCost {
+				if cell := strings.TrimSpace(ansi.Cut(row, start, start+column.width)); cell == "" {
+					t.Errorf("row %d %s cell is empty", rowIndex, column.title)
+				}
+			}
+			start += column.width + 1
+		}
+	}
+}
+
+func TestSelectedRowUsesOneFullWidthStyle(t *testing.T) {
+	unsetEnv(t, "NO_COLOR")
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	styleSet := newStyles(themes["dracula"])
+	columns := listColumns(158)
+	row := renderSessionRow(&model.Session{ID: "lunar", Agent: model.AgentClaude, Title: "Map craters"}, time.Now(), columns, 158, true, styleSet)
+	plain := ansi.Strip(row)
+
+	if ansi.StringWidth(plain) != 158 || row != styleSet.selected.Render(plain) {
+		t.Fatalf("selected row was not styled once across 158 cells: width=%d", ansi.StringWidth(plain))
 	}
 }
 
@@ -95,14 +241,35 @@ func TestNumericCellsFitStandardColumns(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			test.session.ID = "lunar"
 			test.session.Agent = model.AgentCodex
-			row := sessionRow(test.session, now, newStyles())
-			columns := listColumns(80)
+			columns := listColumns(160)
 			for index := 4; index < len(columns); index++ {
-				if width := ansi.StringWidth(row[index]); width > columns[index].Width {
-					t.Errorf("%s cell width = %d, want <= %d: %q", columns[index].Title, width, columns[index].Width, row[index])
+				cell := fitPlain(sessionCell(test.session, now, columns[index]), columns[index].width, columns[index].right)
+				if width := ansi.StringWidth(cell); width > columns[index].width {
+					t.Errorf("%s cell width = %d, want <= %d: %q", columns[index].title, width, columns[index].width, cell)
 				}
 			}
 		})
+	}
+}
+
+func TestListColumnsFillWidthAndDropLowValueFieldsInOrder(t *testing.T) {
+	wide := listColumns(158)
+	if got := listColumnsWidth(wide); got != 158 {
+		t.Fatalf("wide columns use %d cells, want 158", got)
+	}
+	if wide[1].kind != columnProject || wide[1].width != listProjectCap || wide[2].kind != columnTitle || wide[2].width <= listTitlePreferred {
+		t.Fatalf("wide flex columns = %#v, want capped project and slack-absorbing title", wide)
+	}
+
+	narrow := listColumns(58)
+	want := []listColumnKind{columnAgent, columnTitle, columnAge, columnTokens, columnCost}
+	if got := listColumnsWidth(narrow); got != 58 || len(narrow) != len(want) {
+		t.Fatalf("narrow columns = %#v (width %d), want %v at width 58", narrow, got, want)
+	}
+	for index := range want {
+		if narrow[index].kind != want[index] {
+			t.Fatalf("narrow column %d = %v, want %v", index, narrow[index].kind, want[index])
+		}
 	}
 }
 
@@ -142,6 +309,61 @@ func TestFilterNarrowsRowsByFuzzyTitle(t *testing.T) {
 	}
 }
 
+func TestFilteringContextShowsLiveQueryOnce(t *testing.T) {
+	m := NewModel([]*model.Session{{ID: "lunar", Title: "Map moon"}}, nil)
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune{'/'}},
+		{Type: tea.KeyRunes, Runes: []rune("moon")},
+	} {
+		updated, _ := m.Update(key)
+		m = updated.(Model)
+	}
+	plain := ansi.Strip(m.View())
+	if strings.Count(plain, "/moon") != 1 || !strings.Contains(plain, "/moon▊") {
+		t.Fatalf("filter context did not show one live query:\n%s", plain)
+	}
+}
+
+func TestFilteringKeepsLongQueryAndCursorVisibleOnDedicatedLine(t *testing.T) {
+	m := NewModel([]*model.Session{{ID: "lunar", Title: "Map moon"}}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 12})
+	m = updated.(Model)
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune{'/'}},
+		{Type: tea.KeyRunes, Runes: []rune("0123456789abcdefghijklmnopqrstuvwxyz")},
+		{Type: tea.KeyHome},
+		{Type: tea.KeyRight},
+		{Type: tea.KeyRight},
+		{Type: tea.KeyRight},
+		{Type: tea.KeyRight},
+	} {
+		updated, _ = m.Update(key)
+		m = updated.(Model)
+	}
+
+	lines := strings.Split(ansi.Strip(m.View()), "\n")
+	if len(lines) < 3 || !strings.Contains(lines[2], "/0123▊4") {
+		t.Fatalf("long filter cursor is not visible on its own line:\n%s", m.View())
+	}
+	if strings.Contains(lines[1], "/0123") {
+		t.Fatalf("filter query was appended to summary instead of dedicated line:\n%s", m.View())
+	}
+}
+
+func TestCompactFilteringPrioritizesLiveInput(t *testing.T) {
+	m := NewModel([]*model.Session{{ID: "lunar", Title: "Map moon"}}, nil)
+	for _, key := range []tea.Msg{
+		tea.WindowSizeMsg{Width: 40, Height: 3},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/moon")},
+	} {
+		updated, _ := m.Update(key)
+		m = updated.(Model)
+	}
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "/moon▊") {
+		t.Fatalf("compact filtering hid live input:\n%s", view)
+	}
+}
+
 func TestEscapeClearsActiveFilter(t *testing.T) {
 	m := NewModel([]*model.Session{
 		{ID: "lunar", Title: "Map lunar craters"},
@@ -158,6 +380,62 @@ func TestEscapeClearsActiveFilter(t *testing.T) {
 
 	if m.filtering || m.filter.Value() != "" || len(m.visible) != 2 {
 		t.Fatalf("filter state = active %v, value %q, visible %d", m.filtering, m.filter.Value(), len(m.visible))
+	}
+}
+
+func TestTransientNoResultFilterRestoresSelectedIdentity(t *testing.T) {
+	m := NewModel([]*model.Session{
+		{ID: "first", Agent: model.AgentClaude, Path: "/workspace/first.jsonl", Title: "First lunar survey"},
+		{ID: "target", Agent: model.AgentCodex, Path: "/workspace/target.jsonl", Title: "Target lunar survey"},
+		{ID: "third", Agent: model.AgentClaude, Path: "/workspace/third.jsonl", Title: "Third ocean survey"},
+	}, nil)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	want := m.selectedIdentity()
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune("/zzz")},
+		{Type: tea.KeyBackspace},
+		{Type: tea.KeyBackspace},
+		{Type: tea.KeyBackspace},
+		{Type: tea.KeyEnter},
+	} {
+		updated, _ = m.Update(key)
+		m = updated.(Model)
+	}
+	if got := m.selectedIdentity(); got != want {
+		t.Fatalf("selection after transient empty result = %q, want %q", got, want)
+	}
+}
+
+func TestCommittedNoResultFilterKeepsIdentityThroughTickAndClear(t *testing.T) {
+	m := NewModel([]*model.Session{
+		{ID: "first", Agent: model.AgentClaude, Path: "/workspace/first.jsonl", Title: "First lunar survey"},
+		{ID: "target", Agent: model.AgentCodex, Path: "/workspace/target.jsonl", Title: "Target lunar survey"},
+	}, nil)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	want := m.selectedIdentity()
+	for _, msg := range []tea.Msg{
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/zzz")},
+		tea.KeyMsg{Type: tea.KeyEnter},
+		ageTickMsg{},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}},
+		tea.KeyMsg{Type: tea.KeyEsc},
+	} {
+		updated, _ = m.Update(msg)
+		m = updated.(Model)
+	}
+	if got := m.selectedIdentity(); got != want {
+		t.Fatalf("selection after committed empty filter clear = %q, want %q", got, want)
+	}
+}
+
+func TestFilterSanitizesFormatControlsBeforeMatching(t *testing.T) {
+	m := NewModel([]*model.Session{{ID: "lunar", Title: "Map moon"}}, nil)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/moon\u202e")})
+	m = updated.(Model)
+	if len(m.visible) != 1 || m.visible[0].ID != "lunar" {
+		t.Fatalf("sanitized visible sessions = %#v, want lunar", m.visible)
 	}
 }
 
@@ -198,8 +476,8 @@ func TestNoResultFilterCannotOpenStaleRow(t *testing.T) {
 		updated, _ := m.Update(key)
 		m = updated.(Model)
 	}
-	if m.screen != screenList || len(m.visible) != 0 || len(m.table.Rows()) != 0 {
-		t.Fatalf("no-result filter opened stale row: screen %v visible %d rows %d", m.screen, len(m.visible), len(m.table.Rows()))
+	if m.screen != screenList || len(m.visible) != 0 {
+		t.Fatalf("no-result filter opened stale row: screen %v visible %d", m.screen, len(m.visible))
 	}
 }
 
@@ -207,8 +485,8 @@ func TestFilterAcceptsCoalescedRapidInput(t *testing.T) {
 	m := NewModel([]*model.Session{{ID: "lunar", Title: "Monitor lunar telemetry"}}, nil)
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/zzz")})
 	m = updated.(Model)
-	if !m.filtering || m.filter.Value() != "zzz" || len(m.visible) != 0 || len(m.table.Rows()) != 0 {
-		t.Fatalf("coalesced filter state = active %v query %q visible %d rows %d", m.filtering, m.filter.Value(), len(m.visible), len(m.table.Rows()))
+	if !m.filtering || m.filter.Value() != "zzz" || len(m.visible) != 0 {
+		t.Fatalf("coalesced filter state = active %v query %q visible %d", m.filtering, m.filter.Value(), len(m.visible))
 	}
 }
 
@@ -226,6 +504,39 @@ func TestSortCyclesFromRecentToTokens(t *testing.T) {
 	m = updated.(Model)
 	if m.visible[0].ID != "large" {
 		t.Fatalf("token-sorted first session = %q, want large", m.visible[0].ID)
+	}
+}
+
+func TestSelectionIdentitySurvivesSortFilterAndResize(t *testing.T) {
+	now := time.Date(2026, 1, 2, 6, 0, 0, 0, time.UTC)
+	sessions := []*model.Session{
+		{ID: "recent", Agent: model.AgentClaude, Path: "/workspace/recent.jsonl", Title: "Recent lunar survey", UpdatedAt: now, Usage: []model.Usage{{InputTokens: 10}}},
+		{ID: "target", Agent: model.AgentCodex, Path: "/workspace/target.jsonl", Title: "Target lunar survey", UpdatedAt: now.Add(-time.Hour), Usage: []model.Usage{{InputTokens: 500}}},
+		{ID: "large", Agent: model.AgentClaude, Path: "/workspace/large.jsonl", Title: "Large ocean survey", UpdatedAt: now.Add(-2 * time.Hour), Usage: []model.Usage{{InputTokens: 900}}},
+	}
+	m := newModelWithClock(sessions, nil, func() time.Time { return now })
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	want := sessionIdentity(sessions[1])
+
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyRunes, Runes: []rune{'s'}},
+		{Type: tea.KeyRunes, Runes: []rune{'/'}},
+		{Type: tea.KeyRunes, Runes: []rune("lunar")},
+	} {
+		updated, _ = m.Update(key)
+		m = updated.(Model)
+		if got := m.selectedIdentity(); got != want {
+			t.Fatalf("selection after %q = %q, want %q", key.String(), got, want)
+		}
+	}
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 58, Height: 9})
+	m = updated.(Model)
+	if got := m.selectedIdentity(); got != want {
+		t.Fatalf("selection after resize = %q, want %q", got, want)
+	}
+	if capacity := m.listRowCapacity(); capacity > 0 && (m.cursor < m.listOffset || m.cursor >= m.listOffset+capacity) {
+		t.Fatalf("selected row is outside window: cursor=%d offset=%d capacity=%d", m.cursor, m.listOffset, capacity)
 	}
 }
 
@@ -263,21 +574,24 @@ func TestMissingPricingIsFlaggedInRowAndFooter(t *testing.T) {
 		Cost: model.Cost{MissingPricingModels: []string{"unknown-model"}},
 	}
 	m := NewModel([]*model.Session{session}, nil)
-	row := sessionRow(session, time.Now(), m.styles)
-	if !strings.Contains(row[3], "!") || !strings.Contains(row[7], "!") {
-		t.Fatalf("missing-pricing row = %#v, want model and cost warning", row)
+	columns := listColumns(160)
+	modelCell := sessionCell(session, time.Now(), columns[3])
+	costCell := sessionCell(session, time.Now(), columns[7])
+	if !strings.Contains(modelCell, "!") || !strings.Contains(costCell, "!") {
+		t.Fatalf("missing-pricing cells = %q / %q, want model and cost warning", modelCell, costCell)
 	}
-	if footer := m.listFooter(); !strings.Contains(footer, "partial") {
-		t.Fatalf("missing-pricing footer = %q, want partial-total warning", footer)
+	if summary := m.listSummary(); !strings.Contains(summary, "partial") {
+		t.Fatalf("missing-pricing summary = %q, want partial-total warning", summary)
 	}
 }
 
 func TestAPIErrorSessionHasSingleWarningGlyph(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, HasError: true}
-	row := sessionRow(session, time.Now(), newStyles())
-	if got := strings.Count(row[0], "⚠"); got != 1 {
-		t.Fatalf("error row agent = %q, want one warning glyph", row[0])
+	column := listColumns(160)[0]
+	cell := sessionCell(session, time.Now(), column)
+	if got := strings.Count(cell, glyphWarning); got != 1 {
+		t.Fatalf("error row agent = %q, want one warning glyph", cell)
 	}
 }
 
@@ -293,6 +607,26 @@ func TestEnterOpensSelectedSessionDetail(t *testing.T) {
 
 	if m.screen != screenDetail || m.detail == nil || m.detail.session.ID != "second" {
 		t.Fatalf("screen = %v, detail = %#v", m.screen, m.detail)
+	}
+}
+
+func TestListNavigationScrollsWindowAndSupportsHomeEnd(t *testing.T) {
+	sessions := make([]*model.Session, 20)
+	for index := range sessions {
+		sessions[index] = &model.Session{ID: fmt.Sprintf("session-%02d", index), Title: fmt.Sprintf("Survey %02d", index), UpdatedAt: time.Unix(int64(20-index), 0)}
+	}
+	m := NewModel(sessions, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	m = updated.(Model)
+	if m.cursor != 19 || m.listOffset != 15 || !strings.Contains(m.View(), "Survey 19") || strings.Contains(m.View(), "Survey 00") {
+		t.Fatalf("end navigation cursor=%d offset=%d:\n%s", m.cursor, m.listOffset, m.View())
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyHome})
+	m = updated.(Model)
+	if m.cursor != 0 || m.listOffset != 0 || !strings.Contains(m.View(), "Survey 00") {
+		t.Fatalf("home navigation cursor=%d offset=%d:\n%s", m.cursor, m.listOffset, m.View())
 	}
 }
 

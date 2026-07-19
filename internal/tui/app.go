@@ -6,9 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/motoki317/agtlog/internal/model"
@@ -20,19 +18,24 @@ type Model struct {
 	registry          *source.Registry
 	sessions          []*model.Session
 	visible           []*model.Session
+	visibleProjects   int
+	visibleCost       model.Cost
 	filter            textinput.Model
 	filtering         bool
 	sort              sortMode
 	agent             agentFilter
 	screen            screen
 	detail            *detailState
-	table             table.Model
+	cursor            int
+	listOffset        int
+	filterSelection   string
 	width             int
 	height            int
-	help              help.Model
 	keys              keyMap
 	helpOpen          bool
 	status            string
+	watchingRoots     int
+	theme             Theme
 	styles            styles
 	now               func() time.Time
 	ctx               context.Context
@@ -75,23 +78,34 @@ func NewModelWithContext(ctx context.Context, sessions []*model.Session, registr
 	return m
 }
 
+func NewModelWithContextAndTheme(ctx context.Context, sessions []*model.Session, registry *source.Registry, theme Theme) Model {
+	m := newModelWithClockAndTheme(sessions, registry, time.Now, theme)
+	m.ctx = ctx
+	return m
+}
+
 func newModelWithClock(sessions []*model.Session, registry *source.Registry, now func() time.Time) Model {
+	theme, err := ResolveTheme("")
+	if err != nil {
+		theme = themes["default"]
+	}
+	return newModelWithClockAndTheme(sessions, registry, now, theme)
+}
+
+func newModelWithClockAndTheme(sessions []*model.Session, registry *source.Registry, now func() time.Time, theme Theme) Model {
 	filter := textinput.New()
 	filter.Prompt = "/"
 	filter.CharLimit = 128
-	tableModel := table.New(
-		table.WithColumns(listColumns(80)),
-		table.WithFocused(true),
-		table.WithHeight(16),
-		table.WithWidth(80),
-	)
-	helpModel := help.New()
-	helpModel.ShowAll = true
-	helpModel.Width = 80
-	styleSet := newStyles()
-	tableModel.SetStyles(styleSet.table)
-	m := Model{registry: registry, sessions: append([]*model.Session(nil), sessions...), filter: filter, table: tableModel, width: 80, height: 24, help: helpModel, keys: defaultKeys(), styles: styleSet, now: now, ctx: context.Background()}
+	styleSet := newStyles(theme)
+	m := Model{registry: registry, sessions: append([]*model.Session(nil), sessions...), filter: filter, width: 80, height: 24, keys: defaultKeys(), theme: theme, styles: styleSet, now: now, ctx: context.Background()}
 	m.rebuildList()
+	return m
+}
+
+func (m Model) ThemeName() string { return m.theme.Name }
+
+func (m Model) WithWatchingRoots(count int) Model {
+	m.watchingRoots = max(0, count)
 	return m
 }
 
@@ -106,7 +120,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detail = m.detail.clone()
 	}
 	if _, ok := msg.(ageTickMsg); ok {
-		m.syncTable(m.selectedIdentity())
+		m.syncList(m.selectedIdentity())
 		return m, nextAgeTick()
 	}
 	if refreshed, ok := msg.(refreshedMsg); ok {
@@ -170,12 +184,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if size, ok := msg.(tea.WindowSizeMsg); ok {
 		selected := m.selectedIdentity()
 		m.width, m.height = max(1, size.Width), max(3, size.Height)
-		m.table.SetWidth(m.width)
-		m.table.SetHeight(max(1, m.height-2))
-		m.table.SetRows(nil)
-		m.table.SetColumns(listColumns(m.width))
-		m.syncTable(selected)
-		m.help.Width = m.width
+		m.syncList(selected)
 		if m.detail != nil {
 			m.detail.resize(m.width, m.height)
 		}
@@ -197,6 +206,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 	if m.screen == screenDetail {
+		if keyMsg, ok := msg.(tea.KeyMsg); ok && key.Matches(keyMsg, m.keys.Theme) {
+			m.cycleTheme()
+			return m, nil
+		}
 		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "h") {
 			m.screen = screenList
 			m.detail = nil
@@ -210,16 +223,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, refreshSessions(m.ctx, m.registry, m.refreshGeneration)
 	}
 	if key, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.Type == tea.KeyRunes && len(key.Runes) > 0 && key.Runes[0] == '/' {
+		if selected := m.selectedIdentity(); selected != "" {
+			m.filterSelection = selected
+		}
 		m.filtering = true
 		focusCmd := m.filter.Focus()
 		if len(key.Runes) == 1 {
 			return m, focusCmd
 		}
-		selected := m.selectedIdentity()
 		var inputCmd tea.Cmd
 		m.filter, inputCmd = m.filter.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: key.Runes[1:]})
 		m.applyFilter()
-		m.syncTable(selected)
+		m.syncList(m.filterSelection)
 		return m, tea.Batch(focusCmd, inputCmd)
 	}
 	if key, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.String() == "s" {
@@ -232,8 +247,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rebuildList()
 		return m, nil
 	}
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.Matches(keyMsg, m.keys.Theme) {
+		m.cycleTheme()
+		return m, nil
+	}
 	if key, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.String() == "enter" && len(m.visible) > 0 {
-		index := min(m.table.Cursor(), len(m.visible)-1)
+		index := min(m.cursor, len(m.visible)-1)
 		m.screen = screenDetail
 		m.detail = newDetailState(m.visible[index], m.width, m.height, m.styles)
 		if m.registry != nil {
@@ -248,10 +267,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if keyMsg, ok := msg.(tea.KeyMsg); ok {
 			switch keyMsg.String() {
 			case "esc":
+				selected := m.filterSelection
 				m.filtering = false
 				m.filter.Reset()
 				m.filter.Blur()
-				m.rebuildList()
+				m.applyFilter()
+				m.syncList(selected)
 				return m, nil
 			case "enter":
 				m.filtering = false
@@ -260,15 +281,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		var cmd tea.Cmd
-		selected := m.selectedIdentity()
 		m.filter, cmd = m.filter.Update(msg)
 		m.applyFilter()
-		m.syncTable(selected)
+		m.syncList(m.filterSelection)
 		return m, cmd
 	}
-	var cmd tea.Cmd
-	m.table, cmd = m.table.Update(msg)
-	return m, cmd
+	if key, ok := msg.(tea.KeyMsg); ok {
+		switch key.String() {
+		case "j", "down":
+			m.moveListSelection(1)
+		case "k", "up":
+			m.moveListSelection(-1)
+		case "pgdown":
+			m.moveListSelection(max(1, m.listRowCapacity()))
+		case "pgup":
+			m.moveListSelection(-max(1, m.listRowCapacity()))
+		case "home":
+			m.cursor = 0
+			m.ensureListSelectionVisible()
+			m.filterSelection = m.selectedIdentity()
+		case "end":
+			m.cursor = max(0, len(m.visible)-1)
+			m.ensureListSelectionVisible()
+			m.filterSelection = m.selectedIdentity()
+		}
+	}
+	return m, nil
 }
 
 func (m *Model) replaceDetail(session *model.Session) {
@@ -289,6 +327,15 @@ func (m *Model) replaceDetail(session *model.Session) {
 	replacement.rebuildKeeping(focusKey)
 	replacement.viewport.SetYOffset(offset)
 	m.detail = replacement
+}
+
+func (m *Model) cycleTheme() {
+	m.theme = cycleTheme(m.theme)
+	m.styles = newStyles(m.theme)
+	if m.detail != nil {
+		m.detail.styles = m.styles
+		m.detail.rebuild()
+	}
 }
 
 type refreshedMsg struct {
@@ -392,30 +439,60 @@ func (m *Model) rebuildList() {
 		}
 	})
 	m.applyFilter()
-	m.syncTable(selected)
+	m.syncList(selected)
 }
 
 func (m Model) selectedIdentity() string {
 	if len(m.visible) == 0 {
 		return ""
 	}
-	index := max(0, min(m.table.Cursor(), len(m.visible)-1))
+	index := max(0, min(m.cursor, len(m.visible)-1))
 	return sessionIdentity(m.visible[index])
 }
 
-func (m *Model) syncTable(selected string) {
-	rows := make([]table.Row, 0, len(m.visible))
-	columnCount := len(m.table.Columns())
-	cursor := 0
+func (m *Model) syncList(selected string) {
+	cursor := min(m.cursor, max(0, len(m.visible)-1))
 	for index, session := range m.visible {
-		row := sessionRow(session, m.now(), m.styles)
-		rows = append(rows, row[:min(len(row), columnCount)])
 		if sessionIdentity(session) == selected {
 			cursor = index
+			break
 		}
 	}
-	m.table.SetRows(rows)
-	m.table.SetCursor(cursor)
+	m.cursor = cursor
+	m.ensureListSelectionVisible()
+	if !m.filtering {
+		if current := m.selectedIdentity(); current != "" {
+			m.filterSelection = current
+		}
+	}
+}
+
+func (m *Model) moveListSelection(delta int) {
+	if len(m.visible) == 0 {
+		m.cursor, m.listOffset = 0, 0
+		return
+	}
+	m.cursor = max(0, min(m.cursor+delta, len(m.visible)-1))
+	m.ensureListSelectionVisible()
+	m.filterSelection = m.selectedIdentity()
+}
+
+func (m Model) listRowCapacity() int {
+	return newListLayout(m.height, m.filtering).rowCapacity
+}
+
+func (m *Model) ensureListSelectionVisible() {
+	capacity := m.listRowCapacity()
+	if capacity <= 0 || len(m.visible) == 0 {
+		m.listOffset = 0
+		return
+	}
+	if m.cursor < m.listOffset {
+		m.listOffset = m.cursor
+	} else if m.cursor >= m.listOffset+capacity {
+		m.listOffset = m.cursor - capacity + 1
+	}
+	m.listOffset = max(0, min(m.listOffset, max(0, len(m.visible)-capacity)))
 }
 
 func (m *Model) applyFilter() {
@@ -426,20 +503,44 @@ func (m *Model) applyFilter() {
 		}
 		candidates = append(candidates, session)
 	}
-	query := strings.ToLower(strings.TrimSpace(m.filter.Value()))
+	query := strings.ToLower(strings.TrimSpace(terminalText(m.filter.Value(), 128)))
 	if query == "" {
 		m.visible = candidates
+		m.updateVisibleSummary()
 		return
 	}
 	haystacks := make([]string, len(candidates))
 	for index, session := range candidates {
-		haystacks[index] = strings.ToLower(strings.Join([]string{string(session.Agent), session.Project, session.Title}, " "))
+		haystacks[index] = strings.ToLower(strings.Join([]string{
+			terminalText(string(session.Agent), 32), terminalText(session.Project, 96), terminalText(session.Title, 160),
+		}, " "))
 	}
 	matches := fuzzy.FindNoSort(query, haystacks)
 	m.visible = make([]*model.Session, 0, len(matches))
 	for _, match := range matches {
 		m.visible = append(m.visible, candidates[match.Index])
 	}
+	m.updateVisibleSummary()
+}
+
+func (m *Model) updateVisibleSummary() {
+	projects := make(map[string]bool)
+	missing := make(map[string]bool)
+	total := model.Cost{}
+	for _, session := range m.visible {
+		projects[session.Project] = true
+		cost := session.TotalCost()
+		total.USD += cost.USD
+		total.Estimated = total.Estimated || cost.Estimated
+		for _, name := range cost.MissingPricingModels {
+			if !missing[name] {
+				total.MissingPricingModels = append(total.MissingPricingModels, name)
+				missing[name] = true
+			}
+		}
+	}
+	m.visibleProjects = len(projects)
+	m.visibleCost = total
 }
 
 func (m Model) View() string {
@@ -453,6 +554,10 @@ func (m Model) View() string {
 }
 
 func (m Model) StaticView() string {
-	m.table.SetHeight(max(1, len(m.visible)+1))
+	contextHeight := 3
+	if m.filtering {
+		contextHeight++
+	}
+	m.height = max(m.height, len(m.visible)+contextHeight+4)
 	return m.listView()
 }

@@ -1,17 +1,18 @@
-claude · starship (/workspace/starship)
-opus-4.8 · orbit/alpha · Jan 02 05:44→Jan 02 06:04
-173k tokens / $1.16 · own 128k / $0.84 · subagents 45k / $0.32
-  ▸ you: Delegate the survey
-  ▾ ● claude: Survey delegated · 1 thinking · 1 tools · 1 subagents
-    ◇ thinking: Select a safe path
-    ⚙ Read(/workspace/starship/map.go) → map ready · 400ms
-    claude: Survey delegated
-›   ⑃ Task(Scout terrain) ▾ opus-4.8 · 45k · $0.32
-      ▸ you: Inspect the ridge
-        ● claude: The ridge is clear
-
-
-
-
-
-[j/k] scroll · [space/enter] expand · [J/K] subagent · [esc/h] back · [?] help
+╭─ Session ────────────────────────────────────────────────────────────────────╮
+│claude · starship (/workspace/starship)                                       │
+│opus-4.8 · orbit/alpha · Jan 02 05:44→Jan 02 06:04                            │
+│173k tokens / $1.16 · own 128k / $0.84 · subagents 45k / $0.32                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Timeline ───────────────────────────────────────────────────────────────────╮
+│  ▸ you: Delegate the survey                                                  │
+│  ▾ ● claude: Survey delegated · 1 thinking · 1 tools · 1 subagents           │
+│    ◇ thinking: Select a safe path                                            │
+│    ⚙ Read(/workspace/starship/map.go) → map ready · 400ms                    │
+│    claude: Survey delegated                                                  │
+│›   ⑃ Task(Scout terrain) ▾ opus-4.8 · 45k · $0.32                            │
+│      ▸ you: Inspect the ridge                                                │
+│        ● claude: The ridge is clear                                          │
+│                                                                              │
+│                                                                              │
+╰──────────────────────────────────────────────────────────────────────────────╯
+j/k scroll   ↵ expand   J/K subagent   esc back   ? help   q quit
