@@ -520,17 +520,6 @@ func TestClaudeToolDetailOmitsSubagentTools(t *testing.T) {
 	}
 }
 
-func TestClaudeDetailCollectorMatchesModelBound(t *testing.T) {
-	for _, size := range []int{0, 2047, 2048, 4095, 4096, 4097, 10_000} {
-		value := "start\n" + strings.Repeat("界", size) + "\nend"
-		var collector claudeDetailCollector
-		collector.WriteString(value)
-		if got, want := collector.String(), model.BoundedDetailText(value); got != want {
-			t.Errorf("collector with %d body runes differs: got %d runes, want %d", size, len([]rune(got)), len([]rune(want)))
-		}
-	}
-}
-
 func TestClaudeToolDetailBoundsEveryField(t *testing.T) {
 	value := "start\n" + strings.Repeat("界", 5000) + "\nend"
 	bashInput, err := json.Marshal(map[string]string{"command": value})

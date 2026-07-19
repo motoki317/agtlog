@@ -418,8 +418,8 @@ func claudeJSONNestingWithin(input []byte, limit int) bool {
 }
 
 func claudeReplaceBlock(oldText, newText string) string {
-	var output claudeDetailCollector
-	output.writeReplaceBlock(oldText, newText)
+	var output strings.Builder
+	writeReplaceBlock(&output, oldText, newText)
 	return output.String()
 }
 
@@ -432,7 +432,7 @@ func claudeMultiEditDiff(edits json.RawMessage) (string, bool) {
 	if err != nil || token != json.Delim('[') {
 		return "", false
 	}
-	var output claudeDetailCollector
+	var output strings.Builder
 	index := 0
 	for decoder.More() {
 		var edit struct {
@@ -445,7 +445,7 @@ func claudeMultiEditDiff(edits json.RawMessage) (string, bool) {
 		if index > 0 {
 			output.WriteString("\n\n")
 		}
-		output.writeReplaceBlock(edit.Old, edit.New)
+		writeReplaceBlock(&output, edit.Old, edit.New)
 		index++
 	}
 	if _, err := decoder.Token(); err != nil {
@@ -454,69 +454,27 @@ func claudeMultiEditDiff(edits json.RawMessage) (string, bool) {
 	return output.String(), true
 }
 
-const claudeDetailRuneLimit = 4096
-
-type claudeDetailCollector struct {
-	head      []rune
-	tail      []rune
-	tailStart int
-	total     int
-}
-
-func (c *claudeDetailCollector) WriteString(value string) {
-	for _, char := range value {
-		c.writeRune(char)
-	}
-}
-
-func (c *claudeDetailCollector) writeRune(char rune) {
-	const headLimit = (claudeDetailRuneLimit - 1) / 2
-	const tailCapacity = claudeDetailRuneLimit - headLimit
-	c.total++
-	if len(c.head) < headLimit {
-		c.head = append(c.head, char)
-		return
-	}
-	if len(c.tail) < tailCapacity {
-		c.tail = append(c.tail, char)
-		return
-	}
-	c.tail[c.tailStart] = char
-	c.tailStart = (c.tailStart + 1) % tailCapacity
-}
-
-func (c *claudeDetailCollector) writeReplaceBlock(oldText, newText string) {
+func writeReplaceBlock(output *strings.Builder, oldText, newText string) {
 	// Whole-block output is not a minimal diff; add a line-level LCS if noisy replacements make that ceiling limiting.
 	if oldText != "" {
-		c.writePrefixedLines('-', oldText)
+		writePrefixedLines(output, '-', oldText)
 	}
 	if newText != "" {
 		if oldText != "" {
-			c.writeRune('\n')
+			output.WriteByte('\n')
 		}
-		c.writePrefixedLines('+', newText)
+		writePrefixedLines(output, '+', newText)
 	}
 }
 
-func (c *claudeDetailCollector) writePrefixedLines(prefix rune, text string) {
-	c.writeRune(prefix)
+func writePrefixedLines(output *strings.Builder, prefix rune, text string) {
+	output.WriteRune(prefix)
 	for _, char := range text {
-		c.writeRune(char)
+		output.WriteRune(char)
 		if char == '\n' {
-			c.writeRune(prefix)
+			output.WriteRune(prefix)
 		}
 	}
-}
-
-func (c *claudeDetailCollector) String() string {
-	orderedTail := make([]rune, 0, len(c.tail))
-	orderedTail = append(orderedTail, c.tail[c.tailStart:]...)
-	orderedTail = append(orderedTail, c.tail[:c.tailStart]...)
-	if c.total <= claudeDetailRuneLimit {
-		return string(c.head) + string(orderedTail)
-	}
-	const keptTail = claudeDetailRuneLimit - 1 - (claudeDetailRuneLimit-1)/2
-	return string(c.head) + "…" + string(orderedTail[len(orderedTail)-keptTail:])
 }
 
 func textLineCount(text string) int {
@@ -539,21 +497,21 @@ func claudeResultText(content json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
-	var output claudeDetailCollector
+	var output strings.Builder
 	if raw[0] == '"' {
 		var text string
 		if json.Unmarshal(raw, &text) != nil {
-			return model.BoundedDetailText(string(content))
+			return string(content)
 		}
 		output.WriteString(text)
 		return output.String()
 	}
 	if raw[0] != '[' {
-		return model.BoundedDetailText(string(content))
+		return string(content)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	if _, err := decoder.Token(); err != nil {
-		return model.BoundedDetailText(string(content))
+		return string(content)
 	}
 	first := true
 	for decoder.More() {
@@ -562,19 +520,19 @@ func claudeResultText(content json.RawMessage) string {
 			Text string `json:"text"`
 		}
 		if decoder.Decode(&block) != nil {
-			return model.BoundedDetailText(string(content))
+			return string(content)
 		}
 		if block.Type != "text" {
 			continue
 		}
 		if !first {
-			output.writeRune('\n')
+			output.WriteByte('\n')
 		}
 		output.WriteString(block.Text)
 		first = false
 	}
 	if _, err := decoder.Token(); err != nil {
-		return model.BoundedDetailText(string(content))
+		return string(content)
 	}
 	return output.String()
 }
