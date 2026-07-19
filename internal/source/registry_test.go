@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/motoki317/agtlog/internal/cost"
@@ -39,6 +40,47 @@ func TestRegistryDiscoversEveryRegisteredSource(t *testing.T) {
 	}
 	if len(sessions) != 3 || counts[model.AgentClaude] != 1 || counts[model.AgentCodex] != 2 {
 		t.Fatalf("Discover() returned %d sessions with counts %v", len(sessions), counts)
+	}
+}
+
+func TestRegistryLinksCodexSubagentSidecarUsage(t *testing.T) {
+	root := t.TempDir()
+	parentPath := filepath.Join(root, "rollout-thread-root.jsonl")
+	childPath := filepath.Join(root, "rollout-thread-review.jsonl")
+	parent := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:00:00Z","type":"session_meta","payload":{"id":"thread-root","session_id":"thread-root","cwd":"/workspace/lunar-lab"}}`,
+		`{"timestamp":"2026-01-02T03:00:01Z","type":"event_msg","payload":{"type":"sub_agent_activity","agent_thread_id":"thread-review","agent_path":"/root/review_x","kind":"started"}}`,
+	}, "\n") + "\n"
+	child := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:00:00Z","type":"session_meta","payload":{"id":"thread-review","session_id":"thread-root","parent_thread_id":"thread-root","cwd":"/workspace/lunar-lab","thread_source":"subagent","agent_path":"/root/review_x"}}`,
+		`{"timestamp":"2026-01-02T03:00:00.100Z","type":"session_meta","payload":{"id":"thread-root","session_id":"thread-root","cwd":"/workspace/parent-lab","thread_source":"user","agent_path":null}}`,
+		`{"timestamp":"2026-01-02T03:00:00.200Z","type":"turn_context","payload":{"model":"gpt-5.6"}}`,
+		`{"timestamp":"2026-01-02T03:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"Review the lunar telemetry."}}`,
+		`{"timestamp":"2026-01-02T03:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"output_tokens":8,"total_tokens":128}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(parentPath, []byte(parent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(childPath, []byte(child), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	calculator := cost.NewCalculator(cost.Table{"gpt-5.6": {Input: 1, Output: 1}})
+	adapter := codex.NewSource(codex.NewParser(calculator, "gpt-5.6"), []string{root})
+	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1, CacheDir: t.TempDir()})
+
+	sessions, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || len(sessions[0].Subagents) != 1 {
+		t.Fatalf("Discover() sessions = %#v, want one parent with one linked child", sessions)
+	}
+	childSession := sessions[0].Subagents[0]
+	if childSession.ID != "thread-review" || childSession.ParentID != "thread-root" || childSession.Title != "review_x" {
+		t.Fatalf("linked child identity = ID %q, parent %q, title %q", childSession.ID, childSession.ParentID, childSession.Title)
+	}
+	if got := childSession.TotalUsage().TotalTokens(); got != 128 {
+		t.Fatalf("linked child usage = %d tokens, want 128", got)
 	}
 }
 

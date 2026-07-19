@@ -24,7 +24,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v8:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
+	return "codex-parser-v9:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
 }
 
 type tokenUsage struct {
@@ -81,6 +81,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	var usageOrder []string
 	hasLast := false
 	seenModels := make(map[string]bool)
+	metaSeen := false
 	err = jsonl.ForEach(file, func(line []byte) {
 		var envelope struct {
 			Timestamp string `json:"timestamp"`
@@ -108,7 +109,9 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 		if json.Unmarshal(line, &record) != nil {
 			return
 		}
-		if record.Type == "session_meta" {
+		// Newer Codex embeds the parent's session_meta after the child's in subagent sidecars.
+		if record.Type == "session_meta" && !metaSeen {
+			metaSeen = true
 			session.ID = record.Payload.ID
 			if session.ID == "" {
 				session.ID = record.Payload.SessionID
@@ -201,16 +204,13 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 			}
 		}
 	}
-	if session.Title == "" && session.AgentPath != "" {
+	if session.AgentPath != "" {
 		session.Title = model.CleanTitle(filepath.Base(session.AgentPath))
 	}
 	return session, nil
 }
 
 func titleFromUserMessage(message string) string {
-	if title := codexDelegatedTaskTitle(message); title != "" {
-		return title
-	}
 	var fallback, skippedTag string
 	for _, line := range strings.Split(message, "\n") {
 		line = strings.TrimSpace(line)
@@ -246,34 +246,6 @@ func titleFromUserMessage(message string) string {
 		}
 	}
 	return fallback
-}
-
-func codexDelegatedTaskTitle(message string) string {
-	delegation := false
-	for {
-		line, rest, found := strings.Cut(message, "\n")
-		line = strings.TrimSpace(line)
-		if !delegation {
-			if line != "" {
-				if !strings.EqualFold(line, "Message Type: NEW_TASK") {
-					return ""
-				}
-				delegation = true
-			}
-		} else if line == "Payload:" {
-			return ""
-		} else if key, value, hasValue := strings.Cut(line, ":"); hasValue && strings.EqualFold(strings.TrimSpace(key), "Task name") {
-			parts := agentPathParts(strings.TrimSpace(value))
-			if len(parts) > 0 {
-				return model.CleanTitle(parts[len(parts)-1])
-			}
-			return ""
-		}
-		if !found {
-			return ""
-		}
-		message = rest
-	}
 }
 
 func codexPreambleTag(line string) string {

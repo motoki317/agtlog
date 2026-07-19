@@ -1,2 +1,5 @@
-{"timestamp":"2026-01-02T03:00:00Z","type":"session_meta","payload":{"id":"thread-review","session_id":"thread-root","cwd":"/workspace/lunar-lab","thread_source":"subagent","agent_path":"/root/review_x"}}
-{"timestamp":"2026-01-02T03:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"Message Type: NEW_TASK\nTask name: /root/review_x\nSender: /root\nPayload:\n# Brief — Calibrate the parent telemetry\nKeep every sample."}}
+{"timestamp":"2026-01-02T03:00:00Z","type":"session_meta","payload":{"id":"thread-review","session_id":"thread-root","parent_thread_id":"thread-root","cwd":"/workspace/lunar-lab","thread_source":"subagent","agent_path":"/root/review_x"}}
+{"timestamp":"2026-01-02T03:00:00.100Z","type":"session_meta","payload":{"id":"thread-root","session_id":"thread-root","cwd":"/workspace/parent-lab","thread_source":"user","agent_path":null}}
+{"timestamp":"2026-01-02T03:00:00.200Z","type":"turn_context","payload":{"model":"gpt-5.6"}}
+{"timestamp":"2026-01-02T03:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"Message Type: NEW_TASK\nTask name: /root/parent_task\nSender: /root\nPayload:\n# Brief — Calibrate the parent telemetry\nKeep every sample."}}
+{"timestamp":"2026-01-02T03:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"output_tokens":8,"total_tokens":128}}}}

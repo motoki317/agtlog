@@ -25,9 +25,9 @@ func testParser() Parser {
 	}), "gpt-5")
 }
 
-func TestParserFingerprintInvalidatesOlderTitleMetadata(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v8:") {
-		t.Fatalf("CacheFingerprint() = %q, want v8 metadata schema", got)
+func TestParserFingerprintInvalidatesOlderSubagentMetadata(t *testing.T) {
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v9:") {
+		t.Fatalf("CacheFingerprint() = %q, want v9 metadata schema", got)
 	}
 }
 
@@ -162,13 +162,29 @@ func TestTitleSkipsPlainDelegationBoilerplate(t *testing.T) {
 	}
 }
 
-func TestParseTitlesDelegatedSubagentFromTaskName(t *testing.T) {
+func TestParseTitlesSubagentFromAgentPath(t *testing.T) {
 	session, err := testParser().Parse(filepath.Join("testdata", "rollout-subagent-title.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if session.Title != "review_x" {
 		t.Fatalf("Parse().Title = %q, want delegated role leaf review_x", session.Title)
+	}
+}
+
+func TestParseKeepsFirstSubagentMetadata(t *testing.T) {
+	session, err := testParser().Parse(filepath.Join("testdata", "rollout-subagent-title.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.ID != "thread-review" || session.ParentID != "thread-root" || session.AgentPath != "/root/review_x" {
+		t.Fatalf("Parse() identity = ID %q, parent %q, path %q", session.ID, session.ParentID, session.AgentPath)
+	}
+	if session.CWD != "/workspace/lunar-lab" || session.Project != "lunar-lab" {
+		t.Fatalf("Parse() workspace = CWD %q, project %q", session.CWD, session.Project)
+	}
+	if got := session.TotalUsage().TotalTokens(); got != 128 {
+		t.Fatalf("Parse() usage = %d tokens, want 128", got)
 	}
 }
 
