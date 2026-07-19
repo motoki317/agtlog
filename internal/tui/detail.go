@@ -175,7 +175,7 @@ func newDetailState(session *model.Session, width, height int, styles styles) *d
 	state := newDetailStateBase(session, width, height, styles)
 	state.focus = -1
 	state.resize(width, height)
-	state.viewport.GotoBottom()
+	state.anchorBottom()
 	return state
 }
 
@@ -221,7 +221,7 @@ func (d *detailState) resize(width, height int) {
 	d.viewport.Height = max(1, layout.contentHeight)
 	d.rebuild()
 	if pinned {
-		d.viewport.GotoBottom()
+		d.anchorBottom()
 	}
 }
 
@@ -278,7 +278,7 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 				d.subagentSelection = last
 				d.updateSelection(oldLine, last)
 			}
-			d.viewport.GotoBottom()
+			d.anchorBottom()
 		} else if len(d.focusables) > 0 {
 			d.gotoBottom()
 		}
@@ -307,7 +307,24 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 }
 
 func (d *detailState) pinnedToBottom() bool {
-	return d.viewport.AtBottom()
+	return d.viewport.AtBottom() || d.viewport.YOffset == d.bottomAnchorOffset()
+}
+
+func (d *detailState) bottomAnchorOffset() int {
+	offset := max(0, len(d.rendered)-d.viewport.Height)
+	for offset > 0 && !d.rendered[offset].first {
+		offset--
+	}
+	return offset
+}
+
+func (d *detailState) snapTopToLineStart() {
+	d.viewport.SetYOffset(d.bottomAnchorOffset())
+}
+
+func (d *detailState) anchorBottom() {
+	d.viewport.GotoBottom()
+	d.snapTopToLineStart()
 }
 
 func (d *detailState) gotoBottom() {
@@ -316,7 +333,7 @@ func (d *detailState) gotoBottom() {
 		d.focus = len(d.focusables) - 1
 		d.updateSelection(oldLine, d.focusables[d.focus].line)
 	}
-	d.viewport.GotoBottom()
+	d.anchorBottom()
 }
 
 func (d *detailState) moveSubagentSelection(delta int) {

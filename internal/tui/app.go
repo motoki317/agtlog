@@ -418,7 +418,7 @@ func (m *Model) activateDetailSelection() bool {
 		child.wrap = wrap
 		child.focus = -1
 		child.resize(m.width, m.height)
-		child.viewport.GotoBottom()
+		child.anchorBottom()
 		m.detail = child
 		return true
 	}
@@ -663,7 +663,7 @@ func (m *Model) replacementDetailState(previous *detailState, session, root *mod
 		}
 	}
 	if pinned {
-		replacement.viewport.GotoBottom()
+		replacement.anchorBottom()
 	} else {
 		replacement.viewport.SetYOffset(offset)
 	}

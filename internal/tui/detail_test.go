@@ -1395,6 +1395,20 @@ func TestDetailTimelineOpensAtNewestEvent(t *testing.T) {
 	}
 }
 
+func TestDetailTimelineBottomAnchorStartsAtLogicalLine(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{{
+		Kind: model.EventAssistantText, Text: strings.Repeat("newest wrapped telemetry ", 12),
+	}}}
+	detail := newDetailState(session, 28, 10, newStyles())
+
+	if detail.viewport.YOffset >= len(detail.rendered) || !detail.rendered[detail.viewport.YOffset].first {
+		t.Fatalf("bottom anchor offset %d starts on continuation: %#v", detail.viewport.YOffset, detail.rendered)
+	}
+	if maxOffset := max(0, len(detail.rendered)-detail.viewport.Height); detail.viewport.YOffset > maxOffset {
+		t.Fatalf("bottom anchor offset = %d, want <= %d", detail.viewport.YOffset, maxOffset)
+	}
+}
+
 func TestDetailMouseWheelDownScrollsTimeline(t *testing.T) {
 	events := make([]model.Event, 20)
 	for index := range events {
@@ -1856,8 +1870,8 @@ func TestPinnedDetailTimelineStaysPinnedAcrossResize(t *testing.T) {
 		updated, _ := m.Update(msg)
 		m = updated.(Model)
 	}
-	if detail := detailStateFromScreen(t, m.detail); !detail.viewport.AtBottom() {
-		t.Fatalf("resized pinned timeline offset = %d/%d, want bottom", detail.viewport.YOffset, len(detail.rendered))
+	if detail := detailStateFromScreen(t, m.detail); !detail.pinnedToBottom() {
+		t.Fatalf("resized pinned timeline offset = %d/%d, want bottom anchor", detail.viewport.YOffset, len(detail.rendered))
 	}
 
 	replacement := cloneSession(root)
@@ -1866,8 +1880,8 @@ func TestPinnedDetailTimelineStaysPinnedAcrossResize(t *testing.T) {
 	m = updated.(Model)
 	detail := detailStateFromScreen(t, m.detail)
 	view := ansi.Strip(m.View())
-	if !detail.viewport.AtBottom() || !strings.Contains(view, "Final telemetry") || !strings.Contains(view, "sample") {
-		t.Fatalf("post-resize tail-follow bottom=%t:\n%s", detail.viewport.AtBottom(), view)
+	if !detail.pinnedToBottom() || !strings.Contains(view, "Final telemetry") || !strings.Contains(view, "sample") {
+		t.Fatalf("post-resize tail-follow bottom=%t:\n%s", detail.pinnedToBottom(), view)
 	}
 }
 
@@ -2507,8 +2521,8 @@ func TestWrappedEdgeNavigationUsesFlatRowOffsets(t *testing.T) {
 	for rowIndex := detail.viewport.YOffset; rowIndex < min(len(detail.rendered), detail.viewport.YOffset+detail.viewport.Height); rowIndex++ {
 		selectedVisible = selectedVisible || detail.rendered[rowIndex].detailIndex == detail.selectedLine
 	}
-	if !selectedVisible || !detail.viewport.AtBottom() {
-		t.Fatalf("G selected line %d visibility=%t bottom=%t", detail.selectedLine, selectedVisible, detail.viewport.AtBottom())
+	if !selectedVisible || !detail.pinnedToBottom() {
+		t.Fatalf("G selected line %d visibility=%t bottom=%t", detail.selectedLine, selectedVisible, detail.pinnedToBottom())
 	}
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	if selectedRow := detail.firstRenderedRow(detail.selectedLine); selectedRow != 0 || detail.viewport.YOffset != 0 {
