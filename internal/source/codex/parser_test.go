@@ -358,16 +358,7 @@ func TestLoadEventsBuildsLinkedCodexTurn(t *testing.T) {
 }
 
 func TestLoadEventsCoalescesMirroredMessages(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "rollout-mirrored.jsonl")
-	content := strings.Join([]string{
-		`{"timestamp":"2026-01-02T03:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"Survey the crater"}}`,
-		`{"timestamp":"2026-01-02T03:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Survey the crater"}]}}`,
-		`{"timestamp":"2026-01-02T03:00:01Z","type":"event_msg","payload":{"type":"agent_message","message":"The route is clear."}}`,
-		`{"timestamp":"2026-01-02T03:00:01Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The route is clear."}]}}`,
-	}, "\n") + "\n"
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	path := filepath.Join("testdata", "rollout-mirrored-messages.jsonl")
 	session := &model.Session{Path: path, Agent: model.AgentCodex}
 
 	if err := testParser().LoadEvents(context.Background(), session); err != nil {
@@ -375,6 +366,81 @@ func TestLoadEventsCoalescesMirroredMessages(t *testing.T) {
 	}
 	if len(session.Events) != 2 || session.Events[0].Kind != model.EventUser || session.Events[1].Kind != model.EventAssistantText {
 		t.Fatalf("mirrored events = %#v, want one user and one assistant event", session.Events)
+	}
+	wantTimestamps := []time.Time{
+		time.Date(2026, 1, 2, 3, 0, 0, 5_000_000, time.UTC),
+		time.Date(2026, 1, 2, 3, 0, 1, 7_000_000, time.UTC),
+	}
+	for index, want := range wantTimestamps {
+		if !session.Events[index].Timestamp.Equal(want) {
+			t.Fatalf("mirrored event %d timestamp = %v, want preferred response_item timestamp %v", index, session.Events[index].Timestamp, want)
+		}
+	}
+}
+
+func TestAppendCodexMessagePreservesDistinctSameKindMessages(t *testing.T) {
+	session := &model.Session{}
+	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: "Survey the northern ridge"}, false)
+	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: "Survey the southern ridge"}, false)
+
+	if len(session.Events) != 2 || session.Events[0].Text != "Survey the northern ridge" || session.Events[1].Text != "Survey the southern ridge" {
+		t.Fatalf("same-kind messages = %#v, want both distinct messages", session.Events)
+	}
+}
+
+func TestAppendCodexMessageDoesNotDeduplicateBeyondWindow(t *testing.T) {
+	session := &model.Session{Events: []model.Event{{Kind: model.EventUser, Text: "Repeat the survey"}}}
+	for index := range 16 {
+		session.Events = append(session.Events, model.Event{Kind: model.EventThinking, Text: "Checkpoint " + strconv.Itoa(index)})
+	}
+	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: "Repeat the survey"}, false)
+
+	if len(session.Events) != 18 || session.Events[len(session.Events)-1].Text != "Repeat the survey" {
+		t.Fatalf("events outside the dedup window = %#v, want repeated message appended", session.Events)
+	}
+}
+
+func TestLoadEventsSuppressesWrapperPreamble(t *testing.T) {
+	path := filepath.Join("testdata", "rollout-wrapper-preamble.jsonl")
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Events) != 1 || session.Events[0].Kind != model.EventUser || session.Events[0].Text != "Calibrate the orbital beacon." {
+		t.Fatalf("timeline events = %#v, want only the genuine task body", session.Events)
+	}
+}
+
+func TestLoadEventsPreservesTaskSuffixAfterWrapperPreamble(t *testing.T) {
+	path := filepath.Join("testdata", "rollout-mixed-wrapper-task.jsonl")
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"# Brief — Calibrate lunar telemetry\nKeep every sample.",
+		"# Brief — Chart the crater route\nAvoid the southern ridge.",
+	}
+	if len(session.Events) != len(want) {
+		t.Fatalf("timeline events = %#v, want %d task suffixes", session.Events, len(want))
+	}
+	for index, text := range want {
+		if session.Events[index].Kind != model.EventUser || session.Events[index].Text != text {
+			t.Errorf("timeline event %d = %#v, want user text %q", index, session.Events[index], text)
+		}
+	}
+}
+
+func TestCodexTimelineUserMessagePreservesOrdinaryTurns(t *testing.T) {
+	for _, message := range []string{
+		"Deliver the complete implementation of the orbital clock.",
+		"Work from the task below to chart the lunar pass.",
+	} {
+		if got := codexTimelineUserMessage(message); got != message {
+			t.Errorf("codexTimelineUserMessage(%q) = %q, want ordinary turn preserved", message, got)
+		}
 	}
 }
 

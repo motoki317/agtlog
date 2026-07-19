@@ -254,13 +254,85 @@ func codexPreambleTag(line string) string {
 	return ""
 }
 
+func codexPreambleUserMessage(text string) bool {
+	line := codexFirstNonemptyLine(text)
+	if line == "" {
+		return false
+	}
+	if codexPreambleTag(strings.ToLower(line)) != "" {
+		return true
+	}
+	title := strings.ToLower(model.CleanTitle(line))
+	return strings.HasPrefix(title, codexAutonomousAgentPreamble)
+}
+
+func codexTimelineUserMessage(text string) string {
+	text = strings.TrimSpace(text)
+	for text != "" {
+		line, rest, _ := strings.Cut(text, "\n")
+		line = strings.TrimSpace(line)
+		if tag := codexPreambleTag(strings.ToLower(line)); tag != "" {
+			closing := "</" + tag + ">"
+			index := strings.Index(strings.ToLower(text), closing)
+			if index < 0 {
+				return ""
+			}
+			text = strings.TrimSpace(text[index+len(closing):])
+			continue
+		}
+		if codexPreambleUserMessage(text) {
+			return codexTaskAfterDelimiter(text)
+		}
+		if codexWrapperBoilerplateLine(line) {
+			text = strings.TrimSpace(rest)
+			continue
+		}
+		return text
+	}
+	return ""
+}
+
+func codexTaskAfterDelimiter(text string) string {
+	for text != "" {
+		line, rest, found := strings.Cut(text, "\n")
+		if strings.TrimSpace(line) == "---" {
+			return codexTimelineUserMessage(rest)
+		}
+		if !found {
+			break
+		}
+		text = rest
+	}
+	return ""
+}
+
+func codexWrapperBoilerplateLine(line string) bool {
+	title := strings.ToLower(model.CleanTitle(line))
+	return strings.HasPrefix(title, "agents.md instructions") && codexTitleBoilerplate(line)
+}
+
+func codexFirstNonemptyLine(text string) string {
+	for {
+		line, rest, found := strings.Cut(text, "\n")
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+		if !found {
+			return ""
+		}
+		text = rest
+	}
+}
+
+const codexAutonomousAgentPreamble = "you are an autonomous implementation agent"
+
 func codexTitleBoilerplate(line string) bool {
 	title := strings.ToLower(model.CleanTitle(line))
 	if title == "" || title == "task" || title == "requirements" || title == "available plugins" {
 		return true
 	}
 	for _, prefix := range []string{
-		"agents.md instructions", "you are an autonomous implementation agent",
+		"agents.md instructions", codexAutonomousAgentPreamble,
 		"deliver the complete implementation", "work from the task below",
 		"you receive no conversation history", "the orchestrator accepts or rejects",
 		"here is a list of plugins", "before the first substantive task",

@@ -1,0 +1,3 @@
+{"timestamp":"2026-01-02T03:00:00Z","type":"event_msg","payload":{"type":"user_message","message":"<recommended_plugins>\n- Fictional Archive\n</recommended_plugins>"}}
+{"timestamp":"2026-01-02T03:00:01Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"You are an autonomous implementation agent from a different model family.\nDeliver the complete implementation from the task below."}]}}
+{"timestamp":"2026-01-02T03:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"Calibrate the orbital beacon."}}

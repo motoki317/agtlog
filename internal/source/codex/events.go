@@ -95,8 +95,9 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 		if record.Type == "event_msg" {
 			switch record.Payload.Type {
 			case "user_message":
-				if record.Payload.Message != "" && !model.IsHardNoise(record.Payload.Message) {
-					appendCodexMessage(session, model.Event{Timestamp: timestamp, Kind: model.EventUser, Text: record.Payload.Message, Model: currentModel}, false)
+				message := codexTimelineUserMessage(record.Payload.Message)
+				if message != "" && !model.IsHardNoise(message) {
+					appendCodexMessage(session, model.Event{Timestamp: timestamp, Kind: model.EventUser, Text: message, Model: currentModel}, false)
 				}
 			case "agent_message":
 				if record.Payload.Message != "" && !model.IsHardNoise(record.Payload.Message) {
@@ -128,7 +129,10 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 			} else {
 				return
 			}
-			if model.IsHardNoise(event.Text) {
+			if event.Kind == model.EventUser {
+				event.Text = codexTimelineUserMessage(event.Text)
+			}
+			if event.Text == "" || model.IsHardNoise(event.Text) {
 				return
 			}
 		case "reasoning":
@@ -188,9 +192,10 @@ func appendCodexMessage(session *model.Session, event model.Event, preferred boo
 	if event.Text == "" {
 		return
 	}
+	// A 16-event window is the deduplication ceiling for mirrored message copies.
 	for index := len(session.Events) - 1; index >= 0 && index >= len(session.Events)-16; index-- {
 		existing := session.Events[index]
-		if existing.Kind != event.Kind || existing.Text != event.Text || !existing.Timestamp.Equal(event.Timestamp) {
+		if existing.Kind != event.Kind || existing.Text != event.Text {
 			continue
 		}
 		if preferred {

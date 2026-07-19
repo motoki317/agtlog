@@ -1,0 +1,4 @@
+{"timestamp":"2026-01-02T03:00:00.000Z","type":"event_msg","payload":{"type":"user_message","message":"Survey the crater"}}
+{"timestamp":"2026-01-02T03:00:00.005Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Survey the crater"}]}}
+{"timestamp":"2026-01-02T03:00:01.000Z","type":"event_msg","payload":{"type":"agent_message","message":"The route is clear."}}
+{"timestamp":"2026-01-02T03:00:01.007Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The route is clear."}]}}
