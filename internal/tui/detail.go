@@ -990,48 +990,63 @@ func (d *detailState) headerPanelLines() []panelLine {
 			}
 		}
 	}
-	line1Parts := make([]string, 0, 2)
-	if agent := terminalText(string(session.Agent), 32); agent != "" {
-		line1Parts = append(line1Parts, agent)
-	}
-	project, cwd := terminalText(session.Project, 96), terminalText(session.CWD, 256)
-	if project != "" && cwd != "" {
-		line1Parts = append(line1Parts, project+" ("+cwd+")")
-	} else if project != "" {
-		line1Parts = append(line1Parts, project)
-	} else if cwd != "" {
-		line1Parts = append(line1Parts, cwd)
-	}
-	line1 := strings.Join(line1Parts, " · ")
+	innerWidth := max(0, d.width-2)
+	line1 := firstLine(session.Title)
 
 	line2Parts := make([]string, 0, 3)
+	if agent := terminalText(string(session.Agent), 32); agent != "" {
+		line2Parts = append(line2Parts, agent)
+	}
+	project, cwd := terminalText(session.Project, 96), terminalText(session.CWD, 256)
+	workspaceIndex := -1
+	if project != "" && cwd != "" {
+		workspaceIndex = len(line2Parts)
+		line2Parts = append(line2Parts, project+" ("+cwd+")")
+	} else if project != "" {
+		line2Parts = append(line2Parts, project)
+	} else if cwd != "" {
+		line2Parts = append(line2Parts, cwd)
+	}
 	if models := terminalText(detailModels(session), 256); models != "" {
 		line2Parts = append(line2Parts, models)
 	}
+	if workspaceIndex >= 0 && ansi.StringWidth(strings.Join(line2Parts, " · ")) > innerWidth {
+		line2Parts[workspaceIndex] = project
+	}
+	line2 := strings.Join(line2Parts, " · ")
+
+	line3Parts := make([]string, 0, 3)
 	if branch := terminalText(session.GitBranch, 96); branch != "" {
-		line2Parts = append(line2Parts, branch)
+		line3Parts = append(line3Parts, branch)
 	}
 	started, updated := formatDetailTime(session.StartedAt), formatDetailTime(session.UpdatedAt)
 	if started != "" && updated != "" {
-		line2Parts = append(line2Parts, started+"→"+updated)
+		line3Parts = append(line3Parts, started+"→"+updated)
 	} else if started != "" {
-		line2Parts = append(line2Parts, started)
+		line3Parts = append(line3Parts, started)
 	} else if updated != "" {
-		line2Parts = append(line2Parts, updated)
+		line3Parts = append(line3Parts, updated)
 	}
-	line2 := strings.Join(line2Parts, " · ")
-	line3 := fmt.Sprintf("%s tokens / %s · own %s / %s · subagents %s / %s",
+	detailedUsage := fmt.Sprintf("%s tokens / %s · own %s / %s · subagents %s / %s",
 		humanTokens(totalUsage.TotalTokens()), formatCost(totalCost), humanTokens(ownUsage.TotalTokens()), formatCost(session.Cost),
 		humanTokens(totalUsage.TotalTokens()-ownUsage.TotalTokens()), formatCost(subagentCost))
-	innerWidth := max(0, d.width-2)
+	compactUsage := fmt.Sprintf("%s tokens / %s", humanTokens(totalUsage.TotalTokens()), formatCost(totalCost))
+	line3Parts = append(line3Parts, detailedUsage)
+	if ansi.StringWidth(strings.Join(line3Parts, " · ")) > innerWidth {
+		line3Parts[len(line3Parts)-1] = compactUsage
+	}
+	for len(line3Parts) > 1 && ansi.StringWidth(strings.Join(line3Parts, " · ")) > innerWidth {
+		line3Parts = line3Parts[1:]
+	}
+	line3 := strings.Join(line3Parts, " · ")
 	plainLines := []string{
 		fitPlain(line1, innerWidth, false),
 		fitPlain(line2, innerWidth, false),
 		fitPlain(line3, innerWidth, false),
 	}
 	lines := []panelLine{
-		{plain: plainLines[0], styled: d.agentStyle(session.Agent).Render(plainLines[0])},
-		{plain: plainLines[1], styled: d.styles.row.Render(plainLines[1])},
+		{plain: plainLines[0], styled: d.styles.emphasis.Render(plainLines[0])},
+		{plain: plainLines[1], styled: d.agentStyle(session.Agent).Render(plainLines[1])},
 		{plain: plainLines[2], styled: d.styles.emphasis.Render(plainLines[2])},
 	}
 	return lines

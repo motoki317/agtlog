@@ -1,7 +1,7 @@
 ╭─ Session · starship ─────────────────────────────────────────────────────────╮
-│claude · starship (/workspace/starship)                                       │
-│opus-4.8 · orbit/alpha · Jan 02 05:44→Jan 02 06:04                            │
-│173k tokens / $1.16 · own 128k / $0.84 · subagents 45k / $0.32                │
+│Plan route                                                                    │
+│claude · starship (/workspace/starship) · opus-4.8                            │
+│orbit/alpha · Jan 02 05:44→Jan 02 06:04 · 173k tokens / $1.16                 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ Timeline · Subagents ───────────────────────────────────────────────────────╮
 │  ▸ you: Delegate the survey                                                  │

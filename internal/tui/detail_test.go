@@ -82,8 +82,12 @@ func TestEnterOnSubagentDrillsIntoChild(t *testing.T) {
 		m = updated.(Model)
 	}
 
-	if detailStateFromScreen(t, m.detail).session != child {
-		t.Fatalf("detail session = %q, want drilled child %q", detailStateFromScreen(t, m.detail).session.ID, child.ID)
+	detail := detailStateFromScreen(t, m.detail)
+	if detail.session != child {
+		t.Fatalf("detail session = %q, want drilled child %q", detail.session.ID, child.ID)
+	}
+	if title := strings.TrimSpace(detail.headerPanelLines()[0].plain); title != child.Title {
+		t.Fatalf("drilled header title = %q, want role title %q", title, child.Title)
 	}
 }
 
@@ -1308,6 +1312,19 @@ func TestDetailHeaderIncludesProjectFullCWDAndAllModels(t *testing.T) {
 		if !strings.Contains(header, want) {
 			t.Fatalf("detail header missing %q:\n%s", want, header)
 		}
+	}
+}
+
+func TestDetailHeaderLeadsWithEmphasizedSessionTitle(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	styleSet := newStyles(themes["default"])
+	detail := newDetailState(&model.Session{ID: "mission", Agent: model.AgentClaude, Title: "Plan the lunar route"}, 80, 12, styleSet)
+
+	line := detail.headerPanelLines()[0]
+	if strings.TrimSpace(line.plain) != "Plan the lunar route" || line.styled != styleSet.emphasis.Render(line.plain) {
+		t.Fatalf("first header line = %#v, want emphasized session title", line)
 	}
 }
 

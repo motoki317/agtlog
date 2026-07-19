@@ -1,7 +1,7 @@
 ╭─ Session · starship ───────────────────────────────────────────────────────────────────╮
-│claude · starship (/workspace/starship)                                                 │
-│opus-4.8 · orbit/alpha · Jan 02 05:44→Jan 02 06:04                                      │
-│183k tokens / ~$1.28 · own 128k / $0.84 · subagents 55k / ~$0.44                        │
+│Plan route                                                                              │
+│claude · starship (/workspace/starship) · opus-4.8                                      │
+│orbit/alpha · Jan 02 05:44→Jan 02 06:04 · 183k tokens / ~$1.28                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Timeline · Subagents ─────────────────────────────────────────────────────────────────╮
 │› claude Scout the ridge  opus-4.8 · 55k · ~$0.44                                       │
