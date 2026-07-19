@@ -50,7 +50,8 @@ and glyph meaning. A terminal that exposes only an ASCII color profile also uses
 bold/faint/reverse styles so selection does not depend on unavailable colors.
 
 The selected list row is one full-width highlight bar with a single foreground color. Unselected
-rows use the agent color in `AGENT`, muted `AGE` and `MSGS`, and the estimated style for `~$`.
+rows use the agent color in `AGENT`, the accent color in `SUBS`, muted `AGE` and `MSGS`, and the
+estimated style for `~$`.
 
 ## Session columns
 
@@ -65,12 +66,14 @@ separate rows; their tokens and cost are included recursively in the parent.
 | `MODEL` | 13, left | Costliest model, plus `+N` and missing-pricing `!` markers |
 | `AGE` | 4, right | Relative time such as `5m`, `2h`, `4d`, or `1.2y` |
 | `MSGS` | 5, right | Own message count |
-| `TOKENS` | 9, right | Recursive total plus folded-subagent count, including `1.0B ⑃17` |
+| `SUBS` | 4, right | Count of subagents folded recursively into the row; blank when none |
+| `TOKENS` | 9, right | Recursive total, human-scale (e.g. `1.0B`) |
 | `$` | 7, right | Recursive cost; Codex estimates use `~$` and partial totals use `!` |
 
 Columns have one space between them. Header and data rows use identical widths and alignment.
 Slack grows `TITLE` first, then `PROJECT` up to 18 columns, then returns to `TITLE`. When the
-minimum set does not fit, columns disappear in this order: `MODEL`, `MSGS`, `PROJECT`, then `AGE`.
+minimum set does not fit, columns disappear in this order: `MODEL`, `MSGS`, `SUBS`, `PROJECT`,
+then `AGE`.
 At ordinary narrow widths the retained core is `AGENT TITLE TOKENS $`; at smaller physical widths
 the title shrinks and the lowest-value numeric fields eventually disappear. Rows never wrap or
 cross the panel border.
@@ -86,12 +89,12 @@ All interface glyphs are tested as one display column, including the rounded bor
 If the active terminal width rules do not report every rounded-border glyph as one cell, panels
 fall back to `+`, `-`, and `|` rather than risking drift.
 The warning marker is ASCII `!`; `⚠` was rejected because emoji-capable terminals may render it as
-two columns. `⑃` remains the folded-subagent marker because it measures and renders as one column
-in the supported terminal path.
+two columns. `⑃` remains the folded-subagent marker only in the detail timeline; it measures and
+renders as one column in the supported terminal path.
 
 | Glyph | Meaning |
 | --- | --- |
-| `⑃N` | N recursive subagents are folded into a row |
+| `⑃N` | Marks a folded subagent in the detail timeline |
 | `~$` | API-equivalent estimate; a subscription user normally pays less |
 | `!` | Session error or missing pricing, depending on the cell |
 | `▸` / `▾` | Collapsed / expanded item |
@@ -130,12 +133,13 @@ Bindings stay single-key and follow terminal and Vim conventions:
 | --- | --- | --- |
 | List | `j`/`k`, `↑`/`↓` | Move and keep the selection in the row window |
 | List | `pgup`/`pgdn`, `home`/`end` | Move by a page or jump to an edge |
+| List | `g`/`G` | Jump to top or bottom |
 | List | `/` | Fuzzy-filter agent, project, and title |
 | List | `s` | Cycle age, tokens, and cost sort |
 | List | `a` | Cycle all, Claude, and Codex |
 | List | `enter` | Open detail |
 | List | `r` | Rediscover sessions |
-| Detail | `j`/`k`, `↑`/`↓` | Move and scroll |
+| Detail | `j`/`k`, `↑`/`↓`, `g`/`G` | Move and scroll; `g`/`G` jumps to top or bottom |
 | Detail | `space`/`enter` | Expand or collapse |
 | Detail | `J`/`K` | Next or previous subagent |
 | Detail | `esc`/`h` | Return to the list |
