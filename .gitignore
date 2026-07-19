@@ -1,0 +1,34 @@
+# Go
+/agtlog
+/dist/
+*.test
+*.out
+coverage.txt
+
+# Local handoff and planning documents
+/HANDOFF.md
+docs/plans/
+
+# Local leak-guard denylist
+.leakcheck
+
+# Local config and secrets
+*.local.yaml
+.env
+.envrc.local
+.claude/settings.local.json
+
+# Nix
+result
+result-*
+.direnv/
+.envrc
+.pre-commit-config.yaml
+
+# OS and editors
+.DS_Store
+*:Zone.Identifier
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp

@@ -1,0 +1,55 @@
+version: 2
+
+project_name: agtlog
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: agtlog
+    main: ./cmd/agtlog
+    binary: agtlog
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - '^docs(\(.+\))?!?:'
+      - '^test(\(.+\))?!?:'
+      - '^chore(\(.+\))?!?:'
+      - '^ci(\(.+\))?!?:'
+  groups:
+    - title: Features
+      regexp: '^feat(\(.+\))?!?:'
+      order: 0
+    - title: Bug fixes
+      regexp: '^fix(\(.+\))?!?:'
+      order: 1
+    - title: Performance
+      regexp: '^perf(\(.+\))?!?:'
+      order: 2
+    - title: Other
+      order: 999
+
+release:
+  github:
+    owner: motoki317
+    name: agtlog
