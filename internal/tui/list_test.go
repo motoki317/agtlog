@@ -128,7 +128,7 @@ func TestColoredWideListRowsAlignWithHeader(t *testing.T) {
 	var rendered []string
 	for _, line := range strings.Split(raw, "\n") {
 		plain := ansi.Strip(line)
-		if strings.HasPrefix(plain, "│AGENT") || strings.HasPrefix(plain, "│claude") || strings.HasPrefix(plain, "│codex") {
+		if strings.HasPrefix(plain, "│  AGENT") || strings.HasPrefix(plain, "│› claude") || strings.HasPrefix(plain, "│  codex") {
 			if ansi.StringWidth(plain) != 160 {
 				t.Fatalf("rendered table line width = %d, want 160: %q", ansi.StringWidth(plain), plain)
 			}
@@ -138,8 +138,8 @@ func TestColoredWideListRowsAlignWithHeader(t *testing.T) {
 	if len(rendered) != len(sessions)+1 {
 		t.Fatalf("rendered header/rows = %d, want %d", len(rendered), len(sessions)+1)
 	}
-	columns := listColumns(158)
-	separator := 0
+	columns := listColumns(158 - listCursorWidth)
+	separator := listCursorWidth
 	for index, column := range columns[:len(columns)-1] {
 		separator += column.width
 		for lineIndex, line := range rendered {
@@ -150,7 +150,7 @@ func TestColoredWideListRowsAlignWithHeader(t *testing.T) {
 		separator++
 	}
 	for rowIndex, row := range rendered[1:] {
-		start := 0
+		start := listCursorWidth
 		for _, column := range columns {
 			if column.kind == columnAgent || column.kind == columnAge || column.kind == columnMessages || column.kind == columnCost {
 				if cell := strings.TrimSpace(ansi.Cut(row, start, start+column.width)); cell == "" {
@@ -168,12 +168,33 @@ func TestSelectedRowUsesOneFullWidthStyle(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
 	styleSet := newStyles(themes["dracula"])
-	columns := listColumns(158)
+	columns := listColumns(158 - listCursorWidth)
 	row := renderSessionRow(&model.Session{ID: "lunar", Agent: model.AgentClaude, Title: "Map craters"}, time.Now(), columns, 158, true, styleSet)
 	plain := ansi.Strip(row)
 
 	if ansi.StringWidth(plain) != 158 || row != styleSet.selected.Render(plain) {
 		t.Fatalf("selected row was not styled once across 158 cells: width=%d", ansi.StringWidth(plain))
+	}
+}
+
+func TestListRowsReserveFixedCursorMarkerWidth(t *testing.T) {
+	styleSet := newStyles()
+	width := 60
+	columns := listColumns(width - 2)
+	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Title: "Map lunar craters"}
+	selected := renderSessionPanelLine(session, time.Now(), columns, width, true, styleSet)
+	unselected := renderSessionPanelLine(session, time.Now(), columns, width, false, styleSet)
+
+	if !strings.HasPrefix(selected.plain, "› ") || !strings.HasPrefix(unselected.plain, "  ") {
+		t.Fatalf("row markers = selected %q, unselected %q", ansi.Cut(selected.plain, 0, 2), ansi.Cut(unselected.plain, 0, 2))
+	}
+	selectedContent := strings.TrimPrefix(selected.plain, "› ")
+	unselectedContent := strings.TrimPrefix(unselected.plain, "  ")
+	if ansi.StringWidth(selected.plain) != width || ansi.StringWidth(unselected.plain) != width || selectedContent != unselectedContent {
+		t.Fatalf("fixed-width rows = selected %q, unselected %q", selected.plain, unselected.plain)
+	}
+	if selected.styled != styleSet.selected.Render(selected.plain) {
+		t.Fatalf("selected row was not styled once across cursor and content: %q", selected.styled)
 	}
 }
 

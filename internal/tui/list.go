@@ -25,6 +25,7 @@ const (
 	listSubagentsWidth = 4
 	listTokensWidth    = 9
 	listCostWidth      = 7
+	listCursorWidth    = 2
 )
 
 type listColumnKind int
@@ -468,7 +469,7 @@ func (m Model) compactListView(layout listLayout) string {
 	}
 	if len(content) < layout.compactPanelHeight-2 {
 		if len(m.visible) > 0 {
-			columns := listColumns(innerWidth)
+			columns := listColumns(max(0, innerWidth-listCursorWidth))
 			index := m.compactListIndex()
 			content = append(content, renderSessionPanelLine(m.visible[index], m.now(), columns, innerWidth, index == m.cursor, m.styles))
 		} else {
@@ -513,7 +514,7 @@ func (m Model) filterInputLine(width int) string {
 func (m Model) sessionsPanel(height int) string {
 	innerWidth := max(0, m.width-2)
 	innerHeight := max(0, height-2)
-	columns := listColumns(innerWidth)
+	columns := listColumns(max(0, innerWidth-listCursorWidth))
 	content := make([]panelLine, 0, innerHeight)
 	if innerHeight > 0 {
 		content = append(content, renderListHeaderLine(columns, innerWidth, m.styles))
@@ -552,6 +553,9 @@ func renderListHeader(columns []listColumn, width int, styles styles) string {
 }
 
 func renderListHeaderLine(columns []listColumn, width int, styles styles) panelLine {
+	markerWidth := min(listCursorWidth, max(0, width))
+	bodyWidth := max(0, width-markerWidth)
+	marker := strings.Repeat(" ", markerWidth)
 	plainCells := make([]string, len(columns))
 	cells := make([]string, len(columns))
 	for index, column := range columns {
@@ -563,7 +567,9 @@ func renderListHeaderLine(columns []listColumn, width int, styles styles) panelL
 		plain := strings.Repeat(" ", width)
 		return panelLine{plain: plain, styled: styles.header.Render(plain)}
 	}
-	return panelLine{plain: strings.Join(plainCells, " "), styled: strings.Join(cells, styles.header.Render(" "))}
+	plainBody := fitPlain(strings.Join(plainCells, " "), bodyWidth, false)
+	styledBody := strings.Join(cells, styles.header.Render(" "))
+	return panelLine{plain: marker + plainBody, styled: styles.header.Render(marker) + styledBody}
 }
 
 func renderSessionRow(session *model.Session, now time.Time, columns []listColumn, width int, selected bool, styles styles) string {
@@ -571,13 +577,19 @@ func renderSessionRow(session *model.Session, now time.Time, columns []listColum
 }
 
 func renderSessionPanelLine(session *model.Session, now time.Time, columns []listColumn, width int, selected bool, styles styles) panelLine {
+	markerWidth := min(listCursorWidth, max(0, width))
+	bodyWidth := max(0, width-markerWidth)
 	presentation := newSessionPresentation(session)
 	plainCells := make([]string, len(columns))
 	for index, column := range columns {
 		plainCells[index] = fitPlain(sessionCellWithPresentation(session, presentation, now, column), column.width, column.right)
 	}
-	plainRow := strings.Join(plainCells, " ")
-	plainRow = fitPlain(plainRow, width, false)
+	marker := fitPlain("  ", markerWidth, false)
+	if selected {
+		marker = fitPlain("› ", markerWidth, false)
+	}
+	plainBody := fitPlain(strings.Join(plainCells, " "), bodyWidth, false)
+	plainRow := marker + plainBody
 	if selected {
 		return panelLine{plain: plainRow, styled: styles.selected.Render(plainRow)}
 	}
@@ -585,7 +597,7 @@ func renderSessionPanelLine(session *model.Session, now time.Time, columns []lis
 	for index, column := range columns {
 		styledCells[index] = styleSessionCell(plainCells[index], session, presentation, column, styles)
 	}
-	return panelLine{plain: plainRow, styled: strings.Join(styledCells, styles.row.Render(" "))}
+	return panelLine{plain: plainRow, styled: styles.row.Render(marker) + strings.Join(styledCells, styles.row.Render(" "))}
 }
 
 func styleSessionCell(cell string, session *model.Session, presentation sessionPresentation, column listColumn, styles styles) string {
