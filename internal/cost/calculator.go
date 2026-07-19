@@ -31,6 +31,18 @@ func NewCalculator(table Table) Calculator {
 	return Calculator{table: table}
 }
 
+func (c Calculator) CalculateCodex(usage model.Usage, defaultModel string) model.Cost {
+	pricingModel, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
+	if !ok {
+		return model.Cost{Estimated: true, MissingPricingModels: []string{usage.Model}}
+	}
+	mapped := usage
+	mapped.Model = pricingModel
+	calculated := c.Calculate(mapped)
+	calculated.Estimated = true
+	return calculated
+}
+
 func (c Calculator) Calculate(usage model.Usage) model.Cost {
 	if usage.CostUSD != nil {
 		return model.Cost{USD: *usage.CostUSD}

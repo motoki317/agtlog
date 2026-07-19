@@ -145,3 +145,12 @@ func TestCalculateSubtractsCachedTokensFromInclusiveInput(t *testing.T) {
 		t.Fatalf("Calculate().USD = %v, want %v", got.USD, want)
 	}
 }
+
+func TestCalculateCodexMarksMappedCostEstimated(t *testing.T) {
+	calculator := NewCalculator(Table{"gpt-5.6": {Input: 2}})
+
+	got := calculator.CalculateCodex(model.Usage{Model: "gpt-5.6-sol", InputTokens: 3}, "gpt-5")
+	if got.USD != 6 || !got.Estimated || len(got.MissingPricingModels) != 0 {
+		t.Fatalf("CalculateCodex() = %#v, want USD 6 estimated", got)
+	}
+}

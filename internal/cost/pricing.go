@@ -3,6 +3,7 @@ package cost
 import (
 	_ "embed"
 	"encoding/json"
+	"strings"
 )
 
 //go:embed data/litellm-pricing.json
@@ -35,4 +36,25 @@ func (t Table) Resolve(modelName string) (string, Pricing, bool) {
 		}
 	}
 	return "", Pricing{}, false
+}
+
+func (t Table) ResolveCodex(modelName, defaultModel string) (string, Pricing, bool) {
+	if modelName == "gpt-5.6-sol" {
+		// The -sol slug is a Codex runtime variant; gpt-5.6 is the nearest
+		// public API price and keeps the resulting subscription cost estimated.
+		return t.Resolve("gpt-5.6")
+	}
+	if strings.HasPrefix(modelName, "gpt-5") {
+		if key, pricing, ok := t.Resolve(modelName); ok {
+			return key, pricing, true
+		}
+		for _, suffix := range []string{"-sol", "-terra", "-luna"} {
+			if base, found := strings.CutSuffix(modelName, suffix); found {
+				if key, pricing, ok := t.Resolve(base); ok {
+					return key, pricing, true
+				}
+			}
+		}
+	}
+	return t.Resolve(defaultModel)
 }

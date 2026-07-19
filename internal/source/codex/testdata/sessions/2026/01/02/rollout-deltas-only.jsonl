@@ -1,0 +1,5 @@
+{"timestamp":"2026-01-02T04:00:00Z","type":"session_meta","payload":{"session_id":"session-deltas","cwd":"/workspace/moonbase","git":{"branch":"crater/one"}}}
+{"timestamp":"2026-01-02T04:00:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}
+{"timestamp":"2026-01-02T04:00:02Z","type":"event_msg","payload":{"type":"user_message","message":"Survey the crater"}}
+{"timestamp":"2026-01-02T04:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1,"total_tokens":14}}}}
+{"timestamp":"2026-01-02T04:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20,"cached_input_tokens":3,"output_tokens":4,"reasoning_output_tokens":2,"total_tokens":26}}}}
