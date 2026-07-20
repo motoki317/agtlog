@@ -3,10 +3,10 @@
 │claude · starship (/workspace/starship) · opus-4.8                                      │
 │orbit/alpha · Jan 02 05:44→Jan 02 06:04 · 183k tokens / ~$1.28                          │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Timeline · Subagents ─────────────────────────────────────────────────────────────────╮
-│› claude Scout the ridge  opus-4.8 · 55k · ~$0.44 · 12m                                 │
-│    codex Map the cavern  gpt-5.6 · 10k · ~$0.12 · 3m                                   │
-│                                                                                        │
+╭─ Timeline  [Subagents (2)] ────────────────────────────────────────────────────────────╮
+│  AGENT      TITLE                                     MODEL         TOKENS    COST  AGE│
+│› claude     Scout the ridge                           opus-4.8         55k  ~$0.44  12m│
+│    codex    Map the cavern                            gpt-5.6          10k  ~$0.12   3m│
 │                                                                                        │
 │                                                                                        │
 │                                                                                        │
@@ -15,4 +15,4 @@
 │                                                                                        │
 │                                                                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-j/k scroll   space toggle   ↵ open   tab tabs   w wrap   esc back   ? help   q quit
+j/k scroll   ↵ open   tab switch   esc back   mouse scroll/click   ? help   q quit

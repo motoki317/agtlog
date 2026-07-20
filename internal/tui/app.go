@@ -650,7 +650,7 @@ func (m *Model) replacementDetailState(previous *detailState, session, root *mod
 		for index, item := range replacement.subagents {
 			if sessionIdentity(item.s) == selectedSubagent {
 				replacement.subagentSelection = index
-				replacement.selectedLine = index
+				replacement.selectedLine = subagentDetailLine(index)
 				replacement.rebuildRendered()
 				break
 			}

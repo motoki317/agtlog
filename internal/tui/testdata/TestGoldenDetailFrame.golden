@@ -3,7 +3,7 @@
 │claude · starship (/workspace/starship) · opus-4.8                            │
 │orbit/alpha · Jan 02 05:44→Jan 02 06:04 · 173k tokens / $1.16                 │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Timeline · Subagents ───────────────────────────────────────────────────────╮
+╭─ [Timeline]  Subagents (1) ──────────────────────────────────────────────────╮
 │  ▸ you: Delegate the survey                                                  │
 │  ▾ ● claude: Survey delegated · 1 thinking · 1 tools · 1 subagents           │
 │    ◇ thinking: Select a safe path                                            │
@@ -15,4 +15,4 @@
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-j/k scroll   space toggle   ↵ open   tab tabs   w wrap   esc back   q quit
+space expand   ↵ inspect   tab switch   w nowrap   esc back   q quit

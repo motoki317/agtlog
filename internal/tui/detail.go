@@ -29,6 +29,7 @@ type detailState struct {
 	styles            styles
 	wrap              bool
 	tab               detailTab
+	subagentTotal     int
 	subagentSelection int
 	subagents         []flattenedSubagent
 	lines             []detailLine
@@ -89,8 +90,9 @@ func (d *detailState) rowAtY(y int) (int, bool) {
 	}
 	detailIndex := d.rendered[renderedIndex].detailIndex
 	if d.tab == tabSubagents {
-		if detailIndex >= 0 && detailIndex < len(d.subagents) {
-			return detailIndex, true
+		selection := detailIndex - 1
+		if selection >= 0 && selection < len(d.subagents) {
+			return selection, true
 		}
 		return 0, false
 	}
@@ -117,6 +119,7 @@ type detailLine struct {
 	text            string
 	label           string
 	key             string
+	nowrap          bool
 	expandable      bool
 	subagent        bool
 	subagentSession *model.Session
@@ -160,6 +163,7 @@ const (
 
 const (
 	detailRow detailRole = iota
+	detailHeader
 	detailAccent
 	detailAssistant
 	detailUserPrompt
@@ -181,7 +185,7 @@ func newDetailState(session *model.Session, width, height int, styles styles) *d
 }
 
 func newDetailStateBase(session *model.Session, width, height int, styles styles) *detailState {
-	state := &detailState{session: session, expanded: make(map[string]bool), defaultExpanded: true, styles: styles, wrap: true}
+	state := &detailState{session: session, expanded: make(map[string]bool), defaultExpanded: true, styles: styles, wrap: true, subagentTotal: subagentCount(session)}
 	if project := terminalText(session.Project, 96); project != "" {
 		state.crumbs = []string{project}
 	}
@@ -263,7 +267,7 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 			if len(d.subagents) > 0 && d.subagentSelection != 0 {
 				oldLine := d.selectedLine
 				d.subagentSelection = 0
-				d.updateSelection(oldLine, 0)
+				d.updateSelection(oldLine, subagentDetailLine(0))
 			}
 			d.viewport.GotoTop()
 		} else if len(d.focusables) > 0 {
@@ -277,7 +281,7 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 			if last >= 0 && d.subagentSelection != last {
 				oldLine := d.selectedLine
 				d.subagentSelection = last
-				d.updateSelection(oldLine, last)
+				d.updateSelection(oldLine, subagentDetailLine(last))
 			}
 			d.anchorBottom()
 		} else if len(d.focusables) > 0 {
@@ -347,7 +351,7 @@ func (d *detailState) moveSubagentSelection(delta int) {
 	}
 	oldLine := d.selectedLine
 	d.subagentSelection = next
-	d.updateSelection(oldLine, next)
+	d.updateSelection(oldLine, subagentDetailLine(next))
 }
 
 func (d *detailState) moveFocus(direction int, subagentsOnly bool) {
@@ -370,7 +374,7 @@ func (d *detailState) selectRow(index int) bool {
 		alreadySelected := d.subagentSelection == index
 		oldLine := d.selectedLine
 		d.subagentSelection = index
-		d.updateSelection(oldLine, index)
+		d.updateSelection(oldLine, subagentDetailLine(index))
 		return alreadySelected
 	}
 	alreadySelected := d.focus == index
@@ -434,40 +438,129 @@ func (d *detailState) rebuild() {
 
 func (d *detailState) rebuildSubagents() {
 	d.subagents = flattenSubagents(d.session)
+	available := max(0, d.viewport.Width-2)
+	columns := subagentColumns(available)
+	header := detailLine{text: subagentHeader(columns), nowrap: true, role: detailHeader}
 	if len(d.subagents) == 0 {
-		d.lines = []detailLine{{text: "No subagents", role: detailSecondary}}
+		d.lines = []detailLine{header, {text: "No subagents", role: detailSecondary}}
 		d.selectedLine = -1
 	} else {
 		d.subagentSelection = max(0, min(d.subagentSelection, len(d.subagents)-1))
-		d.lines = make([]detailLine, len(d.subagents))
+		d.lines = make([]detailLine, len(d.subagents)+1)
+		d.lines[0] = header
 		for index, item := range d.subagents {
 			session := item.s
-			tokens := humanTokens(session.TotalUsage().TotalTokens())
-			cost := formatCost(session.TotalCost())
-			indent := strings.Repeat("  ", item.depth)
-			agent := terminalText(string(session.Agent), 32)
-			title := firstLine(session.Title)
-			tail := "  " + terminalText(shortModels(session), 96) + " · " + tokens + " · " + cost
-			available := max(0, d.viewport.Width-2)
-			text := indent + agent + " " + title + tail
-			if !d.now.IsZero() {
-				if age := formatAge(d.now, session.UpdatedAt); age != "" && ansi.StringWidth(text+" · "+age) <= available {
-					text += " · " + age
-				}
-			}
-			if ansi.StringWidth(text) > available {
-				fixed := indent + agent + " "
-				titleWidth := max(0, available-ansi.StringWidth(fixed)-ansi.StringWidth(tail))
-				text = fixed + ansi.Truncate(title, titleWidth, "…") + tail
-			}
-			d.lines[index] = detailLine{
-				text: text,
-				key:  sessionIdentity(session), subagent: true, subagentSession: session, subagentTokens: tokens, subagentCost: cost, role: detailRow, agent: session.Agent,
+			usage := session.TotalUsage()
+			totalCost := session.TotalCost()
+			tokens := humanTokens(usage.TotalTokens())
+			cost := formatCost(totalCost)
+			modelName := terminalText(shortModelsWithCost(session, totalCost), 96)
+			d.lines[subagentDetailLine(index)] = detailLine{
+				text: subagentRow(item, d.now, columns, modelName, tokens, cost), nowrap: true,
+				key: sessionIdentity(session), subagent: true, subagentSession: session, subagentTokens: tokens, subagentCost: cost, role: detailRow, agent: session.Agent,
 			}
 		}
-		d.selectedLine = d.subagentSelection
+		d.selectedLine = subagentDetailLine(d.subagentSelection)
 	}
 	d.rebuildRendered()
+}
+
+func subagentDetailLine(selection int) int {
+	return selection + 1
+}
+
+func subagentColumns(width int) []listColumn {
+	if width <= 0 {
+		return nil
+	}
+	columns := []listColumn{
+		{kind: columnAgent, title: "AGENT", width: 10},
+		{kind: columnTitle, title: "TITLE", width: 20},
+		{kind: columnModel, title: "MODEL", width: listModelWidth},
+		{kind: columnTokens, title: "TOKENS", width: 6, right: true},
+		{kind: columnCost, title: "COST", width: listCostWidth, right: true},
+		{kind: columnAge, title: "AGE", width: listAgeWidth, right: true},
+	}
+	if listColumnsWidth(columns) > width {
+		columns = removeListColumn(columns, columnAge)
+	}
+	for _, shrink := range []struct {
+		kind  listColumnKind
+		width int
+	}{{columnTitle, 4}, {columnModel, 9}, {columnAgent, 6}} {
+		for index := range columns {
+			if columns[index].kind == shrink.kind && listColumnsWidth(columns) > width {
+				columns[index].width -= min(columns[index].width-shrink.width, listColumnsWidth(columns)-width)
+				break
+			}
+		}
+	}
+	if listColumnsWidth(columns) > width {
+		columns = removeListColumn(columns, columnModel)
+	}
+	for _, kind := range []listColumnKind{columnTitle, columnAgent, columnCost, columnTokens} {
+		for index := range columns {
+			if columns[index].kind == kind && listColumnsWidth(columns) > width {
+				columns[index].width -= min(columns[index].width-1, listColumnsWidth(columns)-width)
+				break
+			}
+		}
+	}
+	for len(columns) > 0 && listColumnsWidth(columns) > width {
+		columns = columns[:len(columns)-1]
+	}
+	slack := width - listColumnsWidth(columns)
+	for index := range columns {
+		if columns[index].kind == columnTitle {
+			columns[index].width += slack
+			break
+		}
+	}
+	return columns
+}
+
+func subagentHeader(columns []listColumn) string {
+	cells := make([]string, len(columns))
+	for index, column := range columns {
+		cells[index] = fitPlain(column.title, column.width, column.right)
+	}
+	return strings.Join(cells, " ")
+}
+
+func subagentRow(item flattenedSubagent, now time.Time, columns []listColumn, modelName, tokens, cost string) string {
+	session := item.s
+	cells := make([]string, len(columns))
+	for index, column := range columns {
+		value := ""
+		switch column.kind {
+		case columnAgent:
+			value = subagentAgentCell(item.depth, session.Agent, column.width)
+		case columnTitle:
+			value = firstLine(session.Title)
+		case columnModel:
+			value = modelName
+		case columnTokens:
+			value = tokens
+		case columnCost:
+			value = cost
+		case columnAge:
+			if !now.IsZero() {
+				value = formatAge(now, session.UpdatedAt)
+			}
+		}
+		cells[index] = fitPlain(value, column.width, column.right)
+	}
+	return strings.Join(cells, " ")
+}
+
+func subagentAgentCell(depth int, agent model.AgentKind, width int) string {
+	label := terminalText(string(agent), 32)
+	indentWidth := max(0, width-ansi.StringWidth(label))
+	indent := strings.Repeat(" ", min(depth*2, indentWidth))
+	if depth*2 > indentWidth && indentWidth > 0 {
+		indent = strings.Repeat(" ", indentWidth-1) + "…"
+	}
+	return indent + label
 }
 
 func flattenSubagents(session *model.Session) []flattenedSubagent {
@@ -525,7 +618,7 @@ func (d *detailState) rebuildRendered() {
 		}
 		plain := prefix + line.text
 		rows := []string{plain}
-		if d.wrap && ansi.StringWidth(plain) > d.viewport.Width {
+		if d.wrap && !line.nowrap && ansi.StringWidth(plain) > d.viewport.Width {
 			rows = strings.Split(ansi.Hardwrap(plain, d.viewport.Width, true), "\n")
 		}
 		for rowIndex, row := range rows {
@@ -708,7 +801,7 @@ func (d *detailState) toolEventLines(event model.Event, indent int, key string) 
 		}
 		text = padding + marker + " " + toolLine(event)
 	}
-	lines := []detailLine{{text: text, key: key, expandable: expandable, role: detailTool, event: event}}
+	lines := []detailLine{{text: text, key: key, nowrap: true, expandable: expandable, role: detailTool, event: event}}
 	if !d.isExpanded(key) || event.Detail == nil {
 		return lines
 	}
@@ -794,7 +887,7 @@ func toolLine(event model.Event) string {
 
 func toolDisplayName(name string) string {
 	name = terminalText(name, 96)
-	if name == "exec_command" || name == "exec" {
+	if name == "exec_command" {
 		return "Bash"
 	}
 	if name == "apply_patch" {
@@ -879,7 +972,7 @@ func (d *detailState) view() string {
 		hint = fmt.Sprintf("%d/%d", min(len(d.rendered), d.viewport.YOffset+1), len(d.rendered))
 	}
 	timeline := renderPanelWithLabel(d.tabPanelLabel(), hint, visible, d.width, timelineHeight, d.styles)
-	keyText := detailKeyText(d.width, d.styles.mono, d.tab)
+	keyText := detailKeyText(d.width, d.styles.mono, d.tab, d.wrap)
 	keyBar := d.styles.keyHint.Render(fitPlain(keyText, d.width, false))
 	return strings.Join([]string{header, timeline, keyBar}, "\n")
 }
@@ -907,7 +1000,7 @@ func (d *detailState) compactView(layout detailLayout) string {
 	if layout.keyBarHeight == 0 {
 		return panel
 	}
-	keyBar := d.styles.keyHint.Render(fitPlain(detailKeyText(d.width, d.styles.mono, d.tab), d.width, false))
+	keyBar := d.styles.keyHint.Render(fitPlain(detailKeyText(d.width, d.styles.mono, d.tab, d.wrap), d.width, false))
 	return panel + "\n" + keyBar
 }
 
@@ -922,7 +1015,7 @@ func (d *detailState) tabPanelLabel() panelLabel {
 	label := d.tabLabel()
 	plain := label.plain
 	if ansi.StringWidth(plain) > max(1, d.width-5) {
-		return panelLabel{plain: d.tab.title()}
+		return d.activeTabLabel()
 	}
 	return label
 }
@@ -938,34 +1031,75 @@ func (d *detailState) compactPanelLabel() panelLabel {
 	if ansi.StringWidth(plain) <= max(1, d.width-5) {
 		return panelLabel{plain: plain, styled: styled}
 	}
-	return panelLabel{plain: d.panelTitle(d.tab.title())}
+	return d.activeTabLabel()
 }
 
 func (d *detailState) tabLabel() panelLabel {
+	timeline := "Timeline"
+	subagents := "Subagents"
+	if count := d.subagentTotal; count > 0 {
+		subagents += fmt.Sprintf(" (%d)", count)
+	}
 	timelineStyle := d.styles.title
 	subagentsStyle := d.styles.muted
 	if d.tab == tabSubagents {
 		timelineStyle = d.styles.muted
 		subagentsStyle = d.styles.title
+		subagents = "[" + subagents + "]"
+	} else {
+		timeline = "[" + timeline + "]"
 	}
 	return panelLabel{
-		plain:  "Timeline · Subagents",
-		styled: timelineStyle.Render("Timeline") + d.styles.title.Render(" · ") + subagentsStyle.Render("Subagents"),
+		plain:  timeline + "  " + subagents,
+		styled: timelineStyle.Render(timeline) + d.styles.title.Render("  ") + subagentsStyle.Render(subagents),
 	}
 }
 
-func detailKeyText(width int, mono bool, tab detailTab) string {
-	hints := []string{"j/k scroll", "space toggle", "↵ open", "tab tabs"}
-	if tab == tabTimeline {
-		hints = append(hints, "J/K subagent")
+func (d *detailState) activeTabText() string {
+	label := d.tab.title()
+	if d.tab == tabSubagents {
+		if count := d.subagentTotal; count > 0 {
+			label += fmt.Sprintf(" (%d)", count)
+		}
 	}
-	hints = append(hints, "w wrap", "esc back", "mouse scroll/click")
+	return "[" + label + "]"
+}
+
+func (d *detailState) activeTabLabel() panelLabel {
+	maxWidth := max(1, d.width-5)
+	text := strings.TrimSuffix(strings.TrimPrefix(d.activeTabText(), "["), "]")
+	if ansi.StringWidth(text)+2 > maxWidth && d.tab == tabSubagents && d.subagentTotal > 0 {
+		text = d.tab.title()
+	}
+	plain := "…"
+	if maxWidth >= 2 {
+		plain = "[" + ansi.Truncate(text, maxWidth-2, "…") + "]"
+	}
+	return panelLabel{plain: plain, styled: d.styles.title.Render(plain)}
+}
+
+func detailKeyText(width int, mono bool, tab detailTab, wrap bool) string {
+	enterHint := "↵ inspect"
+	if tab == tabSubagents {
+		enterHint = "↵ open"
+	}
+	wrapHint := "w wrap"
+	if wrap {
+		wrapHint = "w nowrap"
+	}
+	hints := []string{"j/k scroll"}
+	if tab == tabTimeline {
+		hints = append(hints, "space expand", enterHint, "tab switch", "J/K subagent", wrapHint)
+	} else {
+		hints = append(hints, enterHint, "tab switch")
+	}
+	hints = append(hints, "esc back", "mouse scroll/click")
 	if !mono {
 		hints = append(hints, "t theme")
 	}
 	hints = append(hints, "? help", "q quit")
 	return fitKeyHints(width, hints, []string{
-		"mouse scroll/click", "t theme", "? help", "J/K subagent", "j/k scroll", "q quit", "tab tabs", "w wrap", "space toggle", "↵ open",
+		"mouse scroll/click", "t theme", "? help", "J/K subagent", "j/k scroll", "q quit", "tab switch", wrapHint, "space expand", enterHint,
 	})
 }
 
@@ -1111,6 +1245,8 @@ func (d *detailState) styleLine(line string, detail detailLine, selected, first 
 
 func styleDetailRole(styleSet styles, role detailRole, line string) string {
 	switch role {
+	case detailHeader:
+		return styleSet.header.Render(line)
 	case detailAccent, detailTool:
 		return styleSet.accent.Render(line)
 	case detailUserPrompt:
@@ -1153,12 +1289,15 @@ func (d *detailState) styleSubagentLine(line string, detail detailLine) string {
 	if start := strings.Index(line, agent); start >= 0 {
 		cells = append(cells, cell{start: start, end: start + len(agent), style: d.agentStyle(session.Agent)})
 	}
-	if marker := strings.LastIndex(line, " · "+tokens+" · "); marker >= 0 {
-		start := marker + len(" · ")
+	costStart := strings.LastIndex(line, cost)
+	tokenSearchEnd := len(line)
+	if costStart >= 0 {
+		tokenSearchEnd = costStart
+	}
+	if start := strings.LastIndex(line[:tokenSearchEnd], tokens); start >= 0 {
 		cells = append(cells, cell{start: start, end: start + len(tokens), style: d.styles.accent})
 	}
-	if marker := strings.LastIndex(line, " · "+cost); marker >= 0 {
-		start := marker + len(" · ")
+	if start := costStart; start >= 0 {
 		style := d.styles.row
 		if strings.HasPrefix(cost, "~$") {
 			style = d.styles.estimated

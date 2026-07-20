@@ -355,7 +355,7 @@ func TestTabSwitchesDetailToSubagents(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "route", Agent: model.AgentClaude}, 80, 12, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 
-	if view := ansi.Strip(detail.view()); detail.tab != tabSubagents || !strings.Contains(view, "╭─ Timeline · Subagents ") {
+	if view := ansi.Strip(detail.view()); detail.tab != tabSubagents || !strings.Contains(view, "╭─ Timeline  [Subagents] ") {
 		t.Fatalf("tab did not activate the Subagents panel:\n%s", view)
 	}
 }
@@ -475,11 +475,11 @@ func TestSubagentsTabListsAllDescendantsInPreOrder(t *testing.T) {
 
 	wants := []struct {
 		prefix string
-		row    string
+		cells  []string
 	}{
-		{prefix: "│› claude", row: "Scout ridge  opus-4.8 · 175 · ~$1.75"},
-		{prefix: "│    claude", row: "Map cavern  sonnet-4-7 · 75 · ~$0.75"},
-		{prefix: "│      codex", row: "Verify cavern  gpt-5.6 · 25 · ~$0.25"},
+		{prefix: "│› claude", cells: []string{"Scout ridge", "opus-4.8", "175", "~$1.75"}},
+		{prefix: "│    claude", cells: []string{"Map cavern", "sonnet-4-7", "75", "~$0.75"}},
+		{prefix: "│      codex", cells: []string{"Verify cavern", "gpt-5.6", "25", "~$0.25"}},
 	}
 	position := 0
 	for _, want := range wants {
@@ -489,8 +489,14 @@ func TestSubagentsTabListsAllDescendantsInPreOrder(t *testing.T) {
 		}
 		position += next
 		end := strings.IndexByte(view[position:], '\n')
-		if end < 0 || !strings.Contains(view[position:position+end], want.row) {
-			t.Fatalf("Subagents row %q missing totals or model in %q:\n%s", want.row, view[position:position+max(0, end)], view)
+		row := view[position : position+max(0, end)]
+		if end < 0 {
+			t.Fatalf("Subagents row for %q has no line ending:\n%s", want.prefix, view)
+		}
+		for _, cell := range want.cells {
+			if !strings.Contains(row, cell) {
+				t.Fatalf("Subagents row %q missing cell %q:\n%s", row, cell, view)
+			}
 		}
 		position += end
 	}
@@ -631,21 +637,41 @@ func TestSubagentEdgeKeysRestoreViewportEdges(t *testing.T) {
 	}
 }
 
-func TestDetailPanelTabsStayFixedAndStyleActive(t *testing.T) {
+func TestDetailPanelTabsMarkActiveAndShowSubagentCount(t *testing.T) {
 	profile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
 	styleSet := newStyles(themes["default"])
-	detail := newDetailState(&model.Session{ID: "route", Agent: model.AgentClaude}, 80, 12, styleSet)
+	subagents := make([]*model.Session, 13)
+	for index := range subagents {
+		subagents[index] = &model.Session{ID: fmt.Sprintf("worker-%02d", index)}
+	}
+	detail := newDetailState(&model.Session{ID: "route", Agent: model.AgentClaude, Subagents: subagents}, 80, 12, styleSet)
 
 	timeline := detail.tabLabel()
-	if timeline.plain != "Timeline · Subagents" || !strings.HasPrefix(timeline.styled, styleSet.title.Render("Timeline")) || !strings.Contains(timeline.styled, styleSet.muted.Render("Subagents")) {
+	if timeline.plain != "[Timeline]  Subagents (13)" || !strings.HasPrefix(timeline.styled, styleSet.title.Render("[Timeline]")) || !strings.Contains(timeline.styled, styleSet.muted.Render("Subagents (13)")) {
 		t.Fatalf("Timeline tab label = %#v", timeline)
 	}
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
-	subagents := detail.tabLabel()
-	if subagents.plain != timeline.plain || !strings.HasPrefix(subagents.styled, styleSet.muted.Render("Timeline")) || !strings.Contains(subagents.styled, styleSet.title.Render("Subagents")) {
-		t.Fatalf("Subagents tab label = %#v, want fixed plain order %q", subagents, timeline.plain)
+	subagentTab := detail.tabLabel()
+	if subagentTab.plain != "Timeline  [Subagents (13)]" || !strings.HasPrefix(subagentTab.styled, styleSet.muted.Render("Timeline")) || !strings.Contains(subagentTab.styled, styleSet.title.Render("[Subagents (13)]")) {
+		t.Fatalf("Subagents tab label = %#v, want active marker in fixed order", subagentTab)
+	}
+
+	empty := newDetailState(&model.Session{ID: "empty"}, 80, 12, styleSet).tabLabel()
+	if empty.plain != "[Timeline]  Subagents" || strings.Contains(empty.plain, "(") {
+		t.Fatalf("zero-subagent tab label = %#v, want no count", empty)
+	}
+	detail.resize(20, 12)
+	if label := detail.tabPanelLabel(); ansi.StringWidth(label.plain) > detail.width-5 {
+		t.Fatalf("narrow tab label width = %d, want <= %d: %#v", ansi.StringWidth(label.plain), detail.width-5, label)
+	}
+	for _, width := range []int{7, 8, 10, 15} {
+		detail.resize(width, 12)
+		label := detail.tabPanelLabel().plain
+		if ansi.StringWidth(label) > max(1, width-5) || !strings.HasPrefix(label, "[") || !strings.HasSuffix(label, "]") {
+			t.Errorf("%d-column active label = %q, want bounded paired marker", width, label)
+		}
 	}
 }
 
@@ -656,7 +682,7 @@ func TestCompactDetailTitleShowsActiveAndFaintInactiveTab(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "route", Agent: model.AgentClaude}, 80, 8, newStyles(themes["default"]))
 
 	title := strings.Split(detail.view(), "\n")[0]
-	if !strings.Contains(ansi.Strip(title), "Timeline · Subagents") || !strings.Contains(title, "\x1b[2;") {
+	if !strings.Contains(ansi.Strip(title), "[Timeline]  Subagents") || !strings.Contains(title, "\x1b[2;") {
 		t.Fatalf("compact title did not show a faint inactive tab: %q", title)
 	}
 }
@@ -676,8 +702,8 @@ func TestSubagentsRowAppliesCellStylesAfterFitting(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "route", Subagents: []*model.Session{first, selected}}, 100, 14, styleSet)
 	detail.now = now
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
-	line := detail.lines[1]
-	styled := detail.styleLine(detail.rendered[1].text, line, false, true)
+	line := detail.lines[2]
+	styled := detail.styleLine(detail.rendered[detail.renderedStarts[2]].text, line, false, true)
 
 	for name, want := range map[string]string{
 		"agent":  styleSet.codex.Render("codex"),
@@ -702,12 +728,12 @@ func TestSubagentsRowsShowAgeAndDropItBeforeUsage(t *testing.T) {
 		m = updated.(Model)
 	}
 	detail := detailStateFromScreen(t, m.detail)
-	if text := detail.lines[0].text; !strings.Contains(text, " · 12m") {
+	if text := detail.lines[1].text; !strings.Contains(text, "12m") {
 		t.Fatalf("wide subagent row missing age: %q", text)
 	}
 
 	detail.resize(42, 14)
-	text := detail.lines[0].text
+	text := detail.lines[1].text
 	if strings.Contains(text, "12m") || !strings.Contains(text, humanTokens(child.TotalUsage().TotalTokens())) || !strings.Contains(text, formatCost(child.TotalCost())) {
 		t.Fatalf("narrow subagent row priority = %q", text)
 	}
@@ -715,6 +741,58 @@ func TestSubagentsRowsShowAgeAndDropItBeforeUsage(t *testing.T) {
 		if width := ansi.StringWidth(row.text); width != detail.viewport.Width {
 			t.Fatalf("rendered subagent row width = %d, want %d: %q", width, detail.viewport.Width, row.text)
 		}
+	}
+}
+
+func TestSubagentsHeaderNamesAndAlignsColumns(t *testing.T) {
+	now := time.Date(2026, 1, 2, 6, 0, 0, 0, time.UTC)
+	child := &model.Session{
+		ID: "map", Agent: model.AgentCodex, Title: "Map fictional cavern", Models: []string{"gpt-5.6-sol"}, UpdatedAt: now.Add(-12 * time.Minute),
+		Usage: []model.Usage{{InputTokens: 2_500}}, Cost: model.Cost{USD: 0.75, Estimated: true},
+	}
+	detail := newDetailState(&model.Session{ID: "route", Subagents: []*model.Session{child}}, 100, 14, newStyles())
+	detail.now = now
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+
+	if len(detail.lines) < 2 {
+		t.Fatalf("Subagents lines = %#v, want header and data row", detail.lines)
+	}
+	header, row := detail.lines[0].text, detail.lines[1].text
+	columns := []struct {
+		title string
+		value string
+		right bool
+	}{
+		{title: "AGENT", value: "codex"},
+		{title: "TITLE", value: "Map fictional cavern"},
+		{title: "MODEL", value: "gpt-5.6"},
+		{title: "TOKENS", value: "2500", right: true},
+		{title: "COST", value: "~$0.75", right: true},
+		{title: "AGE", value: "12m", right: true},
+	}
+	previous := -1
+	for _, column := range columns {
+		headerStart := strings.LastIndex(header, column.title)
+		valueStart := strings.Index(row, column.value)
+		if headerStart <= previous || valueStart < 0 {
+			t.Fatalf("column %s missing or out of order in header %q and row %q", column.title, header, row)
+		}
+		if (!column.right && valueStart != headerStart) || (column.right && valueStart+len(column.value) != headerStart+len(column.title)) {
+			t.Errorf("column %s misaligned: header %q row %q", column.title, header, row)
+		}
+		previous = headerStart
+	}
+}
+
+func TestDeepSubagentRowKeepsAgentIdentity(t *testing.T) {
+	columns := subagentColumns(96)
+	row := subagentRow(
+		flattenedSubagent{depth: 12, s: &model.Session{ID: "deep", Agent: model.AgentCodex, Title: "Inspect fictional depth"}},
+		time.Time{}, columns, "gpt-5.6", "2500", "~$0.75",
+	)
+	agentCell := ansi.Cut(row, 0, columns[0].width)
+	if !strings.Contains(agentCell, "codex") || !strings.Contains(agentCell, "…") {
+		t.Fatalf("deep agent cell = %q, want compact depth marker and full agent identity", agentCell)
 	}
 }
 
@@ -837,8 +915,30 @@ func TestColoredDetailFillsWideTerminalAndBoundsLines(t *testing.T) {
 func TestDetailKeyBarKeepsQuitVisibleAtEightyColumns(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "lunar"}, 80, 12, newStyles())
 	keyBar := strings.Split(ansi.Strip(detail.view()), "\n")[11]
-	if !strings.Contains(keyBar, "space toggle") || !strings.Contains(keyBar, "↵ open") || !strings.Contains(keyBar, "tab tabs") || !strings.Contains(keyBar, "w wrap") || !strings.Contains(keyBar, "q quit") || strings.Contains(keyBar, "…") {
-		t.Fatalf("80-column detail key bar = %q, want toggle, open, tabs, wrap, and quit hints without truncation", keyBar)
+	if !strings.Contains(keyBar, "space expand") || !strings.Contains(keyBar, "↵ inspect") || !strings.Contains(keyBar, "tab switch") || !strings.Contains(keyBar, "w nowrap") || !strings.Contains(keyBar, "q quit") || strings.Contains(keyBar, "…") {
+		t.Fatalf("80-column detail key bar = %q, want expand, inspect, switch, nowrap, and quit hints without truncation", keyBar)
+	}
+}
+
+func TestDetailKeyBarUsesContextualNewcomerHints(t *testing.T) {
+	detail := newDetailState(&model.Session{ID: "route", Subagents: []*model.Session{{ID: "scout"}}}, 160, 12, newStyles())
+	keyBar := strings.Split(ansi.Strip(detail.view()), "\n")[11]
+	for _, want := range []string{"space expand", "↵ inspect", "tab switch", "w nowrap"} {
+		if !strings.Contains(keyBar, want) {
+			t.Fatalf("wrapped Timeline key bar missing %q: %q", want, keyBar)
+		}
+	}
+
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	keyBar = strings.Split(ansi.Strip(detail.view()), "\n")[11]
+	if !strings.Contains(keyBar, "w wrap") || strings.Contains(keyBar, "w nowrap") {
+		t.Fatalf("unwrapped Timeline key bar did not expose wrap action: %q", keyBar)
+	}
+
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	keyBar = strings.Split(ansi.Strip(detail.view()), "\n")[11]
+	if !strings.Contains(keyBar, "↵ open") || strings.Contains(keyBar, "↵ inspect") || strings.Contains(keyBar, "space expand") || strings.Contains(keyBar, "w wrap") || strings.Contains(keyBar, "w nowrap") {
+		t.Fatalf("Subagents key bar did not limit hints to applicable actions: %q", keyBar)
 	}
 }
 
@@ -848,11 +948,11 @@ func TestNarrowKeyBarsKeepWholeEssentialHints(t *testing.T) {
 			width int
 			wants []string
 		}{
-			{width: 40, wants: []string{"space toggle", "↵ open", "esc back"}},
-			{width: 20, wants: []string{"↵ open", "esc back"}},
+			{width: 40, wants: []string{"space expand", "↵ inspect", "esc back"}},
+			{width: 20, wants: []string{"↵ inspect", "esc back"}},
 			{width: 10, wants: []string{"esc back"}},
 		} {
-			text := detailKeyText(test.width, true, tabTimeline)
+			text := detailKeyText(test.width, true, tabTimeline, true)
 			if width := ansi.StringWidth(text); width > test.width {
 				t.Fatalf("%d-column detail hints width = %d: %q", test.width, width, text)
 			}
@@ -890,7 +990,7 @@ func TestWideKeyBarsAdvertiseMouse(t *testing.T) {
 	if keyBar := strings.Split(ansi.Strip(m.View()), "\n")[11]; !strings.Contains(keyBar, "mouse scroll/click") {
 		t.Fatalf("wide list key bar missing mouse hint: %q", keyBar)
 	}
-	if keyBar := detailKeyText(160, false, tabTimeline); !strings.Contains(keyBar, "mouse scroll/click") {
+	if keyBar := detailKeyText(160, false, tabTimeline, true); !strings.Contains(keyBar, "mouse scroll/click") {
 		t.Fatalf("wide detail key bar missing mouse hint: %q", keyBar)
 	}
 	if keyBar := itemKeyText(160); !strings.Contains(keyBar, "wheel scroll") {
@@ -1160,10 +1260,10 @@ func TestLiveUpdateRefreshesRecursiveSubagentTotals(t *testing.T) {
 			t.Errorf("%s cached totals = %q/%q, want %q/%q", line.subagentSession.ID, line.subagentTokens, line.subagentCost, wantTokens, wantCost)
 		}
 	}
-	if got := detailStateFromScreen(t, m.detail).lines[0].subagentTokens; got != "350" {
+	if got := detailStateFromScreen(t, m.detail).lines[1].subagentTokens; got != "350" {
 		t.Fatalf("refreshed scout recursive tokens = %q, want 350", got)
 	}
-	if got := detailStateFromScreen(t, m.detail).lines[0].subagentCost; got != "~$0.35" {
+	if got := detailStateFromScreen(t, m.detail).lines[1].subagentCost; got != "~$0.35" {
 		t.Fatalf("refreshed scout recursive cost = %q, want ~$0.35", got)
 	}
 }
@@ -1539,7 +1639,7 @@ func TestSubagentsMouseWheelScrollsWithoutChangingSelection(t *testing.T) {
 	updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
 	m = updated.(Model)
 	detail = detailStateFromScreen(t, m.detail)
-	if detail.viewport.YOffset != mouseWheelRows || detail.subagentSelection != 0 || detail.selectedLine != 0 {
+	if detail.viewport.YOffset != mouseWheelRows || detail.subagentSelection != 0 || detail.selectedLine != 1 {
 		t.Fatalf("subagents wheel offset=%d selection=%d line=%d", detail.viewport.YOffset, detail.subagentSelection, detail.selectedLine)
 	}
 }
@@ -2009,9 +2109,66 @@ func TestToolExpansionShowsMutedOutputSection(t *testing.T) {
 	}
 }
 
-func TestCodexExecToolDisplaysAsBash(t *testing.T) {
-	if got := toolDisplayName("exec"); got != "Bash" {
-		t.Fatalf("toolDisplayName(exec) = %q, want Bash", got)
+func TestExpandedToolHeaderStaysOnOneRowWhileBodyWraps(t *testing.T) {
+	input := strings.Repeat("inspect the fictional ridge ", 8)
+	output := strings.Repeat("fictional telemetry remains clear ", 8)
+	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Check the route"},
+		{Kind: model.EventToolCall, ToolName: "update_plan", ToolInput: input, Detail: &model.ToolDetail{Input: input, Output: output}},
+	}}
+	detail := newDetailState(session, 32, 14, newStyles())
+
+	headerIndex := -1
+	for index, line := range detail.lines {
+		if line.role == detailTool {
+			headerIndex = index
+			break
+		}
+	}
+	if headerIndex < 0 {
+		t.Fatal("expanded tool header not found")
+	}
+	headerStart := detail.renderedStarts[headerIndex]
+	headerEnd := len(detail.rendered)
+	if headerIndex+1 < len(detail.renderedStarts) {
+		headerEnd = detail.renderedStarts[headerIndex+1]
+	}
+	if rows := detail.rendered[headerStart:headerEnd]; len(rows) != 1 || !rows[0].first || !strings.Contains(rows[0].text, "…") || ansi.StringWidth(rows[0].text) != detail.viewport.Width {
+		t.Fatalf("tool header rows = %#v, want one first truncated viewport-width row", rows)
+	}
+
+	for _, body := range []string{input, output} {
+		foundWrappedBody := false
+		for index, line := range detail.lines {
+			if !strings.Contains(line.text, body) {
+				continue
+			}
+			start := detail.renderedStarts[index]
+			end := len(detail.rendered)
+			if index+1 < len(detail.renderedStarts) {
+				end = detail.renderedStarts[index+1]
+			}
+			foundWrappedBody = end-start > 1
+			break
+		}
+		if !foundWrappedBody {
+			t.Fatalf("expanded body %q did not retain full text and wrap normally", body)
+		}
+	}
+}
+
+func TestOnlyShellToolsDisplayAsBash(t *testing.T) {
+	for _, test := range []struct {
+		event model.Event
+		want  string
+	}{
+		{event: model.Event{ToolName: "exec_command", ToolInput: "go test"}, want: glyphTool + " Bash(go test)"},
+		{event: model.Event{ToolName: "update_plan"}, want: glyphTool + " update_plan"},
+		{event: model.Event{ToolName: "exec", ToolInput: "unresolved wrapper"}, want: glyphTool + " exec(unresolved wrapper)"},
+	} {
+		if got := toolLine(test.event); got != test.want {
+			t.Errorf("toolLine(%#v) = %q, want %q", test.event, got, test.want)
+		}
 	}
 }
 

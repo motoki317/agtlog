@@ -742,7 +742,7 @@ func panelRuleLabel(rule string, label panelLabel, width int, right bool, styles
 	if label.plain == "" || width < 4 {
 		return styles.border.Render(strings.Repeat(rule, width))
 	}
-	plain := ansi.Truncate(terminalText(label.plain, 256), max(1, width-3), "…")
+	plain := ansi.Truncate(panelLabelText(label.plain, 256), max(1, width-3), "…")
 	styled := styles.title.Render(plain)
 	if plain == label.plain && label.styled != "" {
 		styled = label.styled
@@ -754,6 +754,22 @@ func panelRuleLabel(rule string, label panelLabel, width int, right bool, styles
 		return styles.border.Render(strings.Repeat(rule, remaining)) + decoratedStyled
 	}
 	return styles.border.Render(rule) + decoratedStyled + styles.border.Render(strings.Repeat(rule, max(0, remaining-1)))
+}
+
+func panelLabelText(value string, maxRunes int) string {
+	var output strings.Builder
+	count := 0
+	for _, char := range ansi.Strip(value) {
+		if count >= maxRunes {
+			break
+		}
+		if unicode.IsControl(char) || unicode.In(char, unicode.Cf) {
+			char = ' '
+		}
+		output.WriteRune(char)
+		count++
+	}
+	return strings.TrimSpace(output.String())
 }
 
 func fitPlain(value string, width int, right bool) string {
