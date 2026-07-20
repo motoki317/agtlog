@@ -15,4 +15,4 @@
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-space expand   ↵ inspect   tab switch   w nowrap   esc back   q quit
+space expand   E all   C all   ↵ inspect   w nowrap   esc back   q quit

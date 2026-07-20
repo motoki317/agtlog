@@ -78,11 +78,11 @@ func TestResolveThemeRejectsUnknownName(t *testing.T) {
 func TestBuiltInThemesDefineSemanticPalettes(t *testing.T) {
 	unsetEnv(t, "NO_COLOR")
 	tests := []struct {
-		name, claude, codex, warning, diffAdd, diffRemove, background, userBg, systemBg string
+		name, claude, codex, warning, muted, estimated, diffAdd, diffRemove, selectedFg, selectedBg, background, userBg, systemBg string
 	}{
-		{name: "default", claude: "#D19A66", codex: "#61AFEF", warning: "#E06C75", diffAdd: "#98C379", diffRemove: "#E06C75", background: "#1E222A", userBg: "#262B33", systemBg: "#2B2A26"},
-		{name: "nord", claude: "#88C0D0", codex: "#81A1C1", warning: "#BF616A", diffAdd: "#A3BE8C", diffRemove: "#BF616A", background: "#2E3440", userBg: "#353C4A", systemBg: "#3B4252"},
-		{name: "dracula", claude: "#BD93F9", codex: "#8BE9FD", warning: "#FF5555", diffAdd: "#50FA7B", diffRemove: "#FF5555", background: "#282A36", userBg: "#2E3040", systemBg: "#343646"},
+		{name: "default", claude: "#D19A66", codex: "#61AFEF", warning: "#E06C75", muted: "#8A94A6", estimated: "#8A94A6", diffAdd: "#98C379", diffRemove: "#E06C75", selectedFg: "#FFFFFF", selectedBg: "#3E4451", background: "#1E222A", userBg: "#262B33", systemBg: "#2B2A26"},
+		{name: "nord", claude: "#88C0D0", codex: "#81A1C1", warning: "#BF616A", muted: "#8590A8", estimated: "#8590A8", diffAdd: "#A3BE8C", diffRemove: "#BF616A", selectedFg: "#ECEFF4", selectedBg: "#4C566A", background: "#2E3440", userBg: "#353C4A", systemBg: "#3B4252"},
+		{name: "dracula", claude: "#BD93F9", codex: "#8BE9FD", warning: "#FF5555", muted: "#7A85B8", estimated: "#7A85B8", diffAdd: "#7FB894", diffRemove: "#E86A6A", selectedFg: "#F8F8F2", selectedBg: "#44475A", background: "#282A36", userBg: "#2E3040", systemBg: "#343646"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -95,6 +95,12 @@ func TestBuiltInThemesDefineSemanticPalettes(t *testing.T) {
 			}
 			if theme.DiffAdd != test.diffAdd || theme.DiffRemove != test.diffRemove {
 				t.Fatalf("ResolveTheme(%q) diff colors = %q/%q, want %q/%q", test.name, theme.DiffAdd, theme.DiffRemove, test.diffAdd, test.diffRemove)
+			}
+			if theme.Muted != test.muted || theme.Estimated != test.estimated {
+				t.Fatalf("ResolveTheme(%q) dim colors = %q/%q, want %q/%q", test.name, theme.Muted, theme.Estimated, test.muted, test.estimated)
+			}
+			if theme.SelectedFg != test.selectedFg || theme.SelectedBg != test.selectedBg {
+				t.Fatalf("ResolveTheme(%q) selection colors = %q/%q, want %q/%q", test.name, theme.SelectedFg, theme.SelectedBg, test.selectedFg, test.selectedBg)
 			}
 			if theme.UserBg != test.userBg || theme.SystemBg != test.systemBg {
 				t.Fatalf("ResolveTheme(%q) prompt backgrounds = %q/%q, want %q/%q", test.name, theme.UserBg, theme.SystemBg, test.userBg, test.systemBg)
@@ -192,6 +198,17 @@ func TestColorThemeStylesUsePaletteBackground(t *testing.T) {
 	}
 }
 
+func TestSecondaryStylesUseColorWithoutFaint(t *testing.T) {
+	styleSet := newStyles(themes["default"])
+	for name, style := range map[string]lipgloss.Style{
+		"muted": styleSet.muted, "estimated": styleSet.estimated, "key hint": styleSet.keyHint,
+	} {
+		if style.GetFaint() {
+			t.Errorf("%s style is faint, want color-only hierarchy", name)
+		}
+	}
+}
+
 func TestDiffStylesUseSemanticPalette(t *testing.T) {
 	profile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
@@ -209,6 +226,12 @@ func TestDiffStylesUseSemanticPalette(t *testing.T) {
 	}
 }
 
+func TestDiffAddStyleAvoidsBold(t *testing.T) {
+	if styleSet := newStyles(themes["default"]); styleSet.diffAdd.GetBold() {
+		t.Fatal("diff add style is bold, want color-only emphasis")
+	}
+}
+
 func TestMonoDiffStylesAvoidColor(t *testing.T) {
 	styleSet := newStyles(Theme{Name: "mono"})
 	if _, ok := styleSet.diffAdd.GetForeground().(lipgloss.NoColor); !ok {
@@ -217,8 +240,8 @@ func TestMonoDiffStylesAvoidColor(t *testing.T) {
 	if _, ok := styleSet.diffRemove.GetForeground().(lipgloss.NoColor); !ok {
 		t.Fatalf("mono diff remove foreground = %#v, want no color", styleSet.diffRemove.GetForeground())
 	}
-	if !styleSet.diffAdd.GetBold() || styleSet.diffRemove.GetFaint() {
-		t.Fatal("mono diff styles must keep solid removals and bold additions")
+	if styleSet.diffAdd.GetBold() || styleSet.diffRemove.GetFaint() {
+		t.Fatal("mono diff styles must avoid terminal intensity attributes")
 	}
 }
 

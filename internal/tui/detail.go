@@ -254,13 +254,13 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		if d.tab == tabSubagents {
 			d.moveSubagentSelection(1)
 		} else {
-			d.moveFocus(1, false)
+			d.moveFocus(1)
 		}
 	case "k", "up":
 		if d.tab == tabSubagents {
 			d.moveSubagentSelection(-1)
 		} else {
-			d.moveFocus(-1, false)
+			d.moveFocus(-1)
 		}
 	case "g":
 		if d.tab == tabSubagents {
@@ -287,19 +287,19 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		} else if len(d.focusables) > 0 {
 			d.gotoBottom()
 		}
-	case "J":
-		if d.tab == tabTimeline {
-			d.moveFocus(1, true)
-		}
-	case "K":
-		if d.tab == tabTimeline {
-			d.moveFocus(-1, true)
-		}
 	case " ":
 		if d.tab == tabTimeline && len(d.focusables) > 0 && d.focusables[d.focus].expandable {
 			item := d.focusables[d.focus]
 			d.expanded[item.key] = !d.isExpanded(item.key)
 			d.rebuildKeeping(item.key)
+		}
+	case expandAllKey:
+		if d.tab == tabTimeline {
+			d.setAllExpanded(true)
+		}
+	case collapseAllKey:
+		if d.tab == tabTimeline {
+			d.setAllExpanded(false)
 		}
 	case "w":
 		d.setWrap(!d.wrap)
@@ -354,19 +354,17 @@ func (d *detailState) moveSubagentSelection(delta int) {
 	d.updateSelection(oldLine, subagentDetailLine(next))
 }
 
-func (d *detailState) moveFocus(direction int, subagentsOnly bool) {
+func (d *detailState) moveFocus(direction int) {
 	if len(d.focusables) == 0 {
 		return
 	}
-	start := d.focus
-	for next := start + direction; next >= 0 && next < len(d.focusables); next += direction {
-		if !subagentsOnly || d.focusables[next].subagent {
-			oldLine := d.focusables[d.focus].line
-			d.focus = next
-			d.updateSelection(oldLine, d.focusables[d.focus].line)
-			return
-		}
+	next := d.focus + direction
+	if next < 0 || next >= len(d.focusables) {
+		return
 	}
+	oldLine := d.focusables[d.focus].line
+	d.focus = next
+	d.updateSelection(oldLine, d.focusables[d.focus].line)
 }
 
 func (d *detailState) selectRow(index int) bool {
@@ -388,16 +386,38 @@ func (d *detailState) selectedExpandable() bool {
 	return d.tab == tabTimeline && len(d.focusables) > 0 && d.focusables[d.focus].expandable
 }
 
-func (d *detailState) rebuildKeeping(key string) {
+func (d *detailState) rebuildKeeping(keys ...string) {
 	d.rebuild()
-	for index, item := range d.focusables {
-		if item.key == key {
-			oldLine := d.selectedLine
-			d.focus = index
-			d.updateSelection(oldLine, item.line)
-			return
+	for _, key := range keys {
+		for index, item := range d.focusables {
+			if item.key == key {
+				oldLine := d.selectedLine
+				d.focus = index
+				d.updateSelection(oldLine, item.line)
+				return
+			}
 		}
 	}
+}
+
+func (d *detailState) setAllExpanded(expanded bool) {
+	key := ""
+	if len(d.focusables) > 0 {
+		key = d.focusables[d.focus].key
+	}
+	keys := expandableTimelineKeys(d.session)
+	d.expanded = make(map[string]bool, len(keys))
+	for _, expandableKey := range keys {
+		d.expanded[expandableKey] = expanded
+	}
+	ancestorKey := ""
+	for _, expandableKey := range keys {
+		if strings.HasPrefix(key, expandableKey+"/event/") {
+			ancestorKey = expandableKey
+			break
+		}
+	}
+	d.rebuildKeeping(key, ancestorKey)
 }
 
 func (d *detailState) rebuild() {
@@ -662,13 +682,13 @@ func (d *detailState) sessionLines(session *model.Session, indent int, path stri
 			index++
 		}
 		turn := session.Events[start:index]
-		key := fmt.Sprintf("%s/turn/%d", path, start)
+		key := timelineTurnKey(path, start)
 		expanded := d.isExpanded(key)
 		label := glyphAssistant + " " + terminalText(string(session.Agent), 32) + ":"
 		lines = append(lines, detailLine{text: d.turnSummary(session, turn, indent, expanded), label: label, key: key, expandable: turnExpandable(turn), role: detailAssistant, agent: session.Agent, event: turnItemEvent(turn)})
 		if expanded {
 			for eventIndex, item := range turn {
-				lines = append(lines, d.eventLines(session, item, indent+2, fmt.Sprintf("%s/event/%d", key, eventIndex))...)
+				lines = append(lines, d.eventLines(session, item, indent+2, timelineEventKey(key, eventIndex))...)
 			}
 		}
 	}
@@ -676,6 +696,40 @@ func (d *detailState) sessionLines(session *model.Session, indent int, path stri
 		lines = append(lines, detailLine{text: strings.Repeat(" ", indent) + "No timeline events.", role: detailSecondary})
 	}
 	return lines
+}
+
+func expandableTimelineKeys(session *model.Session) []string {
+	keys := make([]string, 0, len(session.Events))
+	path := sessionIdentity(session)
+	for index := 0; index < len(session.Events); {
+		if session.Events[index].Kind == model.EventUser {
+			index++
+			continue
+		}
+		start := index
+		for index < len(session.Events) && session.Events[index].Kind != model.EventUser {
+			index++
+		}
+		turn := session.Events[start:index]
+		turnKey := timelineTurnKey(path, start)
+		if turnExpandable(turn) {
+			keys = append(keys, turnKey)
+		}
+		for eventIndex, event := range turn {
+			if event.Kind == model.EventToolCall && detailHasBody(event) {
+				keys = append(keys, timelineEventKey(turnKey, eventIndex))
+			}
+		}
+	}
+	return keys
+}
+
+func timelineTurnKey(path string, start int) string {
+	return fmt.Sprintf("%s/turn/%d", path, start)
+}
+
+func timelineEventKey(turnKey string, index int) string {
+	return fmt.Sprintf("%s/event/%d", turnKey, index)
 }
 
 func turnItemEvent(events []model.Event) model.Event {
@@ -792,14 +846,16 @@ func (d *detailState) eventForKey(key string) (model.Event, bool) {
 
 func (d *detailState) toolEventLines(event model.Event, indent int, key string) []detailLine {
 	padding := strings.Repeat(" ", indent)
-	expandable := detailHasBody(event.Detail)
-	text := padding + toolLine(event)
+	expandable := detailHasBody(event)
+	hideInputPreview := d.isExpanded(key) && detailInputBody(event) != ""
+	summary := toolLine(event, hideInputPreview)
+	text := padding + summary
 	if expandable {
 		marker := glyphCollapsed
 		if d.isExpanded(key) {
 			marker = glyphExpanded
 		}
-		text = padding + marker + " " + toolLine(event)
+		text = padding + marker + " " + summary
 	}
 	lines := []detailLine{{text: text, key: key, nowrap: true, expandable: expandable, role: detailTool, event: event}}
 	if !d.isExpanded(key) || event.Detail == nil {
@@ -827,7 +883,7 @@ func (d *detailState) toolEventLines(event model.Event, indent int, key string) 
 		}
 		lines = append(lines, detailLine{text: childPadding + section.label, role: detailSecondary})
 		for _, text := range boundLines(section.text, detailPreviewLineCap) {
-			lines = append(lines, detailLine{text: childPadding + detailPlainText(text), role: detailSecondary})
+			lines = append(lines, detailLine{text: childPadding + detailPlainText(text), role: detailRow})
 		}
 	}
 	return lines
@@ -836,9 +892,6 @@ func (d *detailState) toolEventLines(event model.Event, indent int, key string) 
 func detailInputBody(event model.Event) string {
 	if event.Detail == nil || event.Detail.Input == "" {
 		return ""
-	}
-	if strings.Contains(event.Detail.Input, "\n") {
-		return event.Detail.Input
 	}
 	switch event.ToolName {
 	case "Read", "Edit", "MultiEdit", "Write", "apply_patch":
@@ -857,8 +910,9 @@ func detailPlainText(text string) string {
 	}, ansi.Strip(text))
 }
 
-func detailHasBody(detail *model.ToolDetail) bool {
-	return detail != nil && (detail.Diff != "" || detail.Output != "" || strings.Contains(detail.Input, "\n"))
+func detailHasBody(event model.Event) bool {
+	detail := event.Detail
+	return detail != nil && (detail.Diff != "" || detail.Output != "" || strings.Contains(detail.Input, "\n") && detailInputBody(event) != "")
 }
 
 func turnExpandable(events []model.Event) bool {
@@ -870,10 +924,10 @@ func turnExpandable(events []model.Event) bool {
 	return false
 }
 
-func toolLine(event model.Event) string {
+func toolLine(event model.Event, hideInputPreview bool) string {
 	name := toolDisplayName(event.ToolName)
 	line := glyphTool + " " + name
-	if input := firstLine(event.ToolInput); input != "" {
+	if input := firstLine(event.ToolInput); input != "" && !hideInputPreview {
 		line += "(" + input + ")"
 	}
 	if event.ResultSummary != "" {
@@ -1087,9 +1141,11 @@ func detailKeyText(width int, mono bool, tab detailTab, wrap bool) string {
 	if wrap {
 		wrapHint = "w nowrap"
 	}
+	expandAllHint := expandAllKey + " all"
+	collapseAllHint := collapseAllKey + " all"
 	hints := []string{"j/k scroll"}
 	if tab == tabTimeline {
-		hints = append(hints, "space expand", enterHint, "tab switch", "J/K subagent", wrapHint)
+		hints = append(hints, "space expand", expandAllHint, collapseAllHint, enterHint, "tab switch", wrapHint)
 	} else {
 		hints = append(hints, enterHint, "tab switch")
 	}
@@ -1099,7 +1155,7 @@ func detailKeyText(width int, mono bool, tab detailTab, wrap bool) string {
 	}
 	hints = append(hints, "? help", "q quit")
 	return fitKeyHints(width, hints, []string{
-		"mouse scroll/click", "t theme", "? help", "J/K subagent", "j/k scroll", "q quit", "tab switch", wrapHint, "space expand", enterHint,
+		"mouse scroll/click", "t theme", "? help", "j/k scroll", "tab switch", wrapHint, expandAllHint, collapseAllHint, "q quit", "space expand", enterHint,
 	})
 }
 

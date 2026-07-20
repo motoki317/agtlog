@@ -35,13 +35,14 @@ func (m Model) helpView() string {
 			lines = []string{
 				"j/k scroll · g/G edge",
 				"space toggle · enter open",
+				expandAllKey + " expand all · " + collapseAllKey + " collapse all",
 				"tab tabs · w wrap",
-				"J/K subagent · esc/h back",
+				"esc/h back",
 				mouseHelp,
 				"? help · q/ctrl-c quit",
 			}
 			if !m.styles.mono {
-				lines[3] += " · t theme"
+				lines[4] += " · t theme"
 			}
 		}
 	}

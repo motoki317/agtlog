@@ -675,15 +675,16 @@ func TestDetailPanelTabsMarkActiveAndShowSubagentCount(t *testing.T) {
 	}
 }
 
-func TestCompactDetailTitleShowsActiveAndFaintInactiveTab(t *testing.T) {
+func TestCompactDetailTitleShowsActiveAndDimInactiveTab(t *testing.T) {
 	profile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
-	detail := newDetailState(&model.Session{ID: "route", Agent: model.AgentClaude}, 80, 8, newStyles(themes["default"]))
+	styleSet := newStyles(themes["default"])
+	detail := newDetailState(&model.Session{ID: "route", Agent: model.AgentClaude}, 80, 8, styleSet)
 
 	title := strings.Split(detail.view(), "\n")[0]
-	if !strings.Contains(ansi.Strip(title), "[Timeline]  Subagents") || !strings.Contains(title, "\x1b[2;") {
-		t.Fatalf("compact title did not show a faint inactive tab: %q", title)
+	if !strings.Contains(ansi.Strip(title), "[Timeline]  Subagents") || !strings.Contains(title, styleSet.muted.Render("Subagents")) {
+		t.Fatalf("compact title did not show a dim inactive tab: %q", title)
 	}
 }
 
@@ -915,8 +916,8 @@ func TestColoredDetailFillsWideTerminalAndBoundsLines(t *testing.T) {
 func TestDetailKeyBarKeepsQuitVisibleAtEightyColumns(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "lunar"}, 80, 12, newStyles())
 	keyBar := strings.Split(ansi.Strip(detail.view()), "\n")[11]
-	if !strings.Contains(keyBar, "space expand") || !strings.Contains(keyBar, "↵ inspect") || !strings.Contains(keyBar, "tab switch") || !strings.Contains(keyBar, "w nowrap") || !strings.Contains(keyBar, "q quit") || strings.Contains(keyBar, "…") {
-		t.Fatalf("80-column detail key bar = %q, want expand, inspect, switch, nowrap, and quit hints without truncation", keyBar)
+	if !strings.Contains(keyBar, "space expand") || !strings.Contains(keyBar, "E all") || !strings.Contains(keyBar, "C all") || !strings.Contains(keyBar, "↵ inspect") || !strings.Contains(keyBar, "w nowrap") || !strings.Contains(keyBar, "q quit") || strings.Contains(keyBar, "…") {
+		t.Fatalf("80-column detail key bar = %q, want row and bulk expansion, inspect, nowrap, and quit hints without truncation", keyBar)
 	}
 }
 
@@ -973,13 +974,23 @@ func TestNarrowKeyBarsKeepWholeEssentialHints(t *testing.T) {
 	})
 }
 
-func TestSubagentsKeyBarOmitsTimelineOnlyJumpHint(t *testing.T) {
-	detail := newDetailState(&model.Session{ID: "route"}, 80, 12, newStyles())
-	detail.update(tea.KeyMsg{Type: tea.KeyTab})
-	keyBar := strings.Split(ansi.Strip(detail.view()), "\n")[11]
-
-	if strings.Contains(keyBar, "J/K subagent") {
-		t.Fatalf("Subagents key bar advertised Timeline-only J/K binding: %q", keyBar)
+func TestDetailKeyBarsAdvertiseOnlyLiveContextualBindings(t *testing.T) {
+	for _, tab := range []detailTab{tabTimeline, tabSubagents} {
+		keyBar := detailKeyText(160, true, tab, true)
+		for _, unwanted := range []string{"J/K", "subagent"} {
+			if strings.Contains(keyBar, unwanted) {
+				t.Errorf("%s key bar retained removed hint %q: %q", tab.title(), unwanted, keyBar)
+			}
+		}
+		if tab == tabTimeline {
+			for _, want := range []string{"E all", "C all"} {
+				if !strings.Contains(keyBar, want) {
+					t.Errorf("Timeline key bar missing %q: %q", want, keyBar)
+				}
+			}
+		} else if strings.Contains(keyBar, "E all") || strings.Contains(keyBar, "C all") {
+			t.Errorf("Subagents key bar advertised Timeline-only bulk action: %q", keyBar)
+		}
 	}
 }
 
@@ -1389,8 +1400,8 @@ func TestExpandedToolDetailIsPlainTerminalText(t *testing.T) {
 		}},
 	}}
 	detail := newDetailState(session, 80, 18, newStyles())
-	detail.moveFocus(1, false)
-	detail.moveFocus(1, false)
+	detail.moveFocus(1)
+	detail.moveFocus(1)
 
 	var rows []string
 	for _, line := range detail.lines {
@@ -2052,8 +2063,8 @@ func TestToolExpansionRevealsDiffLinesWithSemanticRoles(t *testing.T) {
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
-	detail.moveFocus(1, false)
-	detail.moveFocus(1, false)
+	detail.moveFocus(1)
+	detail.moveFocus(1)
 	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 	toolIndex := detail.focusables[detail.focus].line
 	if line := detail.lines[toolIndex]; !line.expandable || !strings.Contains(line.text, "▸ "+glyphTool+" Edit") {
@@ -2084,26 +2095,158 @@ func TestToolExpansionRevealsDiffLinesWithSemanticRoles(t *testing.T) {
 	}
 }
 
-func TestToolExpansionShowsMutedOutputSection(t *testing.T) {
+func TestExpandAllMarksEveryExpandableTimelineRow(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Check the route"},
+		{Kind: model.EventThinking, Text: "Inspect the ridge"},
+		{Kind: model.EventToolCall, ToolName: "exec_command", ToolInput: "check-route", Detail: &model.ToolDetail{Input: "check-route", Output: "route clear"}},
+	}}
+	detail := newDetailState(session, 80, 14, newStyles())
+	var expandableKeys []string
+	for _, item := range detail.focusables {
+		if item.expandable {
+			expandableKeys = append(expandableKeys, item.key)
+			detail.expanded[item.key] = false
+		}
+	}
+	detail.rebuild()
+
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+
+	for _, key := range expandableKeys {
+		if expanded, ok := detail.expanded[key]; !ok || !expanded {
+			t.Errorf("expandable key %q expanded = %t, present = %t; want true", key, expanded, ok)
+		}
+	}
+	lines := make([]string, len(detail.lines))
+	for index, line := range detail.lines {
+		lines[index] = line.text
+	}
+	visible := strings.Join(lines, "\n")
+	if !strings.Contains(visible, glyphExpanded+" "+glyphTool+" Bash") || !strings.Contains(visible, "route clear") {
+		t.Errorf("expand-all did not reveal nested tool body:\n%s", visible)
+	}
+}
+
+func TestCollapseAllClearsEveryExpandableTimelineRow(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Check the route"},
+		{Kind: model.EventThinking, Text: "Inspect the ridge"},
+		{Kind: model.EventToolCall, ToolName: "exec_command", ToolInput: "check-route", Detail: &model.ToolDetail{Input: "check-route", Output: "route clear"}},
+	}}
+	detail := newDetailState(session, 80, 14, newStyles())
+	var expandableKeys []string
+	for _, item := range detail.focusables {
+		if item.expandable {
+			expandableKeys = append(expandableKeys, item.key)
+		}
+	}
+	detail.expanded[expandableKeys[0]] = false
+	detail.rebuild()
+
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
+
+	for _, key := range expandableKeys {
+		if expanded, ok := detail.expanded[key]; !ok || expanded {
+			t.Errorf("expandable key %q expanded = %t, present = %t; want false", key, expanded, ok)
+		}
+	}
+	lines := make([]string, len(detail.lines))
+	for index, line := range detail.lines {
+		lines[index] = line.text
+	}
+	visible := strings.Join(lines, "\n")
+	if !strings.Contains(visible, glyphCollapsed+" "+glyphAssistant) || strings.Contains(visible, "route clear") {
+		t.Errorf("collapse-all left nested tool body visible:\n%s", visible)
+	}
+}
+
+func TestCollapseAllKeepsFocusOnContainingTurn(t *testing.T) {
+	session := &model.Session{ID: "lunar", Path: "/workspace/event/session.jsonl", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Check the first route"},
+		{Kind: model.EventThinking, Text: "Inspect the first ridge"},
+		{Kind: model.EventAssistantText, Text: "First route clear"},
+		{Kind: model.EventUser, Text: "Check the second route"},
+		{Kind: model.EventThinking, Text: "Inspect the second ridge"},
+		{Kind: model.EventAssistantText, Text: "Second route clear"},
+	}}
+	detail := newDetailState(session, 80, 14, newStyles())
+	wantKey := ""
+	for index, item := range detail.focusables {
+		if strings.Contains(item.key, "/turn/1/event/0") {
+			detail.focus = index
+			detail.selectedLine = item.line
+			for _, candidate := range detail.focusables {
+				if candidate.expandable && strings.HasPrefix(item.key, candidate.key+"/event/") {
+					wantKey = candidate.key
+					break
+				}
+			}
+			break
+		}
+	}
+	if wantKey == "" {
+		t.Fatal("first turn child focus not found")
+	}
+
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
+
+	if got := detail.focusables[detail.focus].key; got != wantKey {
+		t.Errorf("collapse-all focus = %q, want containing turn %q", got, wantKey)
+	}
+}
+
+func TestTimelineUppercaseAgentJumpKeysAreNoops(t *testing.T) {
+	first := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge"}
+	second := &model.Session{ID: "mapper", Agent: model.AgentCodex, Title: "Map ridge"}
+	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the route"},
+		{Kind: model.EventSubagent, Subagent: first},
+		{Kind: model.EventAssistantText, Text: "Continue the survey"},
+		{Kind: model.EventSubagent, Subagent: second},
+	}}
+	detail := newDetailState(session, 80, 14, newStyles())
+	for _, test := range []struct {
+		name  string
+		key   rune
+		focus int
+	}{
+		{name: "J", key: 'J', focus: 0},
+		{name: "K", key: 'K', focus: len(detail.focusables) - 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			detail.focus = test.focus
+			detail.selectedLine = detail.focusables[test.focus].line
+			detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{test.key}})
+			if detail.focus != test.focus {
+				t.Errorf("%c changed Timeline focus from %d to %d", test.key, test.focus, detail.focus)
+			}
+		})
+	}
+}
+
+func TestToolExpansionShowsReadableOutputUnderSecondaryLabel(t *testing.T) {
 	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Check the route"},
 		{Kind: model.EventToolCall, ToolName: "exec_command", ToolInput: "check-route", Detail: &model.ToolDetail{Input: "check-route", Output: "route clear\ncommand complete"}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
 
-	want := map[string]bool{"output:": false, "route clear": false, "command complete": false}
+	want := map[string]detailRole{"output:": detailSecondary, "route clear": detailRow, "command complete": detailRow}
+	found := make(map[string]bool, len(want))
 	for _, line := range detail.lines {
 		text := strings.TrimSpace(line.text)
-		if _, ok := want[text]; !ok {
+		role, ok := want[text]
+		if !ok {
 			continue
 		}
-		if line.role != detailSecondary {
-			t.Errorf("output line %q role = %v, want muted", line.text, line.role)
+		if line.role != role {
+			t.Errorf("output line %q role = %v, want %v", line.text, line.role, role)
 		}
-		want[text] = true
+		found[text] = true
 	}
-	for text, found := range want {
-		if !found {
+	for text := range want {
+		if !found[text] {
 			t.Errorf("expanded tool missing %q", text)
 		}
 	}
@@ -2128,13 +2271,16 @@ func TestExpandedToolHeaderStaysOnOneRowWhileBodyWraps(t *testing.T) {
 	if headerIndex < 0 {
 		t.Fatal("expanded tool header not found")
 	}
+	if strings.Contains(detail.lines[headerIndex].text, "inspect the fictional ridge") {
+		t.Fatalf("expanded tool header duplicated input before truncation: %q", detail.lines[headerIndex].text)
+	}
 	headerStart := detail.renderedStarts[headerIndex]
 	headerEnd := len(detail.rendered)
 	if headerIndex+1 < len(detail.renderedStarts) {
 		headerEnd = detail.renderedStarts[headerIndex+1]
 	}
-	if rows := detail.rendered[headerStart:headerEnd]; len(rows) != 1 || !rows[0].first || !strings.Contains(rows[0].text, "…") || ansi.StringWidth(rows[0].text) != detail.viewport.Width {
-		t.Fatalf("tool header rows = %#v, want one first truncated viewport-width row", rows)
+	if rows := detail.rendered[headerStart:headerEnd]; len(rows) != 1 || !rows[0].first || !strings.Contains(rows[0].text, "update_plan") || strings.Contains(rows[0].text, input) || ansi.StringWidth(rows[0].text) != detail.viewport.Width {
+		t.Fatalf("tool header rows = %#v, want one first viewport-width row without duplicated input", rows)
 	}
 
 	for _, body := range []string{input, output} {
@@ -2157,6 +2303,48 @@ func TestExpandedToolHeaderStaysOnOneRowWhileBodyWraps(t *testing.T) {
 	}
 }
 
+func TestToolHeaderPreviewReflectsVisibleInputBody(t *testing.T) {
+	execEvent := model.Event{
+		Kind: model.EventToolCall, ToolName: "exec_command", ToolInput: "check-route", ResultSummary: "exit 0", Duration: 1200 * time.Millisecond,
+		Detail: &model.ToolDetail{Input: "check-route", Output: "route clear"},
+	}
+	detail := &detailState{expanded: make(map[string]bool), defaultExpanded: true}
+
+	expanded := detail.toolEventLines(execEvent, 0, "exec")[0].text
+	if strings.Contains(expanded, "(check-route)") || !strings.Contains(expanded, glyphTool+" Bash → exit 0 · 1.2s") {
+		t.Errorf("expanded exec header = %q, want body input omitted and result metadata preserved", expanded)
+	}
+
+	detail.expanded["exec"] = false
+	collapsed := detail.toolEventLines(execEvent, 0, "exec")[0].text
+	if !strings.Contains(collapsed, glyphTool+" Bash(check-route) → exit 0 · 1.2s") {
+		t.Errorf("collapsed exec header = %q, want input preview", collapsed)
+	}
+
+	editEvent := model.Event{
+		Kind: model.EventToolCall, ToolName: "Edit", ToolInput: "/workspace/route.go (+1 -1)",
+		Detail: &model.ToolDetail{Input: "{\n  \"path\": \"/workspace/route.go\"\n}", Diff: "-old route\n+new route"},
+	}
+	expandedEdit := detail.toolEventLines(editEvent, 0, "edit")[0].text
+	if !strings.Contains(expandedEdit, glyphTool+" Edit(/workspace/route.go (+1 -1))") {
+		t.Errorf("expanded Edit header = %q, want non-echo preview preserved", expandedEdit)
+	}
+}
+
+func TestFileToolWithoutRenderedBodyIsNotExpandable(t *testing.T) {
+	event := model.Event{
+		Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/route.go",
+		Detail: &model.ToolDetail{Input: "{\n  \"path\": \"/workspace/route.go\"\n}"},
+	}
+	detail := &detailState{expanded: make(map[string]bool), defaultExpanded: true}
+
+	lines := detail.toolEventLines(event, 0, "read")
+
+	if len(lines) != 1 || lines[0].expandable || !strings.Contains(lines[0].text, glyphTool+" Read(/workspace/route.go)") {
+		t.Errorf("file tool without rendered body = %#v, want one non-expandable header with preview", lines)
+	}
+}
+
 func TestOnlyShellToolsDisplayAsBash(t *testing.T) {
 	for _, test := range []struct {
 		event model.Event
@@ -2166,32 +2354,34 @@ func TestOnlyShellToolsDisplayAsBash(t *testing.T) {
 		{event: model.Event{ToolName: "update_plan"}, want: glyphTool + " update_plan"},
 		{event: model.Event{ToolName: "exec", ToolInput: "unresolved wrapper"}, want: glyphTool + " exec(unresolved wrapper)"},
 	} {
-		if got := toolLine(test.event); got != test.want {
+		if got := toolLine(test.event, false); got != test.want {
 			t.Errorf("toolLine(%#v) = %q, want %q", test.event, got, test.want)
 		}
 	}
 }
 
-func TestToolExpansionShowsNonFileInputSection(t *testing.T) {
+func TestToolExpansionShowsReadableInputUnderSecondaryLabel(t *testing.T) {
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Find the route"},
 		{Kind: model.EventToolCall, ToolName: "Grep", ToolInput: "ridge", Detail: &model.ToolDetail{Input: "{\n  \"query\": \"ridge\"\n}"}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
 
-	want := map[string]bool{"input:": false, "{": false, `"query": "ridge"`: false, "}": false}
+	want := map[string]detailRole{"input:": detailSecondary, "{": detailRow, `"query": "ridge"`: detailRow, "}": detailRow}
+	found := make(map[string]bool, len(want))
 	for _, line := range detail.lines {
 		text := strings.TrimSpace(line.text)
-		if _, ok := want[text]; !ok {
+		role, ok := want[text]
+		if !ok {
 			continue
 		}
-		if line.role != detailSecondary {
-			t.Errorf("input line %q role = %v, want muted", line.text, line.role)
+		if line.role != role {
+			t.Errorf("input line %q role = %v, want %v", line.text, line.role, role)
 		}
-		want[text] = true
+		found[text] = true
 	}
-	for text, found := range want {
-		if !found {
+	for text := range want {
+		if !found[text] {
 			t.Errorf("expanded tool missing %q", text)
 		}
 	}
@@ -2245,8 +2435,8 @@ func TestEnterDoesNotExpandToolInPlace(t *testing.T) {
 		{Kind: model.EventToolCall, ToolName: "Edit", ToolInput: "/workspace/route.go", Detail: &model.ToolDetail{Diff: "-old\n+new"}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
-	detail.moveFocus(1, false)
-	detail.moveFocus(1, false)
+	detail.moveFocus(1)
+	detail.moveFocus(1)
 	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 	toolKey := detail.focusables[detail.focus].key
 
@@ -2598,12 +2788,12 @@ func TestDetailScrollVisitsExpandedToolRows(t *testing.T) {
 	}}
 	detail := newDetailState(session, 80, 8, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
-	detail.moveFocus(1, false)
-	detail.moveFocus(1, false)
+	detail.moveFocus(1)
+	detail.moveFocus(1)
 	if !strings.Contains(detail.focusables[detail.focus].key, "/event/0") {
 		t.Fatalf("first expanded focus = %#v, want thinking row", detail.focusables[detail.focus])
 	}
-	detail.moveFocus(1, false)
+	detail.moveFocus(1)
 	if !strings.Contains(detail.focusables[detail.focus].key, "/event/1") {
 		t.Fatalf("second expanded focus = %#v, want tool row", detail.focusables[detail.focus])
 	}
