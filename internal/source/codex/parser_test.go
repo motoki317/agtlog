@@ -28,7 +28,7 @@ func testParser() Parser {
 func tieredTestParser() Parser {
 	above := 2.0
 	return NewParser(cost.NewCalculator(cost.Table{
-		"gpt-5.6": {Input: 1, InputAbove272K: &above},
+		"gpt-5.6": {Input: 1, Output: 3, InputAbove272K: &above},
 	}), "gpt-5")
 }
 
@@ -90,12 +90,27 @@ func TestParseUsesLastCumulativeTokenCount(t *testing.T) {
 	want := model.Usage{
 		Model:                  "gpt-5.6-sol",
 		InputTokens:            250,
-		OutputTokens:           40,
+		OutputTokens:           30,
 		CacheReadTokens:        50,
 		InputIncludesCacheRead: true,
 	}
 	if len(session.Usage) != 1 || !reflect.DeepEqual(session.Usage[0], want) {
 		t.Fatalf("Parse().Usage = %#v, want %#v", session.Usage, want)
+	}
+}
+
+func TestCodexUsageCountsReasoningWithinOutput(t *testing.T) {
+	got := codexUsage("gpt-5.6-sol", tokenUsage{
+		OutputTokens:          100,
+		ReasoningOutputTokens: 40,
+	})
+	want := model.Usage{
+		Model:                  "gpt-5.6-sol",
+		OutputTokens:           100,
+		InputIncludesCacheRead: true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("codexUsage() = %#v, want %#v", got, want)
 	}
 }
 
@@ -108,7 +123,7 @@ func TestParseSumsLastUsageWhenCumulativeTotalMissing(t *testing.T) {
 	want := model.Usage{
 		Model:                  "gpt-5.4",
 		InputTokens:            30,
-		OutputTokens:           10,
+		OutputTokens:           7,
 		CacheReadTokens:        5,
 		InputIncludesCacheRead: true,
 	}
@@ -268,13 +283,13 @@ func TestParseCalculatesEstimatedCodexCost(t *testing.T) {
 		t.Fatalf("Parse() error = %v", err)
 	}
 
-	want := 545.0
+	want := 515.0
 	if math.Abs(session.Cost.USD-want) > 1e-12 || !session.Cost.Estimated {
 		t.Fatalf("Parse().Cost = %#v, want USD %v estimated", session.Cost, want)
 	}
 	wantBreakdowns := map[string]model.CostBreakdown{
 		"gpt-5.6-sol": {
-			Input: model.CostBuckets{{RatePerToken: 2, Tokens: 200}}, Output: model.CostBuckets{{RatePerToken: 3, Tokens: 40}},
+			Input: model.CostBuckets{{RatePerToken: 2, Tokens: 200}}, Output: model.CostBuckets{{RatePerToken: 3, Tokens: 30}},
 			CacheRead: model.CostBuckets{{RatePerToken: 0.5, Tokens: 50}},
 		},
 	}
@@ -283,19 +298,23 @@ func TestParseCalculatesEstimatedCodexCost(t *testing.T) {
 	}
 }
 
-func TestParseLeavesCleanRootUsageAndCostUnchanged(t *testing.T) {
+func TestParseDoesNotAlterCleanRootAccounting(t *testing.T) {
 	session := parseTieredSession(t,
-		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
-		`{"timestamp":"2026-01-02T03:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000,"output_tokens":100,"reasoning_output_tokens":40},"last_token_usage":{"input_tokens":150000,"output_tokens":100,"reasoning_output_tokens":40}}}}`,
+		`{"timestamp":"2026-01-02T03:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000,"output_tokens":200,"reasoning_output_tokens":80},"last_token_usage":{"input_tokens":150000,"output_tokens":100,"reasoning_output_tokens":40}}}}`,
 	)
-	want := model.CostBuckets{{RatePerToken: 1, Tokens: 300_000}}
-	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, want) {
-		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want only base-rate bucket %#v", got, want)
+	wantInput := model.CostBuckets{{RatePerToken: 1, Tokens: 300_000}}
+	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, wantInput) {
+		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want only base-rate bucket %#v", got, wantInput)
 	}
-	if session.ModelCosts["gpt-5.6"] != 300_000 || session.Cost.USD != 300_000 {
-		t.Fatalf("Parse() costs = model %v, session %v; want 300000", session.ModelCosts["gpt-5.6"], session.Cost.USD)
+	wantOutput := model.CostBuckets{{RatePerToken: 3, Tokens: 200}}
+	if got := session.ModelCostBreakdowns["gpt-5.6"].Output; !reflect.DeepEqual(got, wantOutput) {
+		t.Fatalf("Parse().ModelCostBreakdowns output = %#v, want reasoning-inclusive output bucket %#v", got, wantOutput)
 	}
-	wantUsage := []model.Usage{{Model: "gpt-5.6", InputTokens: 300_000, InputIncludesCacheRead: true}}
+	if session.ModelCosts["gpt-5.6"] != 300_600 || session.Cost.USD != 300_600 {
+		t.Fatalf("Parse() costs = model %v, session %v; want 300600", session.ModelCosts["gpt-5.6"], session.Cost.USD)
+	}
+	wantUsage := []model.Usage{{Model: "gpt-5.6", InputTokens: 300_000, OutputTokens: 200, InputIncludesCacheRead: true}}
 	if !reflect.DeepEqual(session.Usage, wantUsage) {
 		t.Fatalf("Parse().Usage = %#v, want aggregate %#v", session.Usage, wantUsage)
 	}
@@ -554,8 +573,8 @@ func TestParsePricesMismatchedDeltasAsCumulativeFallback(t *testing.T) {
 	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want cumulative fallback %#v", got, want)
 	}
-	if session.ModelCosts["gpt-5.6"] != 328_000 || session.Cost.USD != 328_000 {
-		t.Fatalf("Parse() fallback costs = model %v, session %v; want 328000", session.ModelCosts["gpt-5.6"], session.Cost.USD)
+	if session.ModelCosts["gpt-5.6"] != 1_528_000 || session.Cost.USD != 1_528_000 {
+		t.Fatalf("Parse() fallback costs = model %v, session %v; want 1528000", session.ModelCosts["gpt-5.6"], session.Cost.USD)
 	}
 	wantUsage := []model.Usage{{Model: "gpt-5.6", InputTokens: 300_000, OutputTokens: 400_000, InputIncludesCacheRead: true}}
 	if !reflect.DeepEqual(session.Usage, wantUsage) {
@@ -716,7 +735,7 @@ func TestParseSkipsNegativeTokenCount(t *testing.T) {
 	}
 }
 
-func TestParseSkipsOverflowingOutputCombination(t *testing.T) {
+func TestParseDoesNotAddReasoningToMaximumOutput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout-overflow.jsonl")
 	content := strings.Join([]string{
 		`{"timestamp":"2026-01-02T03:04:05Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
@@ -730,8 +749,9 @@ func TestParseSkipsOverflowingOutputCombination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	if len(session.Usage) != 0 {
-		t.Fatalf("Parse().Usage = %#v, want overflowing record skipped", session.Usage)
+	want := []model.Usage{{Model: "gpt-5.4", OutputTokens: math.MaxInt64, InputIncludesCacheRead: true}}
+	if !reflect.DeepEqual(session.Usage, want) {
+		t.Fatalf("Parse().Usage = %#v, want reasoning included in maximum output %#v", session.Usage, want)
 	}
 }
 

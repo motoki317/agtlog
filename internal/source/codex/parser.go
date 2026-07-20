@@ -272,24 +272,12 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 			pricingRecords = append(pricingRecords, tokenUsageRecord{model: usageModel, usage: *usageByModel[usageModel]})
 		}
 	}
-	priceableModels := make(map[string]bool, len(usageOrder))
 	for _, usageModel := range usageOrder {
-		usage, ok := codexUsage(usageModel, *usageByModel[usageModel])
-		if !ok {
-			continue
-		}
-		session.Usage = append(session.Usage, usage)
-		priceableModels[usageModel] = true
+		session.Usage = append(session.Usage, codexUsage(usageModel, *usageByModel[usageModel]))
 	}
 	missingPricing := make(map[string]bool)
 	for _, record := range pricingRecords {
-		if !priceableModels[record.model] {
-			continue
-		}
-		usage, ok := codexUsage(record.model, record.usage)
-		if !ok {
-			continue
-		}
+		usage := codexUsage(record.model, record.usage)
 		calculated := p.calculator.CalculateCodex(usage, p.defaultPricingModel)
 		if session.ModelCosts == nil {
 			session.ModelCosts = make(map[string]float64)
@@ -317,17 +305,14 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	return session, nil
 }
 
-func codexUsage(usageModel string, selected tokenUsage) (model.Usage, bool) {
-	if selected.ReasoningOutputTokens > math.MaxInt64-selected.OutputTokens {
-		return model.Usage{}, false
-	}
+func codexUsage(usageModel string, selected tokenUsage) model.Usage {
 	return model.Usage{
 		Model:                  usageModel,
 		InputTokens:            selected.InputTokens,
-		OutputTokens:           selected.OutputTokens + selected.ReasoningOutputTokens,
+		OutputTokens:           selected.OutputTokens,
 		CacheReadTokens:        selected.CachedInputTokens,
 		InputIncludesCacheRead: true,
-	}, true
+	}
 }
 
 func titleFromUserMessage(message string) string {
