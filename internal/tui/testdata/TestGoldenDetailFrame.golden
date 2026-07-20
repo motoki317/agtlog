@@ -7,7 +7,7 @@
 │  ▸ you: Delegate the survey                                                  │
 │  ▾ ● claude: Survey delegated · 1 thinking · 1 tools · 1 subagents           │
 │    ◇ thinking: Select a safe path                                            │
-│    ▾ ⚙ Read(/workspace/starship/map.go) → map ready · 400ms                  │
+│    ▾ ⚙ Read(/workspace/starship/map.go) · 400ms                              │
 │      output:                                                                 │
 │      map ready                                                               │
 │    claude: Survey delegated                                                  │
@@ -15,4 +15,4 @@
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-space expand   E all   C all   ↵ inspect   w nowrap   esc back   q quit
+space expand   E expand all   C collapse all   ↵ inspect   esc back   q quit

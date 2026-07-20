@@ -188,7 +188,7 @@ func itemEventLines(event model.Event, agent model.AgentKind) []detailLine {
 		}
 	}
 	var lines []detailLine
-	lines = appendItemSection(lines, "input:", input, detailSecondary, agent)
+	lines = appendItemSection(lines, "input:", input, detailRow, agent)
 	if diff != "" {
 		for _, text := range strings.Split(diff, "\n") {
 			plain := detailPlainText(text)
@@ -201,7 +201,7 @@ func itemEventLines(event model.Event, agent model.AgentKind) []detailLine {
 			lines = append(lines, detailLine{text: plain, role: role, agent: agent})
 		}
 	}
-	return appendItemSection(lines, "output:", output, detailSecondary, agent)
+	return appendItemSection(lines, "output:", output, detailRow, agent)
 }
 
 func appendItemSection(lines []detailLine, label, text string, role detailRole, agent model.AgentKind) []detailLine {

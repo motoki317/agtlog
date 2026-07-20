@@ -847,8 +847,7 @@ func (d *detailState) eventForKey(key string) (model.Event, bool) {
 func (d *detailState) toolEventLines(event model.Event, indent int, key string) []detailLine {
 	padding := strings.Repeat(" ", indent)
 	expandable := detailHasBody(event)
-	hideInputPreview := d.isExpanded(key) && detailInputBody(event) != ""
-	summary := toolLine(event, hideInputPreview)
+	summary := toolLine(event, d.isExpanded(key))
 	text := padding + summary
 	if expandable {
 		marker := glyphCollapsed
@@ -924,13 +923,15 @@ func turnExpandable(events []model.Event) bool {
 	return false
 }
 
-func toolLine(event model.Event, hideInputPreview bool) string {
+func toolLine(event model.Event, expanded bool) string {
 	name := toolDisplayName(event.ToolName)
 	line := glyphTool + " " + name
-	if input := firstLine(event.ToolInput); input != "" && !hideInputPreview {
+	// An expanded row renders the input and output in the body below, so drop
+	// the header's inline preview and result summary to avoid showing them twice.
+	if input := firstLine(event.ToolInput); input != "" && !(expanded && detailInputBody(event) != "") {
 		line += "(" + input + ")"
 	}
-	if event.ResultSummary != "" {
+	if event.ResultSummary != "" && !(expanded && event.Detail != nil && event.Detail.Output != "") {
 		line += " → " + firstLine(event.ResultSummary)
 	}
 	if event.Duration > 0 {
@@ -1141,8 +1142,8 @@ func detailKeyText(width int, mono bool, tab detailTab, wrap bool) string {
 	if wrap {
 		wrapHint = "w nowrap"
 	}
-	expandAllHint := expandAllKey + " all"
-	collapseAllHint := collapseAllKey + " all"
+	expandAllHint := expandAllKey + " expand all"
+	collapseAllHint := collapseAllKey + " collapse all"
 	hints := []string{"j/k scroll"}
 	if tab == tabTimeline {
 		hints = append(hints, "space expand", expandAllHint, collapseAllHint, enterHint, "tab switch", wrapHint)

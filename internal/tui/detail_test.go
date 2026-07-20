@@ -916,8 +916,8 @@ func TestColoredDetailFillsWideTerminalAndBoundsLines(t *testing.T) {
 func TestDetailKeyBarKeepsQuitVisibleAtEightyColumns(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "lunar"}, 80, 12, newStyles())
 	keyBar := strings.Split(ansi.Strip(detail.view()), "\n")[11]
-	if !strings.Contains(keyBar, "space expand") || !strings.Contains(keyBar, "E all") || !strings.Contains(keyBar, "C all") || !strings.Contains(keyBar, "↵ inspect") || !strings.Contains(keyBar, "w nowrap") || !strings.Contains(keyBar, "q quit") || strings.Contains(keyBar, "…") {
-		t.Fatalf("80-column detail key bar = %q, want row and bulk expansion, inspect, nowrap, and quit hints without truncation", keyBar)
+	if !strings.Contains(keyBar, "space expand") || !strings.Contains(keyBar, "E expand all") || !strings.Contains(keyBar, "C collapse all") || !strings.Contains(keyBar, "↵ inspect") || !strings.Contains(keyBar, "q quit") || strings.Contains(keyBar, "…") {
+		t.Fatalf("80-column detail key bar = %q, want row and bulk expansion, inspect, and quit hints without truncation", keyBar)
 	}
 }
 
@@ -983,12 +983,12 @@ func TestDetailKeyBarsAdvertiseOnlyLiveContextualBindings(t *testing.T) {
 			}
 		}
 		if tab == tabTimeline {
-			for _, want := range []string{"E all", "C all"} {
+			for _, want := range []string{"E expand all", "C collapse all"} {
 				if !strings.Contains(keyBar, want) {
 					t.Errorf("Timeline key bar missing %q: %q", want, keyBar)
 				}
 			}
-		} else if strings.Contains(keyBar, "E all") || strings.Contains(keyBar, "C all") {
+		} else if strings.Contains(keyBar, "E expand all") || strings.Contains(keyBar, "C collapse all") {
 			t.Errorf("Subagents key bar advertised Timeline-only bulk action: %q", keyBar)
 		}
 	}
@@ -2311,8 +2311,8 @@ func TestToolHeaderPreviewReflectsVisibleInputBody(t *testing.T) {
 	detail := &detailState{expanded: make(map[string]bool), defaultExpanded: true}
 
 	expanded := detail.toolEventLines(execEvent, 0, "exec")[0].text
-	if strings.Contains(expanded, "(check-route)") || !strings.Contains(expanded, glyphTool+" Bash → exit 0 · 1.2s") {
-		t.Errorf("expanded exec header = %q, want body input omitted and result metadata preserved", expanded)
+	if strings.Contains(expanded, "(check-route)") || strings.Contains(expanded, "→ exit 0") || !strings.Contains(expanded, glyphTool+" Bash · 1.2s") {
+		t.Errorf("expanded exec header = %q, want input preview and result summary omitted when body shown", expanded)
 	}
 
 	detail.expanded["exec"] = false
@@ -2548,6 +2548,26 @@ func TestItemToolLinesShowInputAndDiffBeforeOutput(t *testing.T) {
 	if indexes["input:"] < 0 || indexes["+build target"] < 0 || indexes["output:"] < 0 ||
 		indexes["input:"] >= indexes["output:"] || indexes["+build target"] >= indexes["output:"] {
 		t.Fatalf("section indexes = %#v, want input and diff before output", indexes)
+	}
+}
+
+func TestItemToolBodyRendersReadableContent(t *testing.T) {
+	lines := itemEventLines(model.Event{
+		Kind: model.EventToolCall, ToolName: "exec", ToolInput: "make build",
+		Detail: &model.ToolDetail{Input: "make build", Output: "build ready"},
+	}, model.AgentCodex)
+	roles := make(map[string]detailRole, len(lines))
+	for _, line := range lines {
+		roles[line.text] = line.role
+	}
+	// Labels stay dim chrome; the command and its output must render readable, not muted.
+	for text, want := range map[string]detailRole{
+		"input:": detailSecondary, "make build": detailRow,
+		"output:": detailSecondary, "build ready": detailRow,
+	} {
+		if roles[text] != want {
+			t.Errorf("item body %q role = %v, want %v", text, roles[text], want)
+		}
 	}
 }
 
