@@ -538,8 +538,9 @@ func sessionInfoLines(session *model.Session) []detailLine {
 	lines := []detailLine{
 		infoDetailLine("Cost", detailHeader),
 		infoDetailLine(totalLine, detailRow),
+		infoDetailLine("tokens: "+formatTokenFlow(sessionFlowUsage(session)), detailRow),
 		infoDetailLine("", detailRow),
-		infoDetailLine("How this is computed", detailHeader),
+		infoDetailLine("Own model costs · "+formatCost(session.Cost), detailHeader),
 	}
 	for _, line := range ownModelCostLines(session) {
 		lines = append(lines, infoDetailLine(line, detailRow))
@@ -565,7 +566,6 @@ func infoDetailLine(text string, role detailRole) detailLine {
 
 func ownModelCostLines(session *model.Session) []string {
 	byModel := make(map[string]model.Usage)
-	inputByModel := make(map[string]int64)
 	seen := make(map[string]bool)
 	var order []string
 	for _, usage := range session.Usage {
@@ -574,21 +574,32 @@ func ownModelCostLines(session *model.Session) []string {
 			order = append(order, name)
 			seen[name] = true
 		}
-		combined := byModel[name].Add(usage)
-		combined.Model = name
-		byModel[name] = combined
 		inputTokens := usage.InputTokens
 		if usage.InputIncludesCacheRead {
 			inputTokens = max(0, inputTokens-usage.CacheReadTokens)
 		}
-		inputTotal := model.Usage{InputTokens: inputByModel[name]}.Add(model.Usage{InputTokens: inputTokens})
-		inputByModel[name] = inputTotal.InputTokens
+		byModel[name] = byModel[name].Add(model.Usage{
+			InputTokens:           inputTokens,
+			OutputTokens:          usage.OutputTokens,
+			CacheCreation5mTokens: usage.CacheCreation5mTokens,
+			CacheCreation1hTokens: usage.CacheCreation1hTokens,
+			CacheReadTokens:       usage.CacheReadTokens,
+		})
 	}
-	var extra []string
+	extraModels := make(map[string]bool)
 	for name := range session.ModelCosts {
 		if !seen[name] {
-			extra = append(extra, name)
+			extraModels[name] = true
 		}
+	}
+	for name := range session.ModelCostBreakdowns {
+		if !seen[name] {
+			extraModels[name] = true
+		}
+	}
+	extra := make([]string, 0, len(extraModels))
+	for name := range extraModels {
+		extra = append(extra, name)
 	}
 	sort.Strings(extra)
 	order = append(order, extra...)
@@ -599,34 +610,59 @@ func ownModelCostLines(session *model.Session) []string {
 	for _, name := range session.Cost.MissingPricingModels {
 		missing[name] = true
 	}
-	lines := make([]string, 0, len(order))
+	lines := make([]string, 0, len(order)*6)
 	for _, name := range order {
 		usage := byModel[name]
-		displayedUsage := model.Usage{
-			InputTokens:           inputByModel[name],
-			OutputTokens:          usage.OutputTokens,
+		breakdown, priced := session.ModelCostBreakdowns[name]
+		priced = priced && !missing[name] && validCostBreakdown(breakdown)
+		header := displayModelName(name)
+		if missing[name] {
+			header += "!"
+		}
+		if session.Cost.Estimated {
+			header += " (est.)"
+		}
+		lines = append(lines, header)
+		cacheWrite := model.Usage{
 			CacheCreation5mTokens: usage.CacheCreation5mTokens,
 			CacheCreation1hTokens: usage.CacheCreation1hTokens,
-			CacheReadTokens:       usage.CacheReadTokens,
+		}.TotalTokens()
+		groups := []struct {
+			label  string
+			tokens int64
+			usd    float64
+		}{
+			{label: "input", tokens: usage.InputTokens, usd: breakdown.Input},
+			{label: "cache write", tokens: cacheWrite, usd: breakdown.CacheWrite},
+			{label: "cache read", tokens: usage.CacheReadTokens, usd: breakdown.CacheRead},
+			{label: "output", tokens: usage.OutputTokens, usd: breakdown.Output},
 		}
-		cacheUsage := displayedUsage
-		cacheUsage.InputTokens = 0
-		cacheUsage.OutputTokens = 0
-		cacheTokens := cacheUsage.TotalTokens()
-		tokens := displayedUsage.TotalTokens()
-		usd := session.ModelCosts[name]
-		rate := "rate unavailable"
-		if tokens > 0 && !missing[name] && !math.IsNaN(usd) && !math.IsInf(usd, 0) && usd >= 0 {
-			rate = "effective " + formatUnitRate(usd/float64(tokens))
+		for _, group := range groups {
+			if group.tokens <= 0 {
+				continue
+			}
+			if !priced {
+				lines = append(lines, fmt.Sprintf("  %-12s %s · price unavailable", group.label, humanTokens(group.tokens)))
+				continue
+			}
+			groupCost := model.Cost{USD: group.usd, Estimated: session.Cost.Estimated}
+			lines = append(lines, fmt.Sprintf("  %-12s %s × %s = %s",
+				group.label, humanTokens(group.tokens), formatMillionRate(group.usd/float64(group.tokens)), formatCost(groupCost)))
 		}
-		modelCost := model.Cost{USD: usd, Estimated: session.Cost.Estimated}
-		if missing[name] {
-			modelCost.MissingPricingModels = []string{name}
+		if priced {
+			lines = append(lines, "  subtotal = "+formatCost(model.Cost{USD: breakdown.Total(), Estimated: session.Cost.Estimated}))
 		}
-		lines = append(lines, fmt.Sprintf("%s: input %s + output %s + cache %s = %s × %s → %s",
-			displayModelName(name), humanTokens(displayedUsage.InputTokens), humanTokens(displayedUsage.OutputTokens), humanTokens(cacheTokens), humanTokens(tokens), rate, formatCost(modelCost)))
 	}
 	return lines
+}
+
+func validCostBreakdown(breakdown model.CostBreakdown) bool {
+	for _, value := range []float64{breakdown.Input, breakdown.Output, breakdown.CacheWrite, breakdown.CacheRead} {
+		if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+			return false
+		}
+	}
+	return true
 }
 
 func displayModelName(name string) string {
@@ -636,17 +672,17 @@ func displayModelName(name string) string {
 	return "unknown"
 }
 
-func formatUnitRate(rate float64) string {
-	text := strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.8f", rate), "0"), ".")
+func formatMillionRate(rate float64) string {
+	text := strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.8f", rate*1_000_000), "0"), ".")
 	if text == "" {
 		text = "0"
 	}
-	return "$" + text + "/token"
+	return "$" + text + "/Mtok"
 }
 
 func sessionCostTree(session *model.Session) []string {
 	total := session.TotalCost()
-	lines := []string{fmt.Sprintf("total = own + Σ subs · %s tokens / %s", humanTokens(session.TotalUsage().TotalTokens()), formatCost(total))}
+	lines := []string{fmt.Sprintf("total = own + Σ subs · %s / %s", formatTokenFlow(sessionFlowUsage(session)), formatCost(total))}
 	return appendSessionCostChildren(lines, session, "")
 }
 
@@ -659,7 +695,7 @@ func appendSessionCostChildren(lines []string, session *model.Session, prefix st
 			connector, childPrefix = "└─ ", prefix+"   "
 		}
 		if index == 0 {
-			lines = append(lines, fmt.Sprintf("%s%sown · %s tokens / %s", prefix, connector, humanTokens(ownSessionUsage(session).TotalTokens()), formatCost(session.Cost)))
+			lines = append(lines, fmt.Sprintf("%s%sown · %s / %s", prefix, connector, formatTokenFlow(ownSessionFlowUsage(session)), formatCost(session.Cost)))
 			continue
 		}
 		child := session.Subagents[index-1]
@@ -670,18 +706,44 @@ func appendSessionCostChildren(lines []string, session *model.Session, prefix st
 		if label == "" {
 			label = string(child.Agent)
 		}
-		lines = append(lines, fmt.Sprintf("%s%ssubagent %s · %s tokens / %s", prefix, connector, label, humanTokens(child.TotalUsage().TotalTokens()), formatCost(child.TotalCost())))
+		lines = append(lines, fmt.Sprintf("%s%ssubagent %s · %s / %s", prefix, connector, label, formatTokenFlow(sessionFlowUsage(child)), formatCost(child.TotalCost())))
 		lines = appendSessionCostChildren(lines, child, childPrefix)
 	}
 	return lines
 }
 
-func ownSessionUsage(session *model.Session) model.Usage {
+func ownSessionFlowUsage(session *model.Session) model.Usage {
 	var own model.Usage
 	for _, usage := range session.Usage {
-		own = own.Add(usage)
+		own = own.Add(normalizeFlowUsage(usage))
 	}
 	return own
+}
+
+func sessionFlowUsage(session *model.Session) model.Usage {
+	total := ownSessionFlowUsage(session)
+	for _, child := range session.Subagents {
+		total = total.Add(sessionFlowUsage(child))
+	}
+	return total
+}
+
+func normalizeFlowUsage(usage model.Usage) model.Usage {
+	if usage.InputIncludesCacheRead {
+		usage.InputTokens = max(0, usage.InputTokens-usage.CacheReadTokens)
+		usage.InputIncludesCacheRead = false
+	}
+	return usage
+}
+
+func formatTokenFlow(usage model.Usage) string {
+	usage = normalizeFlowUsage(usage)
+	cacheWrite := model.Usage{
+		CacheCreation5mTokens: usage.CacheCreation5mTokens,
+		CacheCreation1hTokens: usage.CacheCreation1hTokens,
+	}.TotalTokens()
+	return fmt.Sprintf("↑%s/%s/%s ↓%s",
+		humanTokens(usage.CacheReadTokens), humanTokens(cacheWrite), humanTokens(usage.InputTokens), humanTokens(usage.OutputTokens))
 }
 
 func (d *detailState) rebuildSubagents() {
@@ -865,7 +927,11 @@ func (d *detailState) rebuildRendered() {
 		bodyWidth := max(0, d.viewport.Width-markerWidth-gutterWidth)
 		rows := []string{line.text}
 		if d.wrap && !line.nowrap && bodyWidth > 0 && ansi.StringWidth(line.text) > bodyWidth {
-			rows = strings.Split(ansi.Hardwrap(line.text, bodyWidth, true), "\n")
+			if d.tab == tabInfo {
+				rows = wordWrapRows(line.text, bodyWidth)
+			} else {
+				rows = strings.Split(ansi.Hardwrap(line.text, bodyWidth, true), "\n")
+			}
 		}
 		for rowIndex, row := range rows {
 			first := rowIndex == 0
@@ -888,6 +954,18 @@ func (d *detailState) rebuildRendered() {
 	} else if selectedRow >= d.viewport.YOffset+d.viewport.Height {
 		d.viewport.SetYOffset(selectedRow - d.viewport.Height + 1)
 	}
+}
+
+func wordWrapRows(value string, width int) []string {
+	var rows []string
+	for _, row := range strings.Split(ansi.Wordwrap(value, width, ""), "\n") {
+		if ansi.StringWidth(row) <= width {
+			rows = append(rows, row)
+			continue
+		}
+		rows = append(rows, strings.Split(ansi.Hardwrap(row, width, true), "\n")...)
+	}
+	return rows
 }
 
 func (d *detailState) rebuildPreservingViewport() {

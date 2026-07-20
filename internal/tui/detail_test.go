@@ -448,6 +448,51 @@ func TestTabSwitchesDetailToSubagents(t *testing.T) {
 	}
 }
 
+func TestFormatTokenFlowKeepsTypeOrderAndFreshInput(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage model.Usage
+		want  string
+	}{
+		{
+			name:  "separate Claude cache read",
+			usage: model.Usage{InputTokens: 3_000, OutputTokens: 40, CacheCreation5mTokens: 500, CacheCreation1hTokens: 200, CacheReadTokens: 8_000},
+			want:  "↑8000/700/3000 ↓40",
+		},
+		{
+			name:  "inclusive Codex cache read",
+			usage: model.Usage{InputTokens: 3_000, OutputTokens: 40, CacheReadTokens: 2_000, InputIncludesCacheRead: true},
+			want:  "↑2000/0/1000 ↓40",
+		},
+		{name: "zero groups", want: "↑0/0/0 ↓0"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := formatTokenFlow(test.usage); got != test.want {
+				t.Fatalf("formatTokenFlow() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestFormatMillionRateUsesReadableTokenPricing(t *testing.T) {
+	tests := []struct {
+		rate float64
+		want string
+	}{
+		{rate: 0.000005, want: "$5/Mtok"},
+		{rate: 0.0000005, want: "$0.5/Mtok"},
+		{rate: 0.00000625, want: "$6.25/Mtok"},
+		{rate: 0, want: "$0/Mtok"},
+	}
+	for _, test := range tests {
+		if got := formatMillionRate(test.rate); got != test.want {
+			t.Errorf("formatMillionRate(%v) = %q, want %q", test.rate, got, test.want)
+		}
+	}
+}
+
 func TestShiftTabSwitchesDetailBackToTimeline(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "route", Agent: model.AgentClaude}, 80, 12, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
@@ -461,13 +506,15 @@ func TestShiftTabSwitchesDetailBackToTimeline(t *testing.T) {
 func TestThirdDetailTabExplainsCostAndRecursiveTree(t *testing.T) {
 	child := &model.Session{
 		ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge",
-		Usage: []model.Usage{{Model: "model-b", InputTokens: 40, OutputTokens: 10}}, ModelCosts: map[string]float64{"model-b": 0.05}, Cost: model.Cost{USD: 0.05},
+		Usage: []model.Usage{{Model: "model-b", InputTokens: 40, OutputTokens: 10}}, ModelCosts: map[string]float64{"model-b": 0.05},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"model-b": {Input: 0.04, Output: 0.01}}, Cost: model.Cost{USD: 0.05},
 	}
 	root := &model.Session{
 		ID: "route", Agent: model.AgentClaude, Title: "Plan route",
-		Usage: []model.Usage{{Model: "model-a", InputTokens: 100, OutputTokens: 20, CacheReadTokens: 10}}, ModelCosts: map[string]float64{"model-a": 0.13}, Cost: model.Cost{USD: 0.13}, Subagents: []*model.Session{child},
+		Usage: []model.Usage{{Model: "model-a", InputTokens: 100, OutputTokens: 20, CacheReadTokens: 10}}, ModelCosts: map[string]float64{"model-a": 0.13},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"model-a": {Input: 0.10, Output: 0.02, CacheRead: 0.01}}, Cost: model.Cost{USD: 0.13}, Subagents: []*model.Session{child},
 	}
-	detail := newDetailState(root, 100, 28, newStyles())
+	detail := newDetailState(root, 100, 30, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 
@@ -475,33 +522,64 @@ func TestThirdDetailTabExplainsCostAndRecursiveTree(t *testing.T) {
 	for _, want := range []string{
 		"Timeline  Subagents (1)  [Info]",
 		"total: $0.18",
-		"How this is computed",
-		"model-a: input 100 + output 20 + cache 10 = 130 × effective $0.001/token → $0.13",
+		"tokens: ↑10/0/140 ↓30",
+		"Own model costs · $0.13",
+		"model-a",
+		"input        100 × $1000/Mtok = $0.10",
+		"cache read   10 × $1000/Mtok = $0.01",
+		"output       20 × $1000/Mtok = $0.02",
+		"subtotal = $0.13",
 		"Codex: always estimated from the default pricing model. Claude: logged or priced cost.",
 		"own: this session's own turns",
 		"subagents: delegated child sessions",
-		"total = own + Σ subs · 180 tokens / $0.18",
-		"├─ own · 130 tokens / $0.13",
-		"└─ subagent Scout ridge · 50 tokens / $0.05",
-		"└─ own · 50 tokens / $0.05",
+		"total = own + Σ subs · ↑10/0/140 ↓30 / $0.18",
+		"├─ own · ↑10/0/100 ↓20 / $0.13",
+		"└─ subagent Scout ridge · ↑0/0/40 ↓10 / $0.05",
+		"└─ own · ↑0/0/40 ↓10 / $0.05",
 	} {
 		if !strings.Contains(view, want) {
 			t.Errorf("Info tab missing %q:\n%s", want, view)
 		}
+	}
+	if strings.Contains(view, "effective") || strings.Contains(view, "/token") {
+		t.Fatalf("Info model math retained a blended per-token rate:\n%s", view)
 	}
 	if detail.selectedLine != -1 || len(detail.focusables) != 0 {
 		t.Fatalf("Info tab selection=%d focusables=%d, want plain unfocused panel", detail.selectedLine, len(detail.focusables))
 	}
 }
 
+func TestInfoTokenFlowNormalizesInclusiveInputBeforeSessionAggregation(t *testing.T) {
+	child := &model.Session{Usage: []model.Usage{{
+		InputTokens: 80, OutputTokens: 3, CacheReadTokens: 50, InputIncludesCacheRead: true,
+	}}}
+	root := &model.Session{
+		Usage:     []model.Usage{{InputTokens: 100, OutputTokens: 2, CacheReadTokens: 20}},
+		Subagents: []*model.Session{child},
+	}
+
+	lines := sessionCostTree(root)
+	text := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"total = own + Σ subs · ↑70/0/130 ↓5",
+		"├─ own · ↑20/0/100 ↓2",
+		"└─ subagent",
+		"↑50/0/30 ↓3",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("mixed-source cost tree missing %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestInfoTabWithoutSubagentsDegradesToTotalAndOwn(t *testing.T) {
-	session := &model.Session{ID: "route", Agent: model.AgentCodex, Usage: []model.Usage{{Model: "gpt-5", InputTokens: 80, OutputTokens: 20}}, ModelCosts: map[string]float64{"gpt-5": 0.2}, Cost: model.Cost{USD: 0.2, Estimated: true}}
+	session := &model.Session{ID: "route", Agent: model.AgentCodex, Usage: []model.Usage{{Model: "gpt-5", InputTokens: 80, OutputTokens: 20}}, ModelCosts: map[string]float64{"gpt-5": 0.2}, ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5": {Input: 0.1, Output: 0.1}}, Cost: model.Cost{USD: 0.2, Estimated: true}}
 	detail := newDetailState(session, 80, 28, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 
 	view := ansi.Strip(detail.view())
-	for _, want := range []string{"[Info]", "total = own + Σ subs · 100 tokens / ~$0.20", "└─ own · 100 tokens / ~$0.20"} {
+	for _, want := range []string{"[Info]", "total = own + Σ subs · ↑0/0/80 ↓20 / ~$0.20", "└─ own · ↑0/0/80 ↓20 / ~$0.20"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("leaf Info tab missing %q:\n%s", want, view)
 		}
@@ -518,8 +596,9 @@ func TestInfoModelMathHandlesInclusiveCacheAndMissingPricing(t *testing.T) {
 			{Model: "gpt-5", InputTokens: 100, OutputTokens: 10, CacheReadTokens: 20, InputIncludesCacheRead: true},
 			{Model: "unknown-model", InputTokens: 5},
 		},
-		ModelCosts: map[string]float64{"gpt-5": 0.11, "unknown-model": 0},
-		Cost:       model.Cost{USD: 0.11, Estimated: true, MissingPricingModels: []string{"unknown-model"}},
+		ModelCosts:          map[string]float64{"gpt-5": 0.11, "unknown-model": 0},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5": {Input: 0.08, Output: 0.01, CacheRead: 0.02}, "unknown-model": {}},
+		Cost:                model.Cost{USD: 0.11, Estimated: true, MissingPricingModels: []string{"unknown-model"}},
 	}
 	text := ""
 	for _, line := range sessionInfoLines(session) {
@@ -527,27 +606,107 @@ func TestInfoModelMathHandlesInclusiveCacheAndMissingPricing(t *testing.T) {
 	}
 	for _, want := range []string{
 		"total: ~$0.11! · missing pricing: unknown-model",
-		"gpt-5: input 80 + output 10 + cache 20 = 110 × effective $0.001/token → ~$0.11",
-		"unknown-model: input 5 + output 0 + cache 0 = 5 × rate unavailable → ~$0.00!",
+		"tokens: ↑20/0/85 ↓10",
+		"gpt-5 (est.)",
+		"input        80 × $1000/Mtok = ~$0.08",
+		"cache read   20 × $1000/Mtok = ~$0.02",
+		"output       10 × $1000/Mtok = ~$0.01",
+		"subtotal = ~$0.11",
+		"unknown-model! (est.)",
+		"input        5 · price unavailable",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("Info model math missing %q:\n%s", want, text)
 		}
 	}
+	inputAt := strings.Index(text, "input        80")
+	readAt := strings.Index(text, "cache read   20")
+	outputAt := strings.Index(text, "output       10")
+	if inputAt < 0 || readAt <= inputAt || outputAt <= readAt || strings.Contains(text, "effective") || strings.Contains(text, "/token") {
+		t.Fatalf("Info model groups are out of order or retained a blended rate:\n%s", text)
+	}
 }
 
-func TestInfoModelMathJoinsEmptyModelKeysBeforeDisplay(t *testing.T) {
+func TestInfoModelMathDoesNotTreatRecordedCostAsRatePricing(t *testing.T) {
 	session := &model.Session{
-		Usage:      []model.Usage{{InputTokens: 10}},
-		ModelCosts: map[string]float64{"": 0.02},
-		Cost:       model.Cost{USD: 0.02, MissingPricingModels: []string{""}},
+		Usage:      []model.Usage{{Model: "unknown-model", InputTokens: 10}},
+		ModelCosts: map[string]float64{"unknown-model": 1.23},
+		Cost:       model.Cost{USD: 1.23},
 	}
 	text := ""
 	for _, line := range sessionInfoLines(session) {
 		text += line.text + "\n"
 	}
-	if strings.Count(text, "unknown: input") != 1 || !strings.Contains(text, "unknown: input 10 + output 0 + cache 0 = 10 × rate unavailable → $0.02!") || !strings.Contains(text, "missing pricing: unknown") {
+	if !strings.Contains(text, "input        10 · price unavailable") || strings.Contains(text, "$0/Mtok") || strings.Contains(text, "subtotal =") {
+		t.Fatalf("recorded unknown cost was presented as rate pricing:\n%s", text)
+	}
+}
+
+func TestInfoModelMathJoinsEmptyModelKeysBeforeDisplay(t *testing.T) {
+	session := &model.Session{
+		Usage:               []model.Usage{{InputTokens: 10}},
+		ModelCosts:          map[string]float64{"": 0.02},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"": {}},
+		Cost:                model.Cost{USD: 0.02, MissingPricingModels: []string{""}},
+	}
+	text := ""
+	for _, line := range sessionInfoLines(session) {
+		text += line.text + "\n"
+	}
+	if strings.Count(text, "unknown!") != 1 || !strings.Contains(text, "input        10 · price unavailable") || !strings.Contains(text, "missing pricing: unknown") || strings.Contains(text, "subtotal = $0.02") {
 		t.Fatalf("empty model key was not joined before display:\n%s", text)
+	}
+}
+
+func TestInfoTokenFlowRendersWithinNarrowWidths(t *testing.T) {
+	session := &model.Session{
+		ID: "route", Agent: model.AgentCodex,
+		Usage:      []model.Usage{{Model: "gpt-5.6-sol", InputTokens: 48_000_000, OutputTokens: 350_000, CacheReadTokens: 42_000_000, InputIncludesCacheRead: true}},
+		ModelCosts: map[string]float64{"gpt-5.6-sol": 60}, ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5.6-sol": {Input: 30, Output: 10, CacheRead: 20}},
+		Cost: model.Cost{USD: 60, Estimated: true},
+	}
+	for _, width := range []int{40, 80} {
+		detail := newDetailState(session, width, 40, newStyles())
+		detail.tab = tabInfo
+		detail.rebuild()
+		view := ansi.Strip(detail.view())
+		if !strings.Contains(view, "↑42M/0/6.0M ↓350k") {
+			t.Errorf("%d-column Info view missing token flow:\n%s", width, view)
+		}
+		for lineNumber, line := range strings.Split(view, "\n") {
+			if got := ansi.StringWidth(line); got > width {
+				t.Errorf("%d-column Info line %d width = %d: %q", width, lineNumber+1, got, line)
+			}
+		}
+	}
+}
+
+func TestInfoWordWrappingKeepsRatesAndCurrencyAtomic(t *testing.T) {
+	const tokens = int64(1_256_500)
+	const usd = 1.24
+	session := &model.Session{
+		Agent:               model.AgentCodex,
+		Usage:               []model.Usage{{Model: "gpt-5.6-sol", InputTokens: tokens}},
+		ModelCosts:          map[string]float64{"gpt-5.6-sol": usd},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5.6-sol": {Input: usd}},
+		Cost:                model.Cost{USD: usd, Estimated: true},
+	}
+	rate := formatMillionRate(usd / float64(tokens))
+	currency := formatCost(session.Cost)
+
+	for _, width := range []int{40, 80} {
+		detail := newDetailState(session, width, 40, newStyles())
+		detail.tab = tabInfo
+		detail.rebuild()
+		for _, atom := range []string{rate, currency} {
+			found := false
+			for _, row := range detail.rendered {
+				found = found || strings.Contains(ansi.Strip(row.text), atom)
+			}
+			if !found {
+				t.Errorf("%d-column Info wrapping split %q:\n%s", width, atom, ansi.Strip(detail.view()))
+			}
+		}
 	}
 }
 
@@ -607,7 +766,7 @@ func TestInfoTabRoundTripPreservesTimelineFocus(t *testing.T) {
 }
 
 func TestInfoResizeAndWrapPreserveAValidViewport(t *testing.T) {
-	usage := make([]model.Usage, 30)
+	usage := make([]model.Usage, 15)
 	modelCosts := make(map[string]float64, len(usage))
 	for index := range usage {
 		name := fmt.Sprintf("very-long-model-name-%02d-with-extra-detail", index)
