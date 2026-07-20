@@ -49,8 +49,8 @@ func parseTieredSession(t *testing.T, events ...string) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v18:") {
-		t.Fatalf("CacheFingerprint() = %q, want v18 per-request costs", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v19:") {
+		t.Fatalf("CacheFingerprint() = %q, want v19 distinct-request costs", got)
 	}
 }
 
@@ -283,7 +283,7 @@ func TestParseCalculatesEstimatedCodexCost(t *testing.T) {
 	}
 }
 
-func TestParsePricesCleanPerTurnUsageBelowTierSeparately(t *testing.T) {
+func TestParseLeavesCleanRootUsageAndCostUnchanged(t *testing.T) {
 	session := parseTieredSession(t,
 		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
 		`{"timestamp":"2026-01-02T03:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":150000}}}}`,
@@ -298,6 +298,233 @@ func TestParsePricesCleanPerTurnUsageBelowTierSeparately(t *testing.T) {
 	wantUsage := []model.Usage{{Model: "gpt-5.6", InputTokens: 300_000, InputIncludesCacheRead: true}}
 	if !reflect.DeepEqual(session.Usage, wantUsage) {
 		t.Fatalf("Parse().Usage = %#v, want aggregate %#v", session.Usage, wantUsage)
+	}
+}
+
+func TestParseExcludesForkReplayFromUsageAndCost(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent","agent_path":"/root/scout"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":450000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:20Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":600000},"last_token_usage":{"input_tokens":150000}}}}`,
+	)
+
+	wantUsage := []model.Usage{{Model: "gpt-5.6", InputTokens: 300_000, InputIncludesCacheRead: true}}
+	if !reflect.DeepEqual(session.Usage, wantUsage) {
+		t.Fatalf("Parse().Usage = %#v, want fork-owned aggregate %#v", session.Usage, wantUsage)
+	}
+	wantBuckets := model.CostBuckets{{RatePerToken: 1, Tokens: 300_000}}
+	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, wantBuckets) {
+		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want fork-owned base tier %#v", got, wantBuckets)
+	}
+}
+
+func TestParseDeduplicatesNonAdvancingRootTokenCount(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-root","thread_source":"user"}}`,
+		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000,"cached_input_tokens":100000,"total_tokens":150000},"last_token_usage":{"input_tokens":150000,"cached_input_tokens":100000,"total_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000,"cached_input_tokens":100000,"total_tokens":150000},"last_token_usage":{"input_tokens":150000,"cached_input_tokens":100000,"total_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000,"cached_input_tokens":200000,"total_tokens":300000},"last_token_usage":{"input_tokens":150000,"cached_input_tokens":100000,"total_tokens":150000}}}}`,
+	)
+
+	wantInput := model.CostBuckets{{RatePerToken: 1, Tokens: 100_000}}
+	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, wantInput) {
+		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want distinct-request base tier %#v", got, wantInput)
+	}
+	wantCache := model.CostBuckets{{RatePerToken: 0.1, Tokens: 200_000}}
+	if got := session.ModelCostBreakdowns["gpt-5.6"].CacheRead; !reflect.DeepEqual(got, wantCache) {
+		t.Fatalf("Parse().ModelCostBreakdowns cache read = %#v, want deduplicated base tier %#v", got, wantCache)
+	}
+	if got := session.TotalUsage().TotalTokens(); got != 300_000 {
+		t.Fatalf("Parse().TotalUsage() = %d, want final cumulative 300000", got)
+	}
+}
+
+func TestParseExcludesForkReplayMessagesAndSubagents(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent","agent_path":"/root/scout"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.010Z","type":"event_msg","payload":{"type":"user_message","message":"Review the parent route"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.020Z","type":"event_msg","payload":{"type":"agent_message","message":"The parent route is ready"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.030Z","type":"event_msg","payload":{"type":"sub_agent_activity","agent_thread_id":"thread-inherited","agent_path":"/root/scout/inherited","kind":"started"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:05Z","type":"event_msg","payload":{"type":"user_message","message":"Review the child route"}}`,
+		`{"timestamp":"2026-01-02T03:05:06Z","type":"event_msg","payload":{"type":"agent_message","message":"The child route is ready"}}`,
+		`{"timestamp":"2026-01-02T03:05:07Z","type":"event_msg","payload":{"type":"sub_agent_activity","agent_thread_id":"thread-mapper","agent_path":"/root/scout/mapper","kind":"started"}}`,
+		`{"timestamp":"2026-01-02T03:05:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":450000},"last_token_usage":{"input_tokens":150000}}}}`,
+	)
+
+	if session.Messages != 2 {
+		t.Fatalf("Parse().Messages = %d, want only two fork-owned messages", session.Messages)
+	}
+	if len(session.Subagents) != 1 || session.Subagents[0].ID != "thread-mapper" {
+		t.Fatalf("Parse().Subagents = %#v, want only fork-owned mapper", session.Subagents)
+	}
+}
+
+func TestParseUsesLastReplayTotalAsBaseline(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100000},"last_token_usage":{"input_tokens":100000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.200Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200000},"last_token_usage":{"input_tokens":100000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.300Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":250000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":50000}}}}`,
+	)
+
+	if got := session.TotalUsage().TotalTokens(); got != 50_000 {
+		t.Fatalf("Parse().TotalUsage() = %d, want 50000 tokens after replay baseline", got)
+	}
+}
+
+func TestParseSubtractsReplayBaselineAcrossUsageFields(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100000,"cached_input_tokens":75000,"total_tokens":100000},"last_token_usage":{"input_tokens":100000,"cached_input_tokens":75000,"total_tokens":100000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200000,"cached_input_tokens":150000,"total_tokens":200000},"last_token_usage":{"input_tokens":100000,"cached_input_tokens":75000,"total_tokens":100000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000,"cached_input_tokens":225000,"total_tokens":300000},"last_token_usage":{"input_tokens":100000,"cached_input_tokens":75000,"total_tokens":100000}}}}`,
+	)
+
+	want := []model.Usage{{Model: "gpt-5.6", InputTokens: 100_000, CacheReadTokens: 75_000, InputIncludesCacheRead: true}}
+	if !reflect.DeepEqual(session.Usage, want) {
+		t.Fatalf("Parse().Usage = %#v, want field-wise child aggregate %#v", session.Usage, want)
+	}
+}
+
+func TestParseForkFallbackUsesBaselineSubtractedCumulative(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":450000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":600000},"last_token_usage":{"input_tokens":150000}}}}`,
+	)
+
+	wantUsage := []model.Usage{{Model: "gpt-5.6", InputTokens: 300_000, InputIncludesCacheRead: true}}
+	if !reflect.DeepEqual(session.Usage, wantUsage) {
+		t.Fatalf("Parse().Usage = %#v, want baseline-subtracted fallback %#v", session.Usage, wantUsage)
+	}
+	wantBuckets := model.CostBuckets{
+		{RatePerToken: 1, Tokens: 272_000},
+		{RatePerToken: 2, Tokens: 28_000, AboveThreshold: true},
+	}
+	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, wantBuckets) {
+		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want child-only fallback %#v", got, wantBuckets)
+	}
+}
+
+func TestParseStopsReplaySkipAtFirstLaterSecond(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100000},"last_token_usage":{"input_tokens":100000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200000},"last_token_usage":{"input_tokens":100000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":100000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.950Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":400000},"last_token_usage":{"input_tokens":100000}}}}`,
+	)
+
+	if got := session.TotalUsage().TotalTokens(); got != 200_000 {
+		t.Fatalf("Parse().TotalUsage() = %d, want both 100000-token post-boundary requests", got)
+	}
+}
+
+func TestParseDoesNotSkipWithoutCollapsedForkPrefix(t *testing.T) {
+	tests := []struct {
+		name   string
+		meta   string
+		second string
+	}{
+		{
+			name:   "fork timestamps differ",
+			meta:   `{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent"}}`,
+			second: "2026-01-02T03:05:01Z",
+		},
+		{
+			name:   "root timestamps match",
+			meta:   `{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-root","thread_source":"user","source":"exec"}}`,
+			second: "2026-01-02T03:05:00.900Z",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session := parseTieredSession(t,
+				test.meta,
+				`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
+				`{"timestamp":"`+test.second+`","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":150000}}}}`,
+			)
+
+			if got := session.TotalUsage().TotalTokens(); got != 300_000 {
+				t.Fatalf("Parse().TotalUsage() = %d, want all 300000 tokens", got)
+			}
+		})
+	}
+}
+
+func TestParseDetectsForkedFromIDWithObjectSource(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-scout","forked_from_id":"thread-root","source":{"subagent":{"thread_spawn":{"parent":"thread-root"}}}}}`,
+		`{"timestamp":"2026-01-02T03:04:05.100Z","type":"session_meta","payload":{"id":"thread-root","thread_source":"user","source":"exec"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":450000},"last_token_usage":{"input_tokens":150000}}}}`,
+	)
+
+	if got := session.TotalUsage().TotalTokens(); got != 150_000 {
+		t.Fatalf("Parse().TotalUsage() = %d, want 150000 fork-owned tokens", got)
+	}
+}
+
+func TestParseIgnoresForkMarkersAfterFirstSessionMetadata(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-root","thread_source":"user","source":"exec"}}`,
+		`{"timestamp":"2026-01-02T03:04:05.100Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent","forked_from_id":"thread-root"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":150000}}}}`,
+	)
+
+	if got := session.TotalUsage().TotalTokens(); got != 300_000 {
+		t.Fatalf("Parse().TotalUsage() = %d, want all 300000 root tokens", got)
+	}
+}
+
+func TestParseDoesNotSkipSingleForkTokenCount(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent"}}`,
+		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
+	)
+
+	if got := session.TotalUsage().TotalTokens(); got != 150_000 {
+		t.Fatalf("Parse().TotalUsage() = %d, want the only 150000-token request", got)
+	}
+}
+
+func TestParseDoesNotSkipPastFirstTokenCountWithoutTimestampSecond(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent"}}`,
+		`{"timestamp":"short","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100000},"last_token_usage":{"input_tokens":100000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200000},"last_token_usage":{"input_tokens":100000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":100000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":400000},"last_token_usage":{"input_tokens":100000}}}}`,
+	)
+
+	if got := session.TotalUsage().TotalTokens(); got != 400_000 {
+		t.Fatalf("Parse().TotalUsage() = %d, want all 400000 tokens when the first timestamp has no second", got)
+	}
+}
+
+func TestParseTracksCumulativeOnlyRecordForRelogDedup(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-root","thread_source":"user"}}`,
+		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000}}}}`,
+		`{"timestamp":"2026-01-02T03:05:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":150000}}}}`,
+	)
+
+	want := model.CostBuckets{
+		{RatePerToken: 1, Tokens: 272_000},
+		{RatePerToken: 2, Tokens: 28_000, AboveThreshold: true},
+	}
+	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want cumulative fallback %#v", got, want)
 	}
 }
 
@@ -505,6 +732,34 @@ func TestParseSkipsOverflowingOutputCombination(t *testing.T) {
 	}
 	if len(session.Usage) != 0 {
 		t.Fatalf("Parse().Usage = %#v, want overflowing record skipped", session.Usage)
+	}
+}
+
+func TestSubtractTokenUsageSubtractsEveryField(t *testing.T) {
+	total := tokenUsage{
+		InputTokens: 100, CachedInputTokens: 80, OutputTokens: 60, ReasoningOutputTokens: 40, TotalTokens: 160,
+	}
+	baseline := tokenUsage{
+		InputTokens: 10, CachedInputTokens: 20, OutputTokens: 30, ReasoningOutputTokens: 40, TotalTokens: 50,
+	}
+	want := tokenUsage{
+		InputTokens: 90, CachedInputTokens: 60, OutputTokens: 30, ReasoningOutputTokens: 0, TotalTokens: 110,
+	}
+
+	if !subtractTokenUsage(&total, &baseline) || total != want {
+		t.Fatalf("subtractTokenUsage() = %#v, want %#v", total, want)
+	}
+}
+
+func TestAdvanceTokenUsageMaxTracksTotalTokensIndependently(t *testing.T) {
+	runningMax := tokenUsage{InputTokens: 100, CachedInputTokens: 80, OutputTokens: 60, ReasoningOutputTokens: 40, TotalTokens: 150}
+	candidate := tokenUsage{InputTokens: 100, CachedInputTokens: 80, OutputTokens: 60, ReasoningOutputTokens: 40, TotalTokens: 160}
+
+	if !advanceTokenUsageMax(&runningMax, &candidate) || runningMax != candidate {
+		t.Fatalf("advanceTokenUsageMax() = %#v, want %#v", runningMax, candidate)
+	}
+	if advanceTokenUsageMax(&runningMax, &candidate) {
+		t.Fatal("advanceTokenUsageMax() reported an unchanged duplicate as advancing")
 	}
 }
 

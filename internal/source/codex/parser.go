@@ -3,6 +3,8 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -24,7 +26,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v18:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
+	return "codex-parser-v19:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
 }
 
 type tokenUsage struct {
@@ -52,6 +54,7 @@ type logRecord struct {
 		AgentPath      string `json:"agent_path"`
 		AgentThreadID  string `json:"agent_thread_id"`
 		ParentThreadID string `json:"parent_thread_id"`
+		ForkedFromID   string `json:"forked_from_id"`
 		Kind           string `json:"kind"`
 		ThreadSource   string `json:"thread_source"`
 		Git            struct {
@@ -77,6 +80,46 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	}
 	defer file.Close()
 
+	var isForked bool
+	var replayCandidates []string
+	replayCandidateInvalid := false
+	metaSeen := false
+	scanCtx, stopScan := context.WithCancel(context.Background())
+	scanComplete := false
+	err = jsonl.ForEachContext(scanCtx, file, func(line []byte) {
+		var record logRecord
+		if json.Unmarshal(line, &record) != nil {
+			return
+		}
+		if record.Type == "session_meta" && !metaSeen {
+			metaSeen = true
+			isForked = record.Payload.ThreadSource == "subagent" || record.Payload.ForkedFromID != ""
+		}
+		second, validSecond := codexTimestampSecond(record.Timestamp)
+		if len(replayCandidates) < 2 && record.Type == "event_msg" && record.Payload.Type == "token_count" &&
+			record.Payload.Info.Last != nil && validTokenUsage(record.Payload.Info.Last) {
+			replayCandidates = append(replayCandidates, strings.Clone(second))
+			replayCandidateInvalid = replayCandidateInvalid || !validSecond
+		}
+		if metaSeen && (!isForked || len(replayCandidates) == 2) {
+			scanComplete = true
+			stopScan()
+		}
+	})
+	stopScan()
+	if err != nil && !(scanComplete && errors.Is(err, context.Canceled)) {
+		return nil, err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	var replaySecond string
+	// Ceiling: spaced replay timestamps disable detection; the real-log oracle is
+	// the signal to revisit this without adding cross-file parent reads.
+	if isForked && !replayCandidateInvalid && len(replayCandidates) == 2 && replayCandidates[0] == replayCandidates[1] {
+		replaySecond = replayCandidates[0]
+	}
+
 	session := &model.Session{Agent: model.AgentCodex, Path: path, Cost: model.Cost{Estimated: true}}
 	var currentModel string
 	var lastTotal *tokenUsage
@@ -85,9 +128,12 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	usageByModel := make(map[string]*tokenUsage)
 	var usageOrder []string
 	var pricingRecords []tokenUsageRecord
+	var replayBaseline tokenUsage
+	var runningMax tokenUsage
+	replayActive := replaySecond != ""
 	hasLast := false
 	seenModels := make(map[string]bool)
-	metaSeen := false
+	metaSeen = false
 	err = jsonl.ForEach(file, func(line []byte) {
 		var envelope struct {
 			Timestamp string `json:"timestamp"`
@@ -115,6 +161,10 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 		if json.Unmarshal(line, &record) != nil {
 			return
 		}
+		second, validSecond := codexTimestampSecond(record.Timestamp)
+		inReplayPrefix := replayActive && validSecond && second == replaySecond
+		isTokenCount := record.Type == "event_msg" && record.Payload.Type == "token_count"
+		validTotal := isTokenCount && record.Payload.Info.Total != nil && validTokenUsage(record.Payload.Info.Total)
 		// Newer Codex embeds the parent's session_meta after the child's in subagent sidecars.
 		if record.Type == "session_meta" && !metaSeen {
 			metaSeen = true
@@ -140,7 +190,8 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 		// timeline shows. Ceiling: a subagent-heavy run undercounts, since work
 		// delegated to subagents surfaces in the timeline through the deduplicated
 		// bridge, not as event_msg turns here; the recursive size lives in TOKENS.
-		if record.Type == "event_msg" && (record.Payload.Type == "user_message" || record.Payload.Type == "agent_message") {
+		if record.Type == "event_msg" && !inReplayPrefix &&
+			(record.Payload.Type == "user_message" || record.Payload.Type == "agent_message") {
 			if session.Title == "" && record.Payload.Type == "user_message" {
 				var user userMessageRecord
 				if json.Unmarshal(line, &user) == nil {
@@ -149,18 +200,35 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 			}
 			session.Messages++
 		}
-		if record.Type == "event_msg" && record.Payload.Type == "sub_agent_activity" && record.Payload.Kind == "started" {
+		if record.Type == "event_msg" && !inReplayPrefix && record.Payload.Type == "sub_agent_activity" && record.Payload.Kind == "started" {
 			addSubagent(session, path, record.Payload.AgentPath, record.Payload.AgentThreadID, session.UpdatedAt)
 		}
-		if record.Type == "event_msg" && record.Payload.Type == "token_count" && record.Payload.Info.Total != nil {
-			if validTokenUsage(record.Payload.Info.Total) {
-				copy := *record.Payload.Info.Total
-				lastTotal = &copy
-				lastTotalModel = currentModel
+		if validTotal {
+			copy := *record.Payload.Info.Total
+			lastTotal = &copy
+			lastTotalModel = currentModel
+		}
+		if isTokenCount && replayActive {
+			if inReplayPrefix {
+				if validTotal {
+					replayBaseline = *record.Payload.Info.Total
+					runningMax = replayBaseline
+				}
+				return
+			}
+			if validSecond && second > replaySecond {
+				replayActive = false
 			}
 		}
-		if record.Type == "event_msg" && record.Payload.Type == "token_count" && record.Payload.Info.Last != nil {
+		cumulativeAdvanced := true
+		if validTotal {
+			cumulativeAdvanced = advanceTokenUsageMax(&runningMax, record.Payload.Info.Total)
+		}
+		if isTokenCount && record.Payload.Info.Last != nil {
 			if !validTokenUsage(record.Payload.Info.Last) {
+				return
+			}
+			if !cumulativeAdvanced {
 				return
 			}
 			usage := usageByModel[currentModel]
@@ -184,11 +252,18 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	if err != nil {
 		return nil, err
 	}
+	var ownTotal *tokenUsage
+	if lastTotal != nil {
+		candidate := *lastTotal
+		if subtractTokenUsage(&candidate, &replayBaseline) {
+			ownTotal = &candidate
+		}
+	}
 	// Per-turn pricing is safe only when Codex's cumulative total confirms that
 	// the Last records form a clean partition; every other path stays lumped.
-	cleanPartition := lastTotal != nil && hasLast && summedLast == *lastTotal
-	if lastTotal != nil && (!hasLast || summedLast != *lastTotal) {
-		usageByModel = map[string]*tokenUsage{lastTotalModel: lastTotal}
+	cleanPartition := ownTotal != nil && hasLast && summedLast == *ownTotal
+	if ownTotal != nil && (!hasLast || summedLast != *ownTotal) {
+		usageByModel = map[string]*tokenUsage{lastTotalModel: ownTotal}
 		usageOrder = []string{lastTotalModel}
 	}
 	if !cleanPartition {
@@ -427,6 +502,13 @@ func validTokenUsage(usage *tokenUsage) bool {
 		usage.ReasoningOutputTokens >= 0 && usage.TotalTokens >= 0 && usage.CachedInputTokens <= usage.InputTokens
 }
 
+func codexTimestampSecond(timestamp string) (string, bool) {
+	if len(timestamp) < 19 {
+		return "", false
+	}
+	return timestamp[:19], true
+}
+
 func addTokenUsage(total *tokenUsage, delta *tokenUsage) bool {
 	values := [][2]*int64{
 		{&total.InputTokens, &delta.InputTokens},
@@ -444,6 +526,45 @@ func addTokenUsage(total *tokenUsage, delta *tokenUsage) bool {
 		*pair[0] += *pair[1]
 	}
 	return true
+}
+
+func subtractTokenUsage(total *tokenUsage, baseline *tokenUsage) bool {
+	values := [][2]*int64{
+		{&total.InputTokens, &baseline.InputTokens},
+		{&total.CachedInputTokens, &baseline.CachedInputTokens},
+		{&total.OutputTokens, &baseline.OutputTokens},
+		{&total.ReasoningOutputTokens, &baseline.ReasoningOutputTokens},
+		{&total.TotalTokens, &baseline.TotalTokens},
+	}
+	for _, pair := range values {
+		if *pair[1] > *pair[0] {
+			return false
+		}
+	}
+	for _, pair := range values {
+		*pair[0] -= *pair[1]
+	}
+	return true
+}
+
+func advanceTokenUsageMax(runningMax *tokenUsage, candidate *tokenUsage) bool {
+	// Ceiling: post-revert records below an earlier maximum stay skipped, and the
+	// clean-partition guard leaves the final cumulative usage on lumped pricing.
+	values := [][2]*int64{
+		{&runningMax.InputTokens, &candidate.InputTokens},
+		{&runningMax.CachedInputTokens, &candidate.CachedInputTokens},
+		{&runningMax.OutputTokens, &candidate.OutputTokens},
+		{&runningMax.ReasoningOutputTokens, &candidate.ReasoningOutputTokens},
+		{&runningMax.TotalTokens, &candidate.TotalTokens},
+	}
+	advanced := false
+	for _, pair := range values {
+		if *pair[1] > *pair[0] {
+			*pair[0] = *pair[1]
+			advanced = true
+		}
+	}
+	return advanced
 }
 
 const (
