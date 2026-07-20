@@ -26,8 +26,8 @@ func testParser() Parser {
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v12:") {
-		t.Fatalf("CacheFingerprint() = %q, want v12 presentation schema", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v13:") {
+		t.Fatalf("CacheFingerprint() = %q, want v13 presentation schema", got)
 	}
 }
 
@@ -723,6 +723,30 @@ func TestLoadEventsResolvesOnlyOneExecutableNestedTool(t *testing.T) {
 	}
 	if mixed.ToolName != "exec" || mixed.ToolInput != "" || mixed.Detail == nil || !strings.Contains(mixed.Detail.Input, "tools.update_plan") || !strings.Contains(mixed.Detail.Input, "tools.exec_command") {
 		t.Errorf("mixed wrapper = %#v, want unresolved exec with no raw-JS preview and full detail", mixed)
+	}
+}
+
+func TestCodexExecToolRendersWrappedApplyPatch(t *testing.T) {
+	wantDiff := "*** Begin Patch\n*** Update File: /workspace/orbit/route.go\n@@\n-old ridge\n+new ridge\n*** End Patch"
+	for _, test := range []struct {
+		name  string
+		input string
+	}{
+		{name: "variable reference", input: `const patch = "*** Begin Patch\n*** Update File: /workspace/orbit/route.go\n@@\n-old ridge\n+new ridge\n*** End Patch"; text(await tools.apply_patch(patch));`},
+		{name: "inline argument", input: `text(await tools.apply_patch("*** Begin Patch\n*** Update File: /workspace/orbit/route.go\n@@\n-old ridge\n+new ridge\n*** End Patch"));`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			preview, detail := codexExecToolPresentation(test.input)
+			if preview != "+1 −1" {
+				t.Errorf("preview = %q, want +1 −1", preview)
+			}
+			if detail == nil || detail.Diff != wantDiff {
+				t.Errorf("Detail = %#v, want diff %q", detail, wantDiff)
+			}
+			if detail != nil && strings.Contains(detail.Input, "tools.apply_patch") {
+				t.Errorf("Detail.Input = %q, want the diff envelope, not the raw JS wrapper", detail.Input)
+			}
+		})
 	}
 }
 

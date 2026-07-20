@@ -485,6 +485,11 @@ func codexExecToolPresentation(input string) (string, *model.ToolDetail) {
 		return "", &model.ToolDetail{Input: model.BoundedDetailText(codexPrettyInput(input))}
 	}
 	name, _, wrapped := codexExecTool(input)
+	if wrapped && name == "apply_patch" {
+		if patch, ok := codexApplyPatchBody(input); ok {
+			return codexToolInput("apply_patch", patch), codexToolDetail("apply_patch", patch)
+		}
+	}
 	if wrapped && name != "exec_command" {
 		return "", &model.ToolDetail{Input: model.BoundedDetailText(codexPrettyInput(input))}
 	}
@@ -493,6 +498,30 @@ func codexExecToolPresentation(input string) (string, *model.ToolDetail) {
 		return strings.Join(strings.Fields(input), " "), &model.ToolDetail{Input: model.BoundedDetailText(codexPrettyInput(input))}
 	}
 	return strings.SplitN(command, "\n", 2)[0], &model.ToolDetail{Input: model.BoundedDetailText(command)}
+}
+
+// codexApplyPatchBegin marks the start of an apply_patch envelope.
+const codexApplyPatchBegin = "*** Begin Patch"
+
+// codexApplyPatchBody returns the decoded patch envelope handed to a wrapped
+// tools.apply_patch call. The wrapper assigns the patch to a JS string literal —
+// often a variable referenced by the call rather than an inline argument — so the
+// literal is located by its envelope marker instead of by the call's argument.
+func codexApplyPatchBody(input string) (string, bool) {
+	for index := 0; index < len(input); {
+		switch input[index] {
+		case '\'', '"', '`':
+			if decoded, _, valid := codexJSQuotedString(input, index); valid && strings.Contains(decoded, codexApplyPatchBegin) {
+				return decoded, true
+			}
+			if next := codexSkipJSQuoted(input, index); next > index {
+				index = next
+				continue
+			}
+		}
+		index++
+	}
+	return "", false
 }
 
 func codexExecCommand(input string) (string, bool) {
