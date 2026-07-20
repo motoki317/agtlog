@@ -145,6 +145,36 @@ func TestGoldenSubagentsFrame(t *testing.T) {
 	teatest.RequireEqualOutput(t, []byte(normalizeGolden(final.View())))
 }
 
+func TestGoldenInfoFrame(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	mapper := &model.Session{
+		ID: "mapper", Agent: model.AgentCodex, Title: "Map the cavern", Models: []string{"gpt-5.6-sol"},
+		Usage: []model.Usage{{Model: "gpt-5.6-sol", InputTokens: 8_000, OutputTokens: 2_000}}, ModelCosts: map[string]float64{"gpt-5.6-sol": 0.12}, Cost: model.Cost{USD: 0.12, Estimated: true},
+	}
+	scout := &model.Session{
+		ID: "scout", Agent: model.AgentClaude, Title: "Scout the ridge", Models: []string{"claude-opus-4-8"},
+		Usage: []model.Usage{{Model: "claude-opus-4-8", InputTokens: 40_000, OutputTokens: 5_000}}, ModelCosts: map[string]float64{"claude-opus-4-8": 0.32}, Cost: model.Cost{USD: 0.32}, Subagents: []*model.Session{mapper},
+	}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/starship/route.jsonl", CWD: "/workspace/starship", Project: "starship", Title: "Plan route",
+		Models: []string{"claude-opus-4-8"}, GitBranch: "orbit/alpha", StartedAt: goldenNow.Add(-20 * time.Minute), UpdatedAt: goldenNow,
+		Usage: []model.Usage{{Model: "claude-opus-4-8", InputTokens: 120_000, OutputTokens: 8_000}}, ModelCosts: map[string]float64{"claude-opus-4-8": 0.84}, Cost: model.Cost{USD: 0.84}, Subagents: []*model.Session{scout},
+	}
+	m := newModelWithClock([]*model.Session{root}, nil, func() time.Time { return goldenNow })
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 32))
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	for range 2 {
+		tm.Send(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "total = own") }, teatest.WithDuration(time.Second))
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second)).(Model)
+
+	teatest.RequireEqualOutput(t, []byte(normalizeGolden(final.View())))
+}
+
 func normalizeGolden(view string) string {
 	lines := strings.Split(ansi.Strip(view), "\n")
 	for index := range lines {

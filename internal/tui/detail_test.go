@@ -458,6 +458,185 @@ func TestShiftTabSwitchesDetailBackToTimeline(t *testing.T) {
 	}
 }
 
+func TestThirdDetailTabExplainsCostAndRecursiveTree(t *testing.T) {
+	child := &model.Session{
+		ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge",
+		Usage: []model.Usage{{Model: "model-b", InputTokens: 40, OutputTokens: 10}}, ModelCosts: map[string]float64{"model-b": 0.05}, Cost: model.Cost{USD: 0.05},
+	}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Title: "Plan route",
+		Usage: []model.Usage{{Model: "model-a", InputTokens: 100, OutputTokens: 20, CacheReadTokens: 10}}, ModelCosts: map[string]float64{"model-a": 0.13}, Cost: model.Cost{USD: 0.13}, Subagents: []*model.Session{child},
+	}
+	detail := newDetailState(root, 100, 28, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+
+	view := ansi.Strip(detail.view())
+	for _, want := range []string{
+		"Timeline  Subagents (1)  [Info]",
+		"total: $0.18",
+		"How this is computed",
+		"model-a: input 100 + output 20 + cache 10 = 130 × effective $0.001/token → $0.13",
+		"Codex: always estimated from the default pricing model. Claude: logged or priced cost.",
+		"own: this session's own turns",
+		"subagents: delegated child sessions",
+		"total = own + Σ subs · 180 tokens / $0.18",
+		"├─ own · 130 tokens / $0.13",
+		"└─ subagent Scout ridge · 50 tokens / $0.05",
+		"└─ own · 50 tokens / $0.05",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("Info tab missing %q:\n%s", want, view)
+		}
+	}
+	if detail.selectedLine != -1 || len(detail.focusables) != 0 {
+		t.Fatalf("Info tab selection=%d focusables=%d, want plain unfocused panel", detail.selectedLine, len(detail.focusables))
+	}
+}
+
+func TestInfoTabWithoutSubagentsDegradesToTotalAndOwn(t *testing.T) {
+	session := &model.Session{ID: "route", Agent: model.AgentCodex, Usage: []model.Usage{{Model: "gpt-5", InputTokens: 80, OutputTokens: 20}}, ModelCosts: map[string]float64{"gpt-5": 0.2}, Cost: model.Cost{USD: 0.2, Estimated: true}}
+	detail := newDetailState(session, 80, 28, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+
+	view := ansi.Strip(detail.view())
+	for _, want := range []string{"[Info]", "total = own + Σ subs · 100 tokens / ~$0.20", "└─ own · 100 tokens / ~$0.20"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("leaf Info tab missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "subagent ") {
+		t.Fatalf("leaf Info tree invented a subagent:\n%s", view)
+	}
+}
+
+func TestInfoModelMathHandlesInclusiveCacheAndMissingPricing(t *testing.T) {
+	session := &model.Session{
+		Agent: model.AgentCodex,
+		Usage: []model.Usage{
+			{Model: "gpt-5", InputTokens: 100, OutputTokens: 10, CacheReadTokens: 20, InputIncludesCacheRead: true},
+			{Model: "unknown-model", InputTokens: 5},
+		},
+		ModelCosts: map[string]float64{"gpt-5": 0.11, "unknown-model": 0},
+		Cost:       model.Cost{USD: 0.11, Estimated: true, MissingPricingModels: []string{"unknown-model"}},
+	}
+	text := ""
+	for _, line := range sessionInfoLines(session) {
+		text += line.text + "\n"
+	}
+	for _, want := range []string{
+		"total: ~$0.11! · missing pricing: unknown-model",
+		"gpt-5: input 80 + output 10 + cache 20 = 110 × effective $0.001/token → ~$0.11",
+		"unknown-model: input 5 + output 0 + cache 0 = 5 × rate unavailable → ~$0.00!",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("Info model math missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestInfoModelMathJoinsEmptyModelKeysBeforeDisplay(t *testing.T) {
+	session := &model.Session{
+		Usage:      []model.Usage{{InputTokens: 10}},
+		ModelCosts: map[string]float64{"": 0.02},
+		Cost:       model.Cost{USD: 0.02, MissingPricingModels: []string{""}},
+	}
+	text := ""
+	for _, line := range sessionInfoLines(session) {
+		text += line.text + "\n"
+	}
+	if strings.Count(text, "unknown: input") != 1 || !strings.Contains(text, "unknown: input 10 + output 0 + cache 0 = 10 × rate unavailable → $0.02!") || !strings.Contains(text, "missing pricing: unknown") {
+		t.Fatalf("empty model key was not joined before display:\n%s", text)
+	}
+}
+
+func TestInfoTabCyclesAndScrollsWithoutSelection(t *testing.T) {
+	usage := make([]model.Usage, 24)
+	modelCosts := make(map[string]float64, len(usage))
+	for index := range usage {
+		name := fmt.Sprintf("model-%02d", index)
+		usage[index] = model.Usage{Model: name, InputTokens: int64(index + 1)}
+		modelCosts[name] = float64(index+1) / 100
+	}
+	detail := newDetailState(&model.Session{ID: "route", Usage: usage, ModelCosts: modelCosts, Cost: model.Cost{USD: 3}}, 60, 12, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	if detail.viewport.YOffset != 1 || detail.selectedLine != -1 {
+		t.Fatalf("Info j state offset=%d selected=%d, want scroll without selection", detail.viewport.YOffset, detail.selectedLine)
+	}
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	if detail.tab != tabTimeline {
+		t.Fatalf("third tab cycle active=%v, want Timeline", detail.tab)
+	}
+	detail.update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if detail.tab != tabInfo {
+		t.Fatalf("reverse tab cycle active=%v, want Info", detail.tab)
+	}
+}
+
+func TestInfoTabRoundTripPreservesTimelineFocus(t *testing.T) {
+	session := &model.Session{ID: "route", Events: []model.Event{
+		{Kind: model.EventUser, Text: "Chart the route"},
+		{Kind: model.EventAssistantText, Text: "Cross the ridge"},
+		{Kind: model.EventUser, Text: "Check the pass"},
+	}}
+	detail := newDetailState(session, 80, 12, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}})
+	wantFocus := detail.focus
+	wantKey := detail.focusables[wantFocus].key
+	if wantFocus == 0 {
+		t.Fatal("focus fixture did not select a non-zero Timeline row")
+	}
+
+	detail.update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if detail.tab != tabInfo || detail.selectedLine != -1 {
+		t.Fatalf("reverse tab active=%v selected=%d, want unfocused Info", detail.tab, detail.selectedLine)
+	}
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	if detail.tab != tabTimeline || detail.focus != wantFocus || detail.focusables[detail.focus].key != wantKey {
+		t.Fatalf("Timeline round trip tab=%v focus=%d key=%q, want tab=%v focus=%d key=%q", detail.tab, detail.focus, detail.focusables[detail.focus].key, tabTimeline, wantFocus, wantKey)
+	}
+	for range 3 {
+		detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	if detail.tab != tabTimeline || detail.focus != wantFocus || detail.focusables[detail.focus].key != wantKey {
+		t.Fatalf("forward tab cycle tab=%v focus=%d key=%q, want tab=%v focus=%d key=%q", detail.tab, detail.focus, detail.focusables[detail.focus].key, tabTimeline, wantFocus, wantKey)
+	}
+}
+
+func TestInfoResizeAndWrapPreserveAValidViewport(t *testing.T) {
+	usage := make([]model.Usage, 30)
+	modelCosts := make(map[string]float64, len(usage))
+	for index := range usage {
+		name := fmt.Sprintf("very-long-model-name-%02d-with-extra-detail", index)
+		usage[index] = model.Usage{Model: name, InputTokens: int64(index + 1)}
+		modelCosts[name] = float64(index+1) / 100
+	}
+	detail := newDetailState(&model.Session{ID: "route", Usage: usage, ModelCosts: modelCosts, Cost: model.Cost{USD: 4.65}}, 40, 12, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	if detail.viewport.YOffset == 0 {
+		t.Fatal("Info fixture did not scroll at 40 columns")
+	}
+	detail.viewport.ScrollUp(5)
+	wantAnchor := detail.rendered[detail.viewport.YOffset].detailIndex
+
+	detail.setWrap(false)
+	maxOffset := max(0, len(detail.rendered)-detail.viewport.Height)
+	if detail.viewport.YOffset < 0 || detail.viewport.YOffset > maxOffset {
+		t.Fatalf("unwrapped Info offset=%d, want within 0..%d", detail.viewport.YOffset, maxOffset)
+	}
+	if got := detail.rendered[detail.viewport.YOffset].detailIndex; got != wantAnchor {
+		t.Fatalf("unwrapped Info top detail=%d, want preserved logical line %d", got, wantAnchor)
+	}
+	detail.resize(100, 80)
+	if detail.viewport.YOffset != 0 {
+		t.Fatalf("expanded Info offset=%d, want top after all content fits", detail.viewport.YOffset)
+	}
+}
+
 func TestSubagentsTabShowsEmptyState(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "route", Agent: model.AgentClaude}, 80, 12, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
@@ -737,17 +916,22 @@ func TestDetailPanelTabsMarkActiveAndShowSubagentCount(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "route", Agent: model.AgentClaude, Subagents: subagents}, 80, 12, styleSet)
 
 	timeline := detail.tabLabel()
-	if timeline.plain != "[Timeline]  Subagents (13)" || !strings.HasPrefix(timeline.styled, styleSet.title.Render("[Timeline]")) || !strings.Contains(timeline.styled, styleSet.muted.Render("Subagents (13)")) {
+	if timeline.plain != "[Timeline]  Subagents (13)  Info" || !strings.HasPrefix(timeline.styled, styleSet.title.Render("[Timeline]")) || !strings.Contains(timeline.styled, styleSet.muted.Render("Subagents (13)")) || !strings.Contains(timeline.styled, styleSet.muted.Render("Info")) {
 		t.Fatalf("Timeline tab label = %#v", timeline)
 	}
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 	subagentTab := detail.tabLabel()
-	if subagentTab.plain != "Timeline  [Subagents (13)]" || !strings.HasPrefix(subagentTab.styled, styleSet.muted.Render("Timeline")) || !strings.Contains(subagentTab.styled, styleSet.title.Render("[Subagents (13)]")) {
+	if subagentTab.plain != "Timeline  [Subagents (13)]  Info" || !strings.HasPrefix(subagentTab.styled, styleSet.muted.Render("Timeline")) || !strings.Contains(subagentTab.styled, styleSet.title.Render("[Subagents (13)]")) {
 		t.Fatalf("Subagents tab label = %#v, want active marker in fixed order", subagentTab)
+	}
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	infoTab := detail.tabLabel()
+	if infoTab.plain != "Timeline  Subagents (13)  [Info]" || !strings.Contains(infoTab.styled, styleSet.title.Render("[Info]")) {
+		t.Fatalf("Info tab label = %#v, want third active marker", infoTab)
 	}
 
 	empty := newDetailState(&model.Session{ID: "empty"}, 80, 12, styleSet).tabLabel()
-	if empty.plain != "[Timeline]  Subagents" || strings.Contains(empty.plain, "(") {
+	if empty.plain != "[Timeline]  Subagents  Info" || strings.Contains(empty.plain, "(") {
 		t.Fatalf("zero-subagent tab label = %#v, want no count", empty)
 	}
 	detail.resize(20, 12)
@@ -1100,6 +1284,9 @@ func TestWideKeyBarsAdvertiseMouse(t *testing.T) {
 	}
 	if keyBar := detailKeyText(160, false, tabTimeline, true); !strings.Contains(keyBar, "mouse scroll/click") {
 		t.Fatalf("wide detail key bar missing mouse hint: %q", keyBar)
+	}
+	if keyBar := detailKeyText(160, false, tabInfo, true); !strings.Contains(keyBar, "mouse wheel scroll") || strings.Contains(keyBar, "click") {
+		t.Fatalf("wide Info key bar advertises an inactive mouse action: %q", keyBar)
 	}
 	if keyBar := itemKeyText(160, false); !strings.Contains(keyBar, "wheel scroll") {
 		t.Fatalf("wide item key bar missing mouse hint: %q", keyBar)

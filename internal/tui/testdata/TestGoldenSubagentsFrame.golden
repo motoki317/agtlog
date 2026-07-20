@@ -3,7 +3,7 @@
 │claude │ starship (/workspace/starship) │ opus-4.8                                      │
 │branch orbit/alpha │ Jan 02 05:44→Jan 02 06:04 │ total 183k tokens / ~$1.28             │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Timeline  [Subagents (2)] ────────────────────────────────────────────────────────────╮
+╭─ Timeline  [Subagents (2)]  Info ──────────────────────────────────────────────────────╮
 │  AGENT      TITLE                                     MODEL         TOKENS    COST  AGE│
 │› claude     Scout the ridge                           opus-4.8         55k  ~$0.44  12m│
 │    codex    Map the cavern                            gpt-5.6          10k  ~$0.12   3m│

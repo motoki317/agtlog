@@ -67,6 +67,26 @@ func TestItemHelpIncludesOnlyItemBindings(t *testing.T) {
 	}
 }
 
+func TestInfoHelpIncludesOnlyApplicableBindings(t *testing.T) {
+	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
+	m.screen = screenDetail
+	detail := newDetailState(&model.Session{ID: "route"}, m.width, m.height, m.styles)
+	detail.tab = tabInfo
+	detail.rebuild()
+	m.detail = detail
+	view := m.helpView()
+	for _, want := range []string{"j/k scroll", "g/G edge", "tab tabs", "w wrap", "T time", "mouse wheel scroll", "esc/h back"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("Info help missing %q:\n%s", want, view)
+		}
+	}
+	for _, unwanted := range []string{"←/→ fold", "space toggle", "expand all", "enter/l open", "click select/toggle"} {
+		if strings.Contains(view, unwanted) {
+			t.Errorf("Info help advertises inapplicable %q:\n%s", unwanted, view)
+		}
+	}
+}
+
 func TestHelpRendersAsFullWidthBorderedPanel(t *testing.T) {
 	m := NewModel(nil, nil)
 	lines := strings.Split(ansi.Strip(m.helpView()), "\n")

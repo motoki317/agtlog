@@ -29,21 +29,35 @@ func (m Model) helpView() string {
 				lines[1] += " · t theme"
 			}
 		} else {
-			mouseHelp := "mouse wheel scroll · click select/toggle"
-			if m.width < 59 {
-				mouseHelp = "wheel · select/toggle"
-			}
-			lines = []string{
-				"j/k scroll · g/G edge",
-				"←/→ fold · space toggle · enter/l open",
-				expandAllKey + " expand all · " + collapseAllKey + " collapse all",
-				"tab tabs · w wrap · " + timeFormatKey + " time",
-				"esc/h back",
-				mouseHelp,
-				"? help · q/ctrl-c quit",
-			}
-			if !m.styles.mono {
-				lines[4] += " · t theme"
+			detail, _ := m.detail.(*detailState)
+			if detail != nil && detail.tab == tabInfo {
+				lines = []string{
+					"j/k scroll · g/G edge",
+					"tab tabs · w wrap · " + timeFormatKey + " time",
+					"esc/h back",
+					"mouse wheel scroll",
+					"? help · q/ctrl-c quit",
+				}
+				if !m.styles.mono {
+					lines[2] += " · t theme"
+				}
+			} else {
+				mouseHelp := "mouse wheel scroll · click select/toggle"
+				if m.width < 59 {
+					mouseHelp = "wheel · select/toggle"
+				}
+				lines = []string{
+					"j/k scroll · g/G edge",
+					"←/→ fold · space toggle · enter/l open",
+					expandAllKey + " expand all · " + collapseAllKey + " collapse all",
+					"tab tabs · w wrap · " + timeFormatKey + " time",
+					"esc/h back",
+					mouseHelp,
+					"? help · q/ctrl-c quit",
+				}
+				if !m.styles.mono {
+					lines[4] += " · t theme"
+				}
 			}
 		}
 	}

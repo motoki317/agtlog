@@ -2,6 +2,8 @@ package tui
 
 import (
 	"fmt"
+	"math"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -167,6 +169,7 @@ func scrollViewport(view *viewport.Model, button tea.MouseButton) {
 const (
 	tabTimeline detailTab = iota
 	tabSubagents
+	tabInfo
 )
 
 const (
@@ -228,6 +231,10 @@ func (d *detailState) scrollWheel(button tea.MouseButton) {
 
 func (d *detailState) resize(width, height int) {
 	pinned := d.tab == tabTimeline && len(d.rendered) > 0 && d.pinnedToBottom()
+	anchorDetail, anchorOffset := -1, 0
+	if d.tab == tabInfo {
+		anchorDetail, anchorOffset = d.renderedViewportAnchor()
+	}
 	d.width, d.height = max(1, width), max(3, height)
 	layout := newDetailLayout(d.height)
 	d.viewport.Width = max(1, d.width-2)
@@ -235,6 +242,8 @@ func (d *detailState) resize(width, height int) {
 	d.rebuild()
 	if pinned {
 		d.anchorBottom()
+	} else if d.tab == tabInfo {
+		d.restoreRenderedViewportAnchor(anchorDetail, anchorOffset)
 	}
 }
 
@@ -243,7 +252,11 @@ func (d *detailState) setWrap(wrap bool) {
 		return
 	}
 	d.wrap = wrap
-	d.rebuild()
+	if d.tab == tabInfo {
+		d.rebuildPreservingViewport()
+	} else {
+		d.rebuild()
+	}
 }
 
 func (d *detailState) update(msg tea.Msg) tea.Cmd {
@@ -254,24 +267,34 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		return cmd
 	}
 	switch key.String() {
-	case "tab", "shift+tab":
-		d.tab = (d.tab + 1) % 2
+	case "tab":
+		d.tab = (d.tab + 1) % 3
+		d.viewport.SetYOffset(0)
+		d.rebuild()
+	case "shift+tab":
+		d.tab = (d.tab + 2) % 3
 		d.viewport.SetYOffset(0)
 		d.rebuild()
 	case "j", "down":
-		if d.tab == tabSubagents {
+		if d.tab == tabInfo {
+			d.viewport.ScrollDown(1)
+		} else if d.tab == tabSubagents {
 			d.moveSubagentSelection(1)
 		} else {
 			d.moveFocus(1)
 		}
 	case "k", "up":
-		if d.tab == tabSubagents {
+		if d.tab == tabInfo {
+			d.viewport.ScrollUp(1)
+		} else if d.tab == tabSubagents {
 			d.moveSubagentSelection(-1)
 		} else {
 			d.moveFocus(-1)
 		}
 	case "g":
-		if d.tab == tabSubagents {
+		if d.tab == tabInfo {
+			d.viewport.GotoTop()
+		} else if d.tab == tabSubagents {
 			if len(d.subagents) > 0 && d.subagentSelection != 0 {
 				oldLine := d.selectedLine
 				d.subagentSelection = 0
@@ -284,7 +307,9 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 			d.updateSelection(oldLine, d.focusables[d.focus].line)
 		}
 	case "G":
-		if d.tab == tabSubagents {
+		if d.tab == tabInfo {
+			d.viewport.GotoBottom()
+		} else if d.tab == tabSubagents {
 			last := len(d.subagents) - 1
 			if last >= 0 && d.subagentSelection != last {
 				oldLine := d.selectedLine
@@ -465,6 +490,9 @@ func (d *detailState) rebuild() {
 	} else if d.tab == tabSubagents {
 		d.rebuildSubagents()
 		return
+	} else if d.tab == tabInfo {
+		d.rebuildInfo()
+		return
 	} else {
 		lines = d.sessionLines(d.session, 0, sessionIdentity(d.session))
 	}
@@ -486,6 +514,174 @@ func (d *detailState) rebuild() {
 	}
 	d.selectedLine = selectedLine
 	d.rebuildRendered()
+}
+
+func (d *detailState) rebuildInfo() {
+	d.subagents = nil
+	d.focusables = nil
+	d.selectedLine = -1
+	d.lines = sessionInfoLines(d.session)
+	d.rebuildRendered()
+}
+
+func sessionInfoLines(session *model.Session) []detailLine {
+	totalCost := session.TotalCost()
+	totalLine := "total: " + formatCost(totalCost)
+	if len(totalCost.MissingPricingModels) > 0 {
+		missing := append([]string(nil), totalCost.MissingPricingModels...)
+		sort.Strings(missing)
+		for index := range missing {
+			missing[index] = displayModelName(missing[index])
+		}
+		totalLine += " · missing pricing: " + strings.Join(missing, ", ")
+	}
+	lines := []detailLine{
+		infoDetailLine("Cost", detailHeader),
+		infoDetailLine(totalLine, detailRow),
+		infoDetailLine("", detailRow),
+		infoDetailLine("How this is computed", detailHeader),
+	}
+	for _, line := range ownModelCostLines(session) {
+		lines = append(lines, infoDetailLine(line, detailRow))
+	}
+	lines = append(lines,
+		infoDetailLine("Codex: always estimated from the default pricing model. Claude: logged or priced cost.", detailSecondary),
+		infoDetailLine("", detailRow),
+		infoDetailLine("Definitions", detailHeader),
+		infoDetailLine("own: this session's own turns", detailRow),
+		infoDetailLine("subagents: delegated child sessions; their totals include nested descendants", detailRow),
+		infoDetailLine("", detailRow),
+		infoDetailLine("Cost tree", detailHeader),
+	)
+	for _, line := range sessionCostTree(session) {
+		lines = append(lines, infoDetailLine(line, detailRow))
+	}
+	return lines
+}
+
+func infoDetailLine(text string, role detailRole) detailLine {
+	return detailLine{text: detailPlainText(text), role: role}
+}
+
+func ownModelCostLines(session *model.Session) []string {
+	byModel := make(map[string]model.Usage)
+	inputByModel := make(map[string]int64)
+	seen := make(map[string]bool)
+	var order []string
+	for _, usage := range session.Usage {
+		name := usage.Model
+		if !seen[name] {
+			order = append(order, name)
+			seen[name] = true
+		}
+		combined := byModel[name].Add(usage)
+		combined.Model = name
+		byModel[name] = combined
+		inputTokens := usage.InputTokens
+		if usage.InputIncludesCacheRead {
+			inputTokens = max(0, inputTokens-usage.CacheReadTokens)
+		}
+		inputTotal := model.Usage{InputTokens: inputByModel[name]}.Add(model.Usage{InputTokens: inputTokens})
+		inputByModel[name] = inputTotal.InputTokens
+	}
+	var extra []string
+	for name := range session.ModelCosts {
+		if !seen[name] {
+			extra = append(extra, name)
+		}
+	}
+	sort.Strings(extra)
+	order = append(order, extra...)
+	if len(order) == 0 {
+		return []string{"No own model usage."}
+	}
+	missing := make(map[string]bool, len(session.Cost.MissingPricingModels))
+	for _, name := range session.Cost.MissingPricingModels {
+		missing[name] = true
+	}
+	lines := make([]string, 0, len(order))
+	for _, name := range order {
+		usage := byModel[name]
+		displayedUsage := model.Usage{
+			InputTokens:           inputByModel[name],
+			OutputTokens:          usage.OutputTokens,
+			CacheCreation5mTokens: usage.CacheCreation5mTokens,
+			CacheCreation1hTokens: usage.CacheCreation1hTokens,
+			CacheReadTokens:       usage.CacheReadTokens,
+		}
+		cacheUsage := displayedUsage
+		cacheUsage.InputTokens = 0
+		cacheUsage.OutputTokens = 0
+		cacheTokens := cacheUsage.TotalTokens()
+		tokens := displayedUsage.TotalTokens()
+		usd := session.ModelCosts[name]
+		rate := "rate unavailable"
+		if tokens > 0 && !missing[name] && !math.IsNaN(usd) && !math.IsInf(usd, 0) && usd >= 0 {
+			rate = "effective " + formatUnitRate(usd/float64(tokens))
+		}
+		modelCost := model.Cost{USD: usd, Estimated: session.Cost.Estimated}
+		if missing[name] {
+			modelCost.MissingPricingModels = []string{name}
+		}
+		lines = append(lines, fmt.Sprintf("%s: input %s + output %s + cache %s = %s × %s → %s",
+			displayModelName(name), humanTokens(displayedUsage.InputTokens), humanTokens(displayedUsage.OutputTokens), humanTokens(cacheTokens), humanTokens(tokens), rate, formatCost(modelCost)))
+	}
+	return lines
+}
+
+func displayModelName(name string) string {
+	if name = terminalText(name, 96); name != "" {
+		return name
+	}
+	return "unknown"
+}
+
+func formatUnitRate(rate float64) string {
+	text := strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.8f", rate), "0"), ".")
+	if text == "" {
+		text = "0"
+	}
+	return "$" + text + "/token"
+}
+
+func sessionCostTree(session *model.Session) []string {
+	total := session.TotalCost()
+	lines := []string{fmt.Sprintf("total = own + Σ subs · %s tokens / %s", humanTokens(session.TotalUsage().TotalTokens()), formatCost(total))}
+	return appendSessionCostChildren(lines, session, "")
+}
+
+func appendSessionCostChildren(lines []string, session *model.Session, prefix string) []string {
+	children := len(session.Subagents) + 1
+	for index := 0; index < children; index++ {
+		last := index == children-1
+		connector, childPrefix := "├─ ", prefix+"│  "
+		if last {
+			connector, childPrefix = "└─ ", prefix+"   "
+		}
+		if index == 0 {
+			lines = append(lines, fmt.Sprintf("%s%sown · %s tokens / %s", prefix, connector, humanTokens(ownSessionUsage(session).TotalTokens()), formatCost(session.Cost)))
+			continue
+		}
+		child := session.Subagents[index-1]
+		label := firstLine(child.Title)
+		if label == "" {
+			label = terminalText(child.ID, 96)
+		}
+		if label == "" {
+			label = string(child.Agent)
+		}
+		lines = append(lines, fmt.Sprintf("%s%ssubagent %s · %s tokens / %s", prefix, connector, label, humanTokens(child.TotalUsage().TotalTokens()), formatCost(child.TotalCost())))
+		lines = appendSessionCostChildren(lines, child, childPrefix)
+	}
+	return lines
+}
+
+func ownSessionUsage(session *model.Session) model.Usage {
+	var own model.Usage
+	for _, usage := range session.Usage {
+		own = own.Add(usage)
+	}
+	return own
 }
 
 func (d *detailState) rebuildSubagents() {
@@ -696,18 +892,27 @@ func (d *detailState) rebuildRendered() {
 
 func (d *detailState) rebuildPreservingViewport() {
 	pinned := d.tab == tabTimeline && d.pinnedToBottom()
-	anchorDetail, anchorOffset := -1, 0
-	if offset := d.viewport.YOffset; offset >= 0 && offset < len(d.rendered) {
-		anchorDetail = d.rendered[offset].detailIndex
-		anchorOffset = offset - d.firstRenderedRow(anchorDetail)
-	}
+	anchorDetail, anchorOffset := d.renderedViewportAnchor()
 	d.rebuild()
 	if pinned {
 		d.anchorBottom()
 		return
 	}
+	d.restoreRenderedViewportAnchor(anchorDetail, anchorOffset)
+}
+
+func (d *detailState) renderedViewportAnchor() (int, int) {
+	if offset := d.viewport.YOffset; offset >= 0 && offset < len(d.rendered) {
+		detailIndex := d.rendered[offset].detailIndex
+		return detailIndex, offset - d.firstRenderedRow(detailIndex)
+	}
+	return -1, 0
+}
+
+func (d *detailState) restoreRenderedViewportAnchor(anchorDetail, anchorOffset int) {
 	start := d.firstRenderedRow(anchorDetail)
 	if start < 0 {
+		d.viewport.SetYOffset(0)
 		return
 	}
 	end := len(d.rendered)
@@ -1148,10 +1353,14 @@ func (d *detailState) compactView(layout detailLayout) string {
 }
 
 func (t detailTab) title() string {
-	if t == tabSubagents {
+	switch t {
+	case tabSubagents:
 		return "Subagents"
+	case tabInfo:
+		return "Info"
+	default:
+		return "Timeline"
 	}
-	return "Timeline"
 }
 
 func (d *detailState) tabPanelLabel() panelLabel {
@@ -1180,21 +1389,21 @@ func (d *detailState) compactPanelLabel() panelLabel {
 func (d *detailState) tabLabel() panelLabel {
 	timeline := "Timeline"
 	subagents := "Subagents"
+	info := "Info"
 	if count := d.subagentTotal; count > 0 {
 		subagents += fmt.Sprintf(" (%d)", count)
 	}
-	timelineStyle := d.styles.title
-	subagentsStyle := d.styles.muted
-	if d.tab == tabSubagents {
-		timelineStyle = d.styles.muted
-		subagentsStyle = d.styles.title
-		subagents = "[" + subagents + "]"
-	} else {
-		timeline = "[" + timeline + "]"
+	labels := []string{timeline, subagents, info}
+	styles := []lipgloss.Style{d.styles.muted, d.styles.muted, d.styles.muted}
+	active := int(d.tab)
+	if active < 0 || active >= len(labels) {
+		active = 0
 	}
+	labels[active] = "[" + labels[active] + "]"
+	styles[active] = d.styles.title
 	return panelLabel{
-		plain:  timeline + "  " + subagents,
-		styled: timelineStyle.Render(timeline) + d.styles.title.Render("  ") + subagentsStyle.Render(subagents),
+		plain:  strings.Join(labels, "  "),
+		styled: styles[0].Render(labels[0]) + d.styles.title.Render("  ") + styles[1].Render(labels[1]) + d.styles.title.Render("  ") + styles[2].Render(labels[2]),
 	}
 }
 
@@ -1234,17 +1443,23 @@ func detailKeyText(width int, mono bool, tab detailTab, wrap bool) string {
 	hints := []string{"j/k scroll"}
 	if tab == tabTimeline {
 		hints = append(hints, "←/→ fold", "space toggle", bulkHint, enterHint, "tab switch", wrapHint)
-	} else {
+	} else if tab == tabSubagents {
 		hints = append(hints, enterHint, "tab switch")
+	} else {
+		hints = append(hints, "tab switch", wrapHint)
 	}
 	hints = append(hints, timeFormatKey+" time")
-	hints = append(hints, "esc back", "mouse scroll/click")
+	mouseHint := "mouse scroll/click"
+	if tab == tabInfo {
+		mouseHint = "mouse wheel scroll"
+	}
+	hints = append(hints, "esc back", mouseHint)
 	if !mono {
 		hints = append(hints, "t theme")
 	}
 	hints = append(hints, "? help", "q quit")
 	return fitKeyHints(width, hints, []string{
-		"mouse scroll/click", "t theme", "? help", "j/k scroll", "tab switch", wrapHint, bulkHint, "q quit", "space toggle", "←/→ fold", timeFormatKey + " time", enterHint,
+		mouseHint, "t theme", "? help", "j/k scroll", "tab switch", wrapHint, bulkHint, "q quit", "space toggle", "←/→ fold", timeFormatKey + " time", enterHint,
 	})
 }
 

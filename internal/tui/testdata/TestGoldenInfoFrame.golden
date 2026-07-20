@@ -1,0 +1,32 @@
+╭─ Session · starship ─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│Plan route                                                                                                            │
+│claude │ starship (/workspace/starship) │ opus-4.8                                                                    │
+│branch orbit/alpha │ Jan 02 05:44→Jan 02 06:04 │ total 183k tokens / ~$1.28                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Timeline  Subagents (2)  [Info] ────────────────────────────────────────────────────────────────────────────────────╮
+│  Cost                                                                                                                │
+│  total: ~$1.28                                                                                                       │
+│                                                                                                                      │
+│  How this is computed                                                                                                │
+│  claude-opus-4-8: input 120k + output 8000 + cache 0 = 128k × effective $0.00000656/token → $0.84                    │
+│  Codex: always estimated from the default pricing model. Claude: logged or priced cost.                              │
+│                                                                                                                      │
+│  Definitions                                                                                                         │
+│  own: this session's own turns                                                                                       │
+│  subagents: delegated child sessions; their totals include nested descendants                                        │
+│                                                                                                                      │
+│  Cost tree                                                                                                           │
+│  total = own + Σ subs · 183k tokens / ~$1.28                                                                         │
+│  ├─ own · 128k tokens / $0.84                                                                                        │
+│  └─ subagent Scout the ridge · 55k tokens / ~$0.44                                                                   │
+│     ├─ own · 45k tokens / $0.32                                                                                      │
+│     └─ subagent Map the cavern · 10k tokens / ~$0.12                                                                 │
+│        └─ own · 10k tokens / ~$0.12                                                                                  │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+j/k scroll   tab switch   w nowrap   T time   esc back   mouse wheel scroll   ? help   q quit
