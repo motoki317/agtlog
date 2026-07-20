@@ -1194,6 +1194,11 @@ func (d *detailState) panelTitle(name string) string {
 	return ansi.Truncate(terminalText(title, 256), max(1, d.width-5), "…")
 }
 
+// headerFieldSep divides the distinct metadata fields on the header's agent and
+// usage lines. A spaced vertical bar reads as a column boundary where a middle
+// dot blurred the fields together.
+const headerFieldSep = " │ "
+
 func (d *detailState) headerPanelLines() []panelLine {
 	session := d.session
 	totalUsage := session.TotalUsage()
@@ -1235,14 +1240,14 @@ func (d *detailState) headerPanelLines() []panelLine {
 	if models := terminalText(detailModels(session), 256); models != "" {
 		line2Parts = append(line2Parts, models)
 	}
-	if workspaceIndex >= 0 && ansi.StringWidth(strings.Join(line2Parts, " · ")) > innerWidth {
+	if workspaceIndex >= 0 && ansi.StringWidth(strings.Join(line2Parts, headerFieldSep)) > innerWidth {
 		line2Parts[workspaceIndex] = project
 	}
-	line2 := strings.Join(line2Parts, " · ")
+	line2 := strings.Join(line2Parts, headerFieldSep)
 
 	line3Parts := make([]string, 0, 3)
 	if branch := terminalText(session.GitBranch, 96); branch != "" {
-		line3Parts = append(line3Parts, branch)
+		line3Parts = append(line3Parts, "branch "+branch)
 	}
 	started, updated := formatDetailTime(session.StartedAt), formatDetailTime(session.UpdatedAt)
 	if started != "" && updated != "" {
@@ -1252,18 +1257,20 @@ func (d *detailState) headerPanelLines() []panelLine {
 	} else if updated != "" {
 		line3Parts = append(line3Parts, updated)
 	}
-	detailedUsage := fmt.Sprintf("%s tokens / %s · own %s / %s · subagents %s / %s",
-		humanTokens(totalUsage.TotalTokens()), formatCost(totalCost), humanTokens(ownUsage.TotalTokens()), formatCost(session.Cost),
-		humanTokens(totalUsage.TotalTokens()-ownUsage.TotalTokens()), formatCost(subagentCost))
-	compactUsage := fmt.Sprintf("%s tokens / %s", humanTokens(totalUsage.TotalTokens()), formatCost(totalCost))
+	detailedUsage := strings.Join([]string{
+		fmt.Sprintf("total %s tokens / %s", humanTokens(totalUsage.TotalTokens()), formatCost(totalCost)),
+		fmt.Sprintf("own %s / %s", humanTokens(ownUsage.TotalTokens()), formatCost(session.Cost)),
+		fmt.Sprintf("subagents %s / %s", humanTokens(totalUsage.TotalTokens()-ownUsage.TotalTokens()), formatCost(subagentCost)),
+	}, headerFieldSep)
+	compactUsage := fmt.Sprintf("total %s tokens / %s", humanTokens(totalUsage.TotalTokens()), formatCost(totalCost))
 	line3Parts = append(line3Parts, detailedUsage)
-	if ansi.StringWidth(strings.Join(line3Parts, " · ")) > innerWidth {
+	if ansi.StringWidth(strings.Join(line3Parts, headerFieldSep)) > innerWidth {
 		line3Parts[len(line3Parts)-1] = compactUsage
 	}
-	for len(line3Parts) > 1 && ansi.StringWidth(strings.Join(line3Parts, " · ")) > innerWidth {
+	for len(line3Parts) > 1 && ansi.StringWidth(strings.Join(line3Parts, headerFieldSep)) > innerWidth {
 		line3Parts = line3Parts[1:]
 	}
-	line3 := strings.Join(line3Parts, " · ")
+	line3 := strings.Join(line3Parts, headerFieldSep)
 	plainLines := []string{
 		fitPlain(line1, innerWidth, false),
 		fitPlain(line2, innerWidth, false),

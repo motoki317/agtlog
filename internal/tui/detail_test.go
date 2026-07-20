@@ -1446,9 +1446,9 @@ func TestDetailHeaderIncludesProjectFullCWDAndAllModels(t *testing.T) {
 
 	header := newDetailState(session, 200, 12, newStyles()).header()
 	for _, want := range []string{
-		"claude · mission-control (/srv/fictional/deep/telemetry)",
+		"claude │ mission-control (/srv/fictional/deep/telemetry)",
 		"opus-4.8, fable-5",
-		"orbit/alpha",
+		"branch orbit/alpha",
 		"Jan 02 03:04→Jan 02 03:14",
 	} {
 		if !strings.Contains(header, want) {
@@ -1475,7 +1475,7 @@ func TestDetailHeaderOmitsUnavailableMetadata(t *testing.T) {
 	session := &model.Session{ID: "mission", Agent: model.AgentClaude}
 
 	header := ansi.Strip(newDetailState(session, 200, 12, newStyles()).header())
-	for _, artifact := range []string{"()", "—", " ·  · ", "·  ·"} {
+	for _, artifact := range []string{"()", "—", " │  │ ", "│  │"} {
 		if strings.Contains(header, artifact) {
 			t.Fatalf("sparse detail header contains %q:\n%s", artifact, header)
 		}

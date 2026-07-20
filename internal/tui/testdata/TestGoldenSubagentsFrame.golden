@@ -1,7 +1,7 @@
 ╭─ Session · starship ───────────────────────────────────────────────────────────────────╮
 │Plan route                                                                              │
-│claude · starship (/workspace/starship) · opus-4.8                                      │
-│orbit/alpha · Jan 02 05:44→Jan 02 06:04 · 183k tokens / ~$1.28                          │
+│claude │ starship (/workspace/starship) │ opus-4.8                                      │
+│branch orbit/alpha │ Jan 02 05:44→Jan 02 06:04 │ total 183k tokens / ~$1.28             │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Timeline  [Subagents (2)] ────────────────────────────────────────────────────────────╮
 │  AGENT      TITLE                                     MODEL         TOKENS    COST  AGE│
