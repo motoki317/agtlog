@@ -23,6 +23,7 @@ type detailState struct {
 	focusables        []detailFocus
 	width             int
 	height            int
+	now               time.Time
 	loading           bool
 	err               error
 	styles            styles
@@ -443,8 +444,24 @@ func (d *detailState) rebuildSubagents() {
 			session := item.s
 			tokens := humanTokens(session.TotalUsage().TotalTokens())
 			cost := formatCost(session.TotalCost())
+			indent := strings.Repeat("  ", item.depth)
+			agent := terminalText(string(session.Agent), 32)
+			title := firstLine(session.Title)
+			tail := "  " + terminalText(shortModels(session), 96) + " · " + tokens + " · " + cost
+			available := max(0, d.viewport.Width-2)
+			text := indent + agent + " " + title + tail
+			if !d.now.IsZero() {
+				if age := formatAge(d.now, session.UpdatedAt); age != "" && ansi.StringWidth(text+" · "+age) <= available {
+					text += " · " + age
+				}
+			}
+			if ansi.StringWidth(text) > available {
+				fixed := indent + agent + " "
+				titleWidth := max(0, available-ansi.StringWidth(fixed)-ansi.StringWidth(tail))
+				text = fixed + ansi.Truncate(title, titleWidth, "…") + tail
+			}
 			d.lines[index] = detailLine{
-				text: strings.Repeat("  ", item.depth) + terminalText(string(session.Agent), 32) + " " + firstLine(session.Title) + "  " + terminalText(shortModels(session), 96) + " · " + tokens + " · " + cost,
+				text: text,
 				key:  sessionIdentity(session), subagent: true, subagentSession: session, subagentTokens: tokens, subagentCost: cost, role: detailRow, agent: session.Agent,
 			}
 		}

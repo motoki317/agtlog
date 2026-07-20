@@ -666,12 +666,15 @@ func TestSubagentsRowAppliesCellStylesAfterFitting(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
 	first := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge"}
+	now := time.Date(2026, 1, 2, 6, 0, 0, 0, time.UTC)
 	selected := &model.Session{
 		ID: "map", Agent: model.AgentCodex, Title: "Map cavern", Models: []string{"gpt-5.6-sol"},
-		Usage: []model.Usage{{InputTokens: 2_500}}, Cost: model.Cost{USD: 0.75, Estimated: true},
+		UpdatedAt: now.Add(-2 * time.Minute),
+		Usage:     []model.Usage{{InputTokens: 2_500}}, Cost: model.Cost{USD: 0.75, Estimated: true},
 	}
 	styleSet := newStyles(themes["default"])
 	detail := newDetailState(&model.Session{ID: "route", Subagents: []*model.Session{first, selected}}, 100, 14, styleSet)
+	detail.now = now
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 	line := detail.lines[1]
 	styled := detail.styleLine(detail.rendered[1].text, line, false, true)
@@ -683,6 +686,34 @@ func TestSubagentsRowAppliesCellStylesAfterFitting(t *testing.T) {
 	} {
 		if !strings.Contains(styled, want) {
 			t.Errorf("Subagents row missing %s cell style in %q", name, styled)
+		}
+	}
+}
+
+func TestSubagentsRowsShowAgeAndDropItBeforeUsage(t *testing.T) {
+	now := time.Date(2026, 1, 2, 6, 0, 0, 0, time.UTC)
+	child := &model.Session{
+		ID: "review", Agent: model.AgentCodex, Title: "Review lunar telemetry", Models: []string{"gpt-5.6-sol"}, UpdatedAt: now.Add(-12 * time.Minute),
+		Usage: []model.Usage{{InputTokens: 2_500}}, Cost: model.Cost{USD: 0.75, Estimated: true},
+	}
+	m := newModelWithClock([]*model.Session{{ID: "route", Subagents: []*model.Session{child}}}, nil, func() time.Time { return now })
+	for _, msg := range []tea.Msg{tea.WindowSizeMsg{Width: 100, Height: 14}, tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyTab}} {
+		updated, _ := m.Update(msg)
+		m = updated.(Model)
+	}
+	detail := detailStateFromScreen(t, m.detail)
+	if text := detail.lines[0].text; !strings.Contains(text, " · 12m") {
+		t.Fatalf("wide subagent row missing age: %q", text)
+	}
+
+	detail.resize(42, 14)
+	text := detail.lines[0].text
+	if strings.Contains(text, "12m") || !strings.Contains(text, humanTokens(child.TotalUsage().TotalTokens())) || !strings.Contains(text, formatCost(child.TotalCost())) {
+		t.Fatalf("narrow subagent row priority = %q", text)
+	}
+	for _, row := range detail.rendered {
+		if width := ansi.StringWidth(row.text); width != detail.viewport.Width {
+			t.Fatalf("rendered subagent row width = %d, want %d: %q", width, detail.viewport.Width, row.text)
 		}
 	}
 }

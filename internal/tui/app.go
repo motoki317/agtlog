@@ -413,6 +413,7 @@ func (m *Model) activateDetailSelection() bool {
 		}
 		m.detailStack = append(m.detailStack, m.detail)
 		child := newDetailStateBase(subagent, m.width, m.height, m.styles)
+		child.now = m.now()
 		child.crumbs = crumbs
 		child.defaultExpanded = detail.defaultExpanded
 		child.wrap = wrap
@@ -445,6 +446,7 @@ func (m *Model) openListSelection() tea.Cmd {
 	m.screen = screenDetail
 	m.detailStack = nil
 	detail := newDetailState(m.visible[index], m.width, m.height, m.styles)
+	detail.now = m.now()
 	m.detail = detail
 	if m.registry == nil {
 		return nil
@@ -630,6 +632,7 @@ func (m *Model) replacementDetailState(previous *detailState, session, root *mod
 		}
 	}
 	replacement := newDetailStateBase(session, m.width, m.height, m.styles)
+	replacement.now = m.now()
 	replacement.wrap = previous.wrap
 	replacement.defaultExpanded = previous.defaultExpanded
 	replacement.crumbs = detailBreadcrumbs(root, session)

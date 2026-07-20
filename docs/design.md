@@ -152,8 +152,9 @@ same key at the root returns to the session list. Each child inherits its parent
 while later wrap changes affect only the active screen.
 
 The Subagents tab lists every descendant in pre-order. Nested descendants are indented by depth;
-each row shows the agent, title, costliest model, recursive tokens, and recursive cost. Agent,
-token, and estimated-cost cells receive their semantic styles only after the plain row is fitted.
+each row shows the agent, title, costliest model, recursive tokens, recursive cost, and relative
+age. Age is omitted first under width pressure so token and cost cells remain intact. Agent, token,
+and estimated-cost cells receive their semantic styles only after the plain row is fitted.
 The tab has its own selection, supports step and edge movement, and drills into the selected
 session on Timeline. A session without descendants shows `No subagents`.
 

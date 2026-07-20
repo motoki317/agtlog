@@ -117,11 +117,13 @@ func TestGoldenSubagentsFrame(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	mapper := &model.Session{
 		ID: "mapper", Agent: model.AgentCodex, Title: "Map the cavern", Models: []string{"gpt-5.6-sol"},
-		Usage: []model.Usage{{InputTokens: 8_000, OutputTokens: 2_000}}, Cost: model.Cost{USD: 0.12, Estimated: true},
+		UpdatedAt: goldenNow.Add(-3 * time.Minute),
+		Usage:     []model.Usage{{InputTokens: 8_000, OutputTokens: 2_000}}, Cost: model.Cost{USD: 0.12, Estimated: true},
 	}
 	scout := &model.Session{
 		ID: "scout", Agent: model.AgentClaude, Title: "Scout the ridge", Models: []string{"claude-opus-4-8"},
-		Usage: []model.Usage{{InputTokens: 40_000, OutputTokens: 5_000}}, Cost: model.Cost{USD: 0.32}, Subagents: []*model.Session{mapper},
+		UpdatedAt: goldenNow.Add(-12 * time.Minute),
+		Usage:     []model.Usage{{InputTokens: 40_000, OutputTokens: 5_000}}, Cost: model.Cost{USD: 0.32}, Subagents: []*model.Session{mapper},
 	}
 	root := &model.Session{
 		ID: "route", Agent: model.AgentClaude, Path: "/workspace/starship/route.jsonl", CWD: "/workspace/starship", Project: "starship", Title: "Plan route",
