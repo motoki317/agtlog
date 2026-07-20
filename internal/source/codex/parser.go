@@ -24,7 +24,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v13:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
+	return "codex-parser-v14:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
 }
 
 type tokenUsage struct {
@@ -102,7 +102,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 			}
 		}
 		if envelope.Type != "session_meta" && envelope.Type != "turn_context" &&
-			!(envelope.Type == "event_msg" && (envelope.Payload.Type == "user_message" || envelope.Payload.Type == "sub_agent_activity" || envelope.Payload.Type == "token_count")) {
+			!(envelope.Type == "event_msg" && (envelope.Payload.Type == "user_message" || envelope.Payload.Type == "agent_message" || envelope.Payload.Type == "sub_agent_activity" || envelope.Payload.Type == "token_count")) {
 			return
 		}
 		var record logRecord
@@ -129,8 +129,13 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 				seenModels[currentModel] = true
 			}
 		}
-		if record.Type == "event_msg" && record.Payload.Type == "user_message" {
-			if session.Title == "" {
+		// Messages counts this session's own conversation turns (user prompts +
+		// agent replies), matching the user+assistant message lines the detail
+		// timeline shows. Ceiling: a subagent-heavy run undercounts, since work
+		// delegated to subagents surfaces in the timeline through the deduplicated
+		// bridge, not as event_msg turns here; the recursive size lives in TOKENS.
+		if record.Type == "event_msg" && (record.Payload.Type == "user_message" || record.Payload.Type == "agent_message") {
+			if session.Title == "" && record.Payload.Type == "user_message" {
 				var user userMessageRecord
 				if json.Unmarshal(line, &user) == nil {
 					session.Title = titleFromUserMessage(user.Payload.Message)

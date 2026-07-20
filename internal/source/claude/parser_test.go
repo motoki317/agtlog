@@ -146,6 +146,30 @@ func TestParseBuildsUnifiedSessionMetadata(t *testing.T) {
 	if session.GitBranch != "orbit/alpha" || !session.StartedAt.Equal(started) || !session.UpdatedAt.Equal(updated) {
 		t.Errorf("Parse() metadata = branch %q, started %v, updated %v", session.GitBranch, session.StartedAt, session.UpdatedAt)
 	}
+	// One user text turn; the assistant records carry usage only, no text blocks.
+	if session.Messages != 1 {
+		t.Errorf("Parse().Messages = %d, want 1", session.Messages)
+	}
+}
+
+func TestParseCountsUserAndAssistantMessages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-count.jsonl")
+	lines := []string{
+		`{"type":"user","timestamp":"2026-01-02T03:00:00Z","sessionId":"s","message":{"role":"user","content":"First question"}}`,
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:10Z","sessionId":"s","message":{"id":"a1","model":"claude-opus-4-8","content":[{"type":"text","text":"Answer one"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":10,"output_tokens":5}}}`,
+		`{"type":"user","timestamp":"2026-01-02T03:00:20Z","sessionId":"s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"file.txt"}]}}`,
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:30Z","sessionId":"s","message":{"id":"a2","model":"claude-opus-4-8","content":[{"type":"text","text":"Answer two"}],"usage":{"input_tokens":12,"output_tokens":6}}}`,
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:40Z","sessionId":"s","message":{"id":"a3","model":"claude-opus-4-8","content":[{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"x"}}],"usage":{"input_tokens":8,"output_tokens":4}}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	// 1 user prompt + 2 assistant text replies. The tool-result-only user record
+	// and the tool-only assistant record are turns of tooling, not messages.
 	if session.Messages != 3 {
 		t.Errorf("Parse().Messages = %d, want 3", session.Messages)
 	}

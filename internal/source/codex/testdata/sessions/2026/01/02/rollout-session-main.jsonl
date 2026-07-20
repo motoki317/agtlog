@@ -1,6 +1,7 @@
 {"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"session_id":"session-main","cwd":"/workspace/starship","originator":"codex_exec","model_provider":"openai","git":{"commit_hash":"deadbeef","branch":"orbit/alpha","repository_url":"https://example.invalid/starship.git"}}}
 {"timestamp":"2026-01-02T03:04:10Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
 {"timestamp":"2026-01-02T03:04:15Z","type":"event_msg","payload":{"type":"user_message","message":"Design a rover","images":[],"local_images":[],"text_elements":[]}}
+{"timestamp":"2026-01-02T03:04:45Z","type":"event_msg","payload":{"type":"agent_message","message":"Here is a rover design."}}
 {"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":5,"total_tokens":115},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":5,"total_tokens":115},"model_context_window":1000000}}}
 {"timestamp":"2026-01-02T03:05:10Z","type":"event_msg","payload":{"type":"sub_agent_activity","event_id":"event-scout","agent_thread_id":"thread-scout","agent_path":"/root/scout","kind":"started","occurred_at_ms":1767323110000}}
 {"timestamp":"2026-01-02T03:05:20Z","type":"event_msg","payload":{"type":"sub_agent_activity","event_id":"event-mapper","agent_thread_id":"thread-mapper","agent_path":"/root/scout/mapper","kind":"started","occurred_at_ms":1767323120000}}

@@ -26,8 +26,8 @@ func testParser() Parser {
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v13:") {
-		t.Fatalf("CacheFingerprint() = %q, want v13 presentation schema", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v14:") {
+		t.Fatalf("CacheFingerprint() = %q, want v14 presentation schema", got)
 	}
 }
 
@@ -85,7 +85,8 @@ func TestParseBuildsUnifiedSessionMetadata(t *testing.T) {
 	if session.Title != "Design a rover" || session.GitBranch != "orbit/alpha" {
 		t.Errorf("Parse() label = title %q, branch %q", session.Title, session.GitBranch)
 	}
-	if !reflect.DeepEqual(session.Models, []string{"gpt-5.6-sol"}) || session.Messages != 1 {
+	// One user prompt plus one agent reply — the session's own conversation turns.
+	if !reflect.DeepEqual(session.Models, []string{"gpt-5.6-sol"}) || session.Messages != 2 {
 		t.Errorf("Parse() models/messages = %v, %d", session.Models, session.Messages)
 	}
 	if !session.StartedAt.Equal(started) || !session.UpdatedAt.Equal(updated) {

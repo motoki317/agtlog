@@ -37,9 +37,10 @@ type logRecord struct {
 	APIErrorStatus    json.RawMessage `json:"apiErrorStatus"`
 	IsAPIErrorMessage bool            `json:"isApiErrorMessage"`
 	Message           struct {
-		ID    string `json:"id"`
-		Model string `json:"model"`
-		Usage struct {
+		ID      string          `json:"id"`
+		Model   string          `json:"model"`
+		Content json.RawMessage `json:"content"`
+		Usage   struct {
 			InputTokens              int64 `json:"input_tokens"`
 			OutputTokens             int64 `json:"output_tokens"`
 			CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
@@ -63,7 +64,7 @@ func NewParser(calculator cost.Calculator) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v8:" + p.calculator.Fingerprint()
+	return "claude-parser-v9:" + p.calculator.Fingerprint()
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
@@ -631,7 +632,11 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 
 	session := &model.Session{Agent: model.AgentClaude, Path: path}
 	var usageRecords []usageRecord
-	userMessages := 0
+	// messages counts this session's own conversation turns: user prompts (records
+	// carrying text, not tool-result-only) plus assistant text replies. It matches
+	// the user+assistant message lines the detail timeline shows, so a session with
+	// many interactions no longer reads as one message.
+	messages := 0
 	err = jsonl.ForEach(file, func(line []byte) {
 		var envelope struct {
 			Type      string `json:"type"`
@@ -658,14 +663,18 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 		}
 		if record.Type == "ai-title" {
 			session.Title = model.CleanTitle(record.AITitle)
-		} else if record.Type == "user" && session.Title == "" {
+		} else if record.Type == "user" {
 			var content userContentRecord
 			if json.Unmarshal(line, &content) == nil {
-				session.Title = model.CleanTitle(userText(content.Message.Content))
+				if text := userText(content.Message.Content); text != "" {
+					messages++
+					if session.Title == "" {
+						session.Title = model.CleanTitle(text)
+					}
+				}
 			}
-		}
-		if record.Type == "user" {
-			userMessages++
+		} else if record.Type == "assistant" {
+			messages += assistantTextBlocks(record.Message.Content)
 		}
 		if record.Type == "assistant" && (record.IsAPIErrorMessage || meaningfulJSON(record.Error) || meaningfulJSON(record.APIErrorStatus)) {
 			session.HasError = true
@@ -735,8 +744,28 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 			}
 		}
 	}
-	session.Messages = userMessages + len(session.Usage)
+	session.Messages = messages
 	return session, nil
+}
+
+// assistantTextBlocks counts the text blocks in an assistant message that the
+// detail timeline renders as their own message lines, applying the same
+// non-empty predicate so the list count and the timeline agree.
+func assistantTextBlocks(content json.RawMessage) int {
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(content, &blocks) != nil {
+		return 0
+	}
+	count := 0
+	for _, block := range blocks {
+		if block.Type == "text" && model.CleanTimelineText(block.Text) != "" {
+			count++
+		}
+	}
+	return count
 }
 
 func meaningfulJSON(value json.RawMessage) bool {
