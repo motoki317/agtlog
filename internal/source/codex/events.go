@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/motoki317/agtlog/internal/model"
 	"github.com/motoki317/agtlog/internal/source/jsonl"
@@ -44,7 +46,11 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 	}
 	defer file.Close()
 
-	calls := make(map[string]int)
+	type pendingCall struct {
+		eventIndex          int
+		normalizeExecOutput bool
+	}
+	calls := make(map[string]pendingCall)
 	dedupTextByEvent := make(map[int]string)
 	currentModel := ""
 	isSubagent := session.AgentPath != ""
@@ -153,15 +159,22 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				}
 				input = codexElideEncrypted(input)
 				event.ToolInput, event.Detail = codexToolPresentation(record.Payload.Name, input)
-				calls[event.CallID] = len(session.Events)
+				if record.Payload.Name == "exec" {
+					if name, _, ok := codexExecTool(input); ok {
+						event.ToolName = name
+					}
+				}
+				calls[event.CallID] = pendingCall{
+					eventIndex:          len(session.Events),
+					normalizeExecOutput: record.Payload.Name == "exec" || record.Payload.Name == "wait",
+				}
 			case "function_call_output", "custom_tool_call_output":
 				event.Kind, event.CallID = model.EventToolResult, record.Payload.CallID
 				output := codexElideEncrypted(codexOutputText(record.Payload.Output))
-				index, linked := calls[event.CallID]
+				pending, linked := calls[event.CallID]
 				summary := ""
 				if linked {
-					call := &session.Events[index]
-					if call.ToolName == "exec" || call.ToolName == "wait" {
+					if pending.normalizeExecOutput {
 						var exitCode string
 						output, exitCode = codexNormalizeExecOutput(output)
 						if exitCode != "" {
@@ -174,7 +187,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				}
 				event.Text = model.BoundedDetailText(summary)
 				if linked {
-					call := &session.Events[index]
+					call := &session.Events[pending.eventIndex]
 					if call.Detail != nil && event.CallID != "" {
 						call.Detail.Output = model.BoundedDetailText(output)
 					}
@@ -467,6 +480,14 @@ func codexToolPresentation(name, input string) (string, *model.ToolDetail) {
 }
 
 func codexExecToolPresentation(input string) (string, *model.ToolDetail) {
+	calls := codexExecTools(input)
+	if len(calls) > 1 {
+		return "", &model.ToolDetail{Input: model.BoundedDetailText(codexPrettyInput(input))}
+	}
+	name, _, wrapped := codexExecTool(input)
+	if wrapped && name != "exec_command" {
+		return "", &model.ToolDetail{Input: model.BoundedDetailText(codexPrettyInput(input))}
+	}
 	command, ok := codexExecCommand(input)
 	if !ok {
 		return strings.Join(strings.Fields(input), " "), &model.ToolDetail{Input: model.BoundedDetailText(codexPrettyInput(input))}
@@ -475,16 +496,17 @@ func codexExecToolPresentation(input string) (string, *model.ToolDetail) {
 }
 
 func codexExecCommand(input string) (string, bool) {
-	const marker = "exec_command("
-	markerIndex := strings.Index(input, marker)
-	if markerIndex < 0 {
+	name, argumentsStart, ok := codexExecTool(input)
+	if !ok || name != "exec_command" {
 		return "", false
 	}
-	objectOffset := strings.Index(input[markerIndex+len(marker):], "{")
-	if objectOffset < 0 {
+	objectStart := argumentsStart
+	for objectStart < len(input) && strings.ContainsRune(" \t\r\n", rune(input[objectStart])) {
+		objectStart++
+	}
+	if objectStart == len(input) || input[objectStart] != '{' {
 		return "", false
 	}
-	objectStart := markerIndex + len(marker) + objectOffset
 	var state codexJSONNesting
 	for index := objectStart; index < len(input); index++ {
 		state.advance(input[index])
@@ -500,6 +522,93 @@ func codexExecCommand(input string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func codexExecTool(input string) (string, int, bool) {
+	calls := codexExecTools(input)
+	if len(calls) != 1 {
+		return "", 0, false
+	}
+	return calls[0].name, calls[0].argumentsStart, true
+}
+
+type codexExecCall struct {
+	name           string
+	argumentsStart int
+}
+
+const codexExecToolNameLimit = 96
+
+func codexExecTools(input string) []codexExecCall {
+	const marker = "tools."
+	var calls []codexExecCall
+	for index := 0; index < len(input); {
+		switch input[index] {
+		case '\'', '"', '`':
+			index = codexSkipJSQuoted(input, index)
+			continue
+		case '/':
+			if index+1 < len(input) && input[index+1] == '/' {
+				if end := strings.IndexByte(input[index+2:], '\n'); end >= 0 {
+					index += end + 3
+				} else {
+					return calls
+				}
+				continue
+			}
+			if index+1 < len(input) && input[index+1] == '*' {
+				if end := strings.Index(input[index+2:], "*/"); end >= 0 {
+					index += end + 4
+				} else {
+					return calls
+				}
+				continue
+			}
+		}
+		if !strings.HasPrefix(input[index:], marker) || codexJSIdentifierBefore(input, index) {
+			index++
+			continue
+		}
+		nameStart := index + len(marker)
+		nameEnd := nameStart
+		for nameEnd < len(input) && codexJSIdentifierPart(input[nameEnd]) {
+			nameEnd++
+		}
+		if nameEnd > nameStart && nameEnd-nameStart <= codexExecToolNameLimit && nameEnd < len(input) && input[nameEnd] == '(' {
+			calls = append(calls, codexExecCall{name: strings.Clone(input[nameStart:nameEnd]), argumentsStart: nameEnd + 1})
+			index = nameEnd + 1
+			continue
+		}
+		index++
+	}
+	return calls
+}
+
+func codexSkipJSQuoted(input string, start int) int {
+	quote := input[start]
+	for index := start + 1; index < len(input); index++ {
+		if input[index] == '\\' {
+			index++
+			continue
+		}
+		if input[index] == quote {
+			return index + 1
+		}
+	}
+	return len(input)
+}
+
+func codexJSIdentifierPart(char byte) bool {
+	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '$'
+}
+
+func codexJSIdentifierBefore(input string, index int) bool {
+	if index == 0 {
+		return false
+	}
+	char, _ := utf8.DecodeLastRuneInString(input[:index])
+	return char < utf8.RuneSelf && codexJSIdentifierPart(byte(char)) ||
+		char >= utf8.RuneSelf && (unicode.IsLetter(char) || unicode.IsDigit(char) || unicode.IsMark(char) || char == '\u200c' || char == '\u200d')
 }
 
 func codexPrettyInput(input string) string {

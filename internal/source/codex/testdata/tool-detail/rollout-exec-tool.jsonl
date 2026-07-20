@@ -1,1 +1,1 @@
-{"timestamp":"2026-01-02T03:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-exec","name":"exec","input":"const r = await tools.exec_command({\"cmd\":\"make build\",\"workdir\":\"/x\"}); text(r.output);"}}
+{"timestamp":"2026-01-02T03:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-exec","name":"exec","input":"const r = await tools.exec_command({\"cmd\":\"go test\",\"workdir\":\"/workspace/observatory\"}); text(r.output);"}}

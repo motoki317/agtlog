@@ -1,0 +1,1 @@
+{"timestamp":"2026-01-02T03:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-plan","name":"exec","input":"const r = await tools.update_plan({\"plan\":[{\"step\":\"Chart the fictional ridge\",\"status\":\"in_progress\"}]}); text(r);"}}

@@ -25,9 +25,9 @@ func testParser() Parser {
 	}), "gpt-5")
 }
 
-func TestParserFingerprintInvalidatesEncryptedPayloadEvents(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v10:") {
-		t.Fatalf("CacheFingerprint() = %q, want v10 event schema", got)
+func TestParserFingerprintInvalidatesWrappedToolEvents(t *testing.T) {
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v11:") {
+		t.Fatalf("CacheFingerprint() = %q, want v11 event schema", got)
 	}
 }
 
@@ -635,11 +635,68 @@ func TestLoadEventsExtractsCommandFromCodexExecTool(t *testing.T) {
 		t.Fatalf("events = %#v, want one exec call", session.Events)
 	}
 	call := session.Events[0]
-	if call.ToolName != "exec" || call.ToolInput != "make build" {
-		t.Fatalf("tool call = %#v, want exec summarized as make build", call)
+	if call.ToolName != "exec_command" || call.ToolInput != "go test" {
+		t.Fatalf("tool call = %#v, want wrapped shell summarized as exec_command(go test)", call)
 	}
-	if call.Detail == nil || call.Detail.Input != "make build" {
+	if call.Detail == nil || call.Detail.Input != "go test" {
 		t.Fatalf("Detail = %#v, want extracted command", call.Detail)
+	}
+}
+
+func TestLoadEventsResolvesNonShellCodexExecTool(t *testing.T) {
+	path := filepath.Join("testdata", "tool-detail", "rollout-exec-update-plan.jsonl")
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Events) != 1 {
+		t.Fatalf("events = %#v, want one update_plan call", session.Events)
+	}
+	call := session.Events[0]
+	fullInput := `const r = await tools.update_plan({"plan":[{"step":"Chart the fictional ridge","status":"in_progress"}]}); text(r);`
+	if call.ToolName != "update_plan" {
+		t.Fatalf("ToolName = %q, want resolved update_plan", call.ToolName)
+	}
+	if call.ToolInput == fullInput || strings.Contains(call.ToolInput, "const r = await") {
+		t.Fatalf("ToolInput = %q, want a short semantic hint or no preview", call.ToolInput)
+	}
+	if call.Detail == nil || call.Detail.Input != fullInput {
+		t.Fatalf("Detail = %#v, want full wrapper input %q", call.Detail, fullInput)
+	}
+}
+
+func TestLoadEventsResolvesOnlyOneExecutableNestedTool(t *testing.T) {
+	path := filepath.Join("testdata", "tool-detail", "rollout-exec-call-sites.jsonl")
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Events) != 2 {
+		t.Fatalf("events = %#v, want two exec calls", session.Events)
+	}
+	decoy, mixed := session.Events[0], session.Events[1]
+	if decoy.ToolName != "exec_command" || decoy.ToolInput != "go test" || decoy.Detail == nil || decoy.Detail.Input != "go test" {
+		t.Errorf("decoy wrapper = %#v, want the only executable call resolved as exec_command(go test)", decoy)
+	}
+	if mixed.ToolName != "exec" || mixed.ToolInput != "" || mixed.Detail == nil || !strings.Contains(mixed.Detail.Input, "tools.update_plan") || !strings.Contains(mixed.Detail.Input, "tools.exec_command") {
+		t.Errorf("mixed wrapper = %#v, want unresolved exec with no raw-JS preview and full detail", mixed)
+	}
+}
+
+func TestCodexExecToolRejectsOversizedNestedName(t *testing.T) {
+	input := "const r = await tools." + strings.Repeat("a", 97) + "({}); text(r);"
+	if name, _, ok := codexExecTool(input); ok {
+		t.Fatalf("codexExecTool() resolved oversized name %q", name)
+	}
+}
+
+func TestCodexExecToolIgnoresToolsWithinUnicodeIdentifier(t *testing.T) {
+	input := `const πtools = {exec_command: () => "local"}; πtools.exec_command({"cmd":"printf FICTIONAL_DECOY"}); const r = await tools.update_plan({"plan":[]}); text(r);`
+	name, _, ok := codexExecTool(input)
+	if !ok || name != "update_plan" {
+		t.Fatalf("codexExecTool() = %q, %v, want only global update_plan call", name, ok)
 	}
 }
 
@@ -660,6 +717,19 @@ func TestCodexExecToolFallsBackForMalformedWrapper(t *testing.T) {
 	}
 	if got := codexToolDetail("exec", input).Input; got != input {
 		t.Fatalf("Detail.Input = %q, want pretty-input fallback", got)
+	}
+}
+
+func TestCodexExecToolDoesNotBorrowCommandFromComment(t *testing.T) {
+	input := `const payload = makeArgs(); const r = await tools.exec_command(payload /* {"cmd":"printf FICTIONAL_DECOY"} */); text(r.output);`
+	if command, ok := codexExecCommand(input); ok || command != "" {
+		t.Fatalf("codexExecCommand() = %q, %v, want no command for indirect arguments", command, ok)
+	}
+	if got := codexToolInput("exec", input); got == "printf FICTIONAL_DECOY" {
+		t.Fatalf("codexToolInput() borrowed comment JSON: %q", got)
+	}
+	if detail := codexToolDetail("exec", input); detail == nil || detail.Input != input {
+		t.Fatalf("Detail = %#v, want full wrapper for audit", detail)
 	}
 }
 

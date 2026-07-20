@@ -24,7 +24,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v10:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
+	return "codex-parser-v11:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
 }
 
 type tokenUsage struct {

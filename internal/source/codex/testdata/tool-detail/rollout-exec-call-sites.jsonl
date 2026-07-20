@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-02T03:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-decoy","name":"exec","input":"const example = \"tools.fake({})\"; const r = await tools.exec_command({\"cmd\":\"go test\"}); text(r.output);"}}
+{"timestamp":"2026-01-02T03:00:02Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-mixed","name":"exec","input":"const plan = await tools.update_plan({\"plan\":[]}); const command = await tools.exec_command({\"cmd\":\"go test\"}); text(plan); text(command.output);"}}
