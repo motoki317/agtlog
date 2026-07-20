@@ -507,21 +507,261 @@ func codexExecCommand(input string) (string, bool) {
 	if objectStart == len(input) || input[objectStart] != '{' {
 		return "", false
 	}
-	var state codexJSONNesting
-	for index := objectStart; index < len(input); index++ {
-		state.advance(input[index])
-		if input[index] == '}' && state.depth == 0 && !state.inString {
-			var fields struct {
-				Command *string `json:"cmd"`
-				Workdir string  `json:"workdir"`
-			}
-			if json.Unmarshal([]byte(input[objectStart:index+1]), &fields) != nil || fields.Command == nil || *fields.Command == "" {
-				return "", false
-			}
-			return *fields.Command, true
+	command := ""
+	objectEnd, valid := codexVisitJSObjectMembers(input, objectStart, func(member string) bool {
+		colon := strings.IndexByte(member, ':')
+		if colon < 0 || strings.TrimSpace(member[:colon]) == "" || strings.TrimSpace(member[colon+1:]) == "" {
+			return false
+		}
+		key := strings.TrimSpace(member[:colon])
+		key, valid := codexJSObjectKey(key)
+		if !valid {
+			return false
+		}
+		value := strings.TrimSpace(member[colon+1:])
+		if key != "cmd" {
+			return codexJSStaticObjectValue(value)
+		}
+		if command != "" {
+			return false
+		}
+		decoded, end, valid := codexJSQuotedString(value, 0)
+		if !valid || strings.TrimSpace(value[end:]) != "" || value[0] == '`' && codexJSTemplateInterpolates(value[:end]) || decoded == "" {
+			return false
+		}
+		command = decoded
+		return true
+	})
+	if !valid || command == "" {
+		return "", false
+	}
+	for objectEnd < len(input) && strings.ContainsRune(" \t\r\n", rune(input[objectEnd])) {
+		objectEnd++
+	}
+	return command, objectEnd < len(input) && input[objectEnd] == ')'
+}
+
+func codexJSObjectKey(key string) (string, bool) {
+	if strings.ContainsRune("'\"`", rune(key[0])) {
+		decoded, end, valid := codexJSQuotedString(key, 0)
+		return decoded, valid && end == len(key)
+	}
+	for index := range len(key) {
+		if !codexJSIdentifierPart(key[index]) && key[index] != '-' {
+			return "", false
 		}
 	}
-	return "", false
+	return key, true
+}
+
+func codexJSStaticObjectValue(value string) bool {
+	if strings.ContainsRune("'\"`", rune(value[0])) {
+		_, end, valid := codexJSQuotedString(value, 0)
+		return valid && end == len(value) && (value[0] != '`' || !codexJSTemplateInterpolates(value))
+	}
+	if value[0] == '{' && value[len(value)-1] == '}' || value[0] == '[' && value[len(value)-1] == ']' {
+		return true
+	}
+	if value == "true" || value == "false" || value == "null" {
+		return true
+	}
+	_, err := strconv.ParseFloat(value, 64)
+	return err == nil
+}
+
+func codexVisitJSObjectMembers(input string, objectStart int, visit func(string) bool) (int, bool) {
+	curlyDepth, squareDepth, parenDepth := 1, 0, 0
+	memberStart := objectStart + 1
+	for index := memberStart; index < len(input); {
+		switch input[index] {
+		case '\'', '"', '`':
+			index = codexSkipJSQuoted(input, index)
+			continue
+		case '/':
+			if index+1 < len(input) && input[index+1] == '/' {
+				if end := strings.IndexByte(input[index+2:], '\n'); end >= 0 {
+					index += end + 3
+					continue
+				}
+				return 0, false
+			}
+			if index+1 < len(input) && input[index+1] == '*' {
+				if end := strings.Index(input[index+2:], "*/"); end >= 0 {
+					index += end + 4
+					continue
+				}
+				return 0, false
+			}
+		case '{':
+			curlyDepth++
+		case '}':
+			curlyDepth--
+			if curlyDepth == 0 {
+				if squareDepth != 0 || parenDepth != 0 {
+					return 0, false
+				}
+				if member := strings.TrimSpace(input[memberStart:index]); member != "" {
+					return index + 1, visit(member)
+				}
+				return index + 1, true
+			}
+		case '[':
+			squareDepth++
+		case ']':
+			squareDepth--
+			if squareDepth < 0 {
+				return 0, false
+			}
+		case '(':
+			parenDepth++
+		case ')':
+			parenDepth--
+			if parenDepth < 0 {
+				return 0, false
+			}
+		case ',':
+			if curlyDepth == 1 && squareDepth == 0 && parenDepth == 0 {
+				member := strings.TrimSpace(input[memberStart:index])
+				if member == "" || !visit(member) {
+					return 0, false
+				}
+				memberStart = index + 1
+			}
+		}
+		index++
+	}
+	return 0, false
+}
+
+func codexJSTemplateInterpolates(value string) bool {
+	for index := 1; index < len(value)-1; index++ {
+		if value[index] == '\\' {
+			index++
+			continue
+		}
+		if value[index] == '$' && index+1 < len(value)-1 && value[index+1] == '{' {
+			return true
+		}
+	}
+	return false
+}
+
+func codexJSQuotedString(input string, start int) (string, int, bool) {
+	if start >= len(input) || !strings.ContainsRune("'\"`", rune(input[start])) {
+		return "", start, false
+	}
+	quote := input[start]
+	end := codexSkipJSQuoted(input, start)
+	if end <= start+1 || end > len(input) || input[end-1] != quote {
+		return "", end, false
+	}
+	var decoded strings.Builder
+	decoded.Grow(end - start - 2)
+	for index := start + 1; index < end-1; {
+		if input[index] != '\\' {
+			if quote != '`' && (input[index] == '\n' || input[index] == '\r') {
+				return "", end, false
+			}
+			decoded.WriteByte(input[index])
+			index++
+			continue
+		}
+		if index+1 >= end-1 {
+			return "", end, false
+		}
+		escaped := input[index+1]
+		switch escaped {
+		case '\\', '\'', '"', '`':
+			decoded.WriteByte(escaped)
+			index += 2
+		case 'b':
+			decoded.WriteByte('\b')
+			index += 2
+		case 'f':
+			decoded.WriteByte('\f')
+			index += 2
+		case 'n':
+			decoded.WriteByte('\n')
+			index += 2
+		case 'r':
+			decoded.WriteByte('\r')
+			index += 2
+		case 't':
+			decoded.WriteByte('\t')
+			index += 2
+		case 'v':
+			decoded.WriteByte('\v')
+			index += 2
+		case '0':
+			decoded.WriteByte(0)
+			index += 2
+		case '\n':
+			index += 2
+		case '\r':
+			index += 2
+			if index < end-1 && input[index] == '\n' {
+				index++
+			}
+		case 'x':
+			value, next, ok := codexJSHexEscape(input, index+2, 2, end-1)
+			if !ok {
+				return "", end, false
+			}
+			decoded.WriteRune(value)
+			index = next
+		case 'u':
+			value, next, ok := codexJSUnicodeEscape(input, index+2, end-1)
+			if !ok {
+				return "", end, false
+			}
+			decoded.WriteRune(value)
+			index = next
+		default:
+			decoded.WriteByte(escaped)
+			index += 2
+		}
+	}
+	return decoded.String(), end, true
+}
+
+func codexJSHexEscape(input string, start, width, limit int) (rune, int, bool) {
+	if start+width > limit {
+		return 0, start, false
+	}
+	value, err := strconv.ParseUint(input[start:start+width], 16, 32)
+	return rune(value), start + width, err == nil
+}
+
+func codexJSUnicodeEscape(input string, start, limit int) (rune, int, bool) {
+	if start < limit && input[start] == '{' {
+		end := strings.IndexByte(input[start+1:limit], '}')
+		if end < 0 || end == 0 || end > 6 {
+			return 0, start, false
+		}
+		value, err := strconv.ParseUint(input[start+1:start+1+end], 16, 32)
+		if err != nil || value > unicode.MaxRune || value >= 0xd800 && value <= 0xdfff {
+			return 0, start, false
+		}
+		return rune(value), start + end + 2, true
+	}
+	value, next, ok := codexJSHexEscape(input, start, 4, limit)
+	if !ok {
+		return 0, start, false
+	}
+	if value >= 0xd800 && value <= 0xdbff {
+		if next+2 > limit || input[next] != '\\' || input[next+1] != 'u' {
+			return utf8.RuneError, next, true
+		}
+		low, lowNext, valid := codexJSHexEscape(input, next+2, 4, limit)
+		if !valid || low < 0xdc00 || low > 0xdfff {
+			return utf8.RuneError, next, true
+		}
+		return 0x10000 + (value-0xd800)<<10 + low - 0xdc00, lowNext, true
+	}
+	if value >= 0xdc00 && value <= 0xdfff {
+		return utf8.RuneError, next, true
+	}
+	return value, next, true
 }
 
 func codexExecTool(input string) (string, int, bool) {

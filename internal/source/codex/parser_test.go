@@ -676,10 +676,10 @@ func TestLoadEventsExtractsCommandFromCodexExecTool(t *testing.T) {
 		t.Fatalf("events = %#v, want one exec call", session.Events)
 	}
 	call := session.Events[0]
-	if call.ToolName != "exec_command" || call.ToolInput != "go test" {
-		t.Fatalf("tool call = %#v, want wrapped shell summarized as exec_command(go test)", call)
+	if call.ToolName != "exec_command" || call.ToolInput != "go test ./..." {
+		t.Fatalf("tool call = %#v, want wrapped shell summarized as exec_command(go test ./...)", call)
 	}
-	if call.Detail == nil || call.Detail.Input != "go test" {
+	if call.Detail == nil || call.Detail.Input != "go test ./..." {
 		t.Fatalf("Detail = %#v, want extracted command", call.Detail)
 	}
 }
@@ -741,13 +741,73 @@ func TestCodexExecToolIgnoresToolsWithinUnicodeIdentifier(t *testing.T) {
 	}
 }
 
-func TestCodexExecToolKeepsFullMultilineCommandDetail(t *testing.T) {
-	input := `const r = await tools.exec_command({"cmd":"make build\nprintf '}'","workdir":"/x","env":{"MODE":"test"}}); text(r.output);`
-	if got := codexToolInput("exec", input); got != "make build" {
-		t.Fatalf("codexToolInput() = %q, want first command line", got)
+func TestCodexExecToolExtractsJavaScriptCommandStrings(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "unquoted key",
+			input: `const r = await tools.exec_command({cmd:"go test ./...", workdir:"/x"}); text(r.output);`,
+			want:  "go test ./...",
+		},
+		{
+			name:  "quoted JSON key",
+			input: `const r = await tools.exec_command({"cmd":"make"}); text(r.output);`,
+			want:  "make",
+		},
+		{
+			name:  "quoted JSON Unicode escape",
+			input: `const r = await tools.exec_command({"cmd":"printf \uD83D\uDE80"}); text(r.output);`,
+			want:  "printf 🚀",
+		},
+		{
+			name:  "quoted JSON isolated surrogate",
+			input: `const r = await tools.exec_command({"cmd":"printf \uD800"}); text(r.output);`,
+			want:  "printf �",
+		},
+		{
+			name:  "JavaScript hex escape",
+			input: `const r = await tools.exec_command({cmd:"printf \xE9"}); text(r.output);`,
+			want:  "printf é",
+		},
+		{
+			name:  "multiline double quoted",
+			input: `const r = await tools.exec_command({cmd:"make build\nprintf 'done'"}); text(r.output);`,
+			want:  "make build\nprintf 'done'",
+		},
+		{
+			name:  "braces and escaped quotes",
+			input: `const r = await tools.exec_command({cmd:"printf \"{ridge}\" && printf '}'", workdir:"/x"}); text(r.output);`,
+			want:  `printf "{ridge}" && printf '}'`,
+		},
+		{
+			name:  "single quoted",
+			input: `const r = await tools.exec_command({cmd:'printf \'{ridge}\''}); text(r.output);`,
+			want:  `printf '{ridge}'`,
+		},
+		{
+			name:  "backtick quoted",
+			input: "const r = await tools.exec_command({cmd:`make build\\nprintf \\`{ridge}\\``}); text(r.output);",
+			want:  "make build\nprintf `{ridge}`",
+		},
+		{
+			name:  "escaped backtick interpolation",
+			input: "const r = await tools.exec_command({cmd:`printf \\${target}`}); text(r.output);",
+			want:  "printf ${target}",
+		},
 	}
-	if got := codexToolDetail("exec", input).Input; got != "make build\nprintf '}'" {
-		t.Fatalf("Detail.Input = %q, want full multiline command", got)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			preview, detail := codexExecToolPresentation(test.input)
+			if want := strings.SplitN(test.want, "\n", 2)[0]; preview != want {
+				t.Errorf("preview = %q, want %q", preview, want)
+			}
+			if detail == nil || detail.Input != test.want {
+				t.Errorf("Detail = %#v, want full command %q", detail, test.want)
+			}
+		})
 	}
 }
 
@@ -758,6 +818,32 @@ func TestCodexExecToolFallsBackForMalformedWrapper(t *testing.T) {
 	}
 	if got := codexToolDetail("exec", input).Input; got != input {
 		t.Fatalf("Detail.Input = %q, want pretty-input fallback", got)
+	}
+}
+
+func TestCodexExecToolFallsBackForDynamicCommand(t *testing.T) {
+	tests := []string{
+		`const r = await tools.exec_command({workdir: ok ? "cmd" : "/tmp"}); text(r.output);`,
+		`const r = await tools.exec_command({cmd:"go test " + target}); text(r.output);`,
+		"const r = await tools.exec_command({cmd:`go test ${target}`}); text(r.output);",
+		`const r = await tools.exec_command({cmd:"go test", cmd:null}); text(r.output);`,
+		`const r = await tools.exec_command({cmd:"go test", workdir:}); text(r.output);`,
+		`const r = await tools.exec_command({cmd:"go test", ...options}); text(r.output);`,
+		`const r = await tools.exec_command({cmd:"go test", ["cmd"]:"stop"}); text(r.output);`,
+		`const r = await tools.exec_command({cmd:"go test", ...ok ? {cmd:"stop"} : {}}); text(r.output);`,
+		`const r = await tools.exec_command({cmd:"go test", broken:@}); text(r.output);`,
+		`const r = await tools.exec_command({cmd:"go test"} && {cmd:"stop"}); text(r.output);`,
+		"const r = await tools.exec_command({cmd:\"go test\nnext\"}); text(r.output);",
+		"const r = await tools.exec_command({cmd:'go test\nnext'}); text(r.output);",
+	}
+	for _, input := range tests {
+		preview, detail := codexExecToolPresentation(input)
+		if want := strings.Join(strings.Fields(input), " "); preview != want {
+			t.Errorf("preview for %q = %q, want raw fallback %q", input, preview, want)
+		}
+		if detail == nil || detail.Input != input {
+			t.Errorf("Detail for %q = %#v, want raw wrapper fallback", input, detail)
+		}
 	}
 }
 
