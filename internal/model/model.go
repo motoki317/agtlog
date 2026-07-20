@@ -157,25 +157,26 @@ type Event struct {
 }
 
 type Session struct {
-	ID         string
-	Agent      AgentKind
-	Path       string
-	CWD        string
-	Project    string
-	Title      string
-	Models     []string
-	StartedAt  time.Time
-	UpdatedAt  time.Time
-	GitBranch  string
-	AgentPath  string
-	ParentID   string
-	HasError   bool
-	Messages   int
-	Usage      []Usage
-	ModelCosts map[string]float64
-	Cost       Cost
-	Events     []Event
-	Subagents  []*Session
+	ID                  string
+	Agent               AgentKind
+	Path                string
+	CWD                 string
+	Project             string
+	Title               string
+	Models              []string
+	StartedAt           time.Time
+	UpdatedAt           time.Time
+	GitBranch           string
+	AgentPath           string
+	ParentID            string
+	HasError            bool
+	Messages            int
+	Usage               []Usage
+	ModelCosts          map[string]float64
+	ModelCostBreakdowns map[string]CostBreakdown
+	Cost                Cost
+	Events              []Event
+	Subagents           []*Session
 }
 
 func (s Session) TotalUsage() Usage {

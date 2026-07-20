@@ -24,7 +24,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v15:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
+	return "codex-parser-v16:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
 }
 
 type tokenUsage struct {
@@ -200,6 +200,14 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 			session.ModelCosts = make(map[string]float64)
 		}
 		session.ModelCosts[usage.Model] += calculated.USD
+		if p.calculator.HasCodexPricing(usage, p.defaultPricingModel) {
+			if session.ModelCostBreakdowns == nil {
+				session.ModelCostBreakdowns = make(map[string]model.CostBreakdown)
+			}
+			current := session.ModelCostBreakdowns[usage.Model]
+			current = current.Add(p.calculator.BreakdownCodex(usage, p.defaultPricingModel))
+			session.ModelCostBreakdowns[usage.Model] = current.ReconcileTotal(session.ModelCosts[usage.Model])
+		}
 		session.Cost.USD += calculated.USD
 		session.Cost.Estimated = true
 		for _, name := range calculated.MissingPricingModels {

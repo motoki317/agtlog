@@ -29,8 +29,8 @@ func mainFixture() string {
 }
 
 func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v10:") {
-		t.Fatalf("CacheFingerprint() = %q, want v10 presentation schema", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v11:") {
+		t.Fatalf("CacheFingerprint() = %q, want v11 summary schema", got)
 	}
 }
 
@@ -158,6 +158,57 @@ func TestParseCalculatesOwnCostPerMessageModel(t *testing.T) {
 	want := 258.5
 	if math.Abs(session.Cost.USD-want) > 1e-12 {
 		t.Fatalf("Parse().Cost.USD = %v, want %v", session.Cost.USD, want)
+	}
+	wantBreakdowns := map[string]model.CostBreakdown{
+		"claude-opus-4-8": {Input: 100, Output: 40, CacheWrite: 12.5, CacheRead: 0.5},
+		"claude-fable-5":  {Input: 60, Output: 30, CacheWrite: 15.5},
+	}
+	if !reflect.DeepEqual(session.ModelCostBreakdowns, wantBreakdowns) {
+		t.Fatalf("Parse().ModelCostBreakdowns = %#v, want %#v", session.ModelCostBreakdowns, wantBreakdowns)
+	}
+}
+
+func TestParseDoesNotInventBreakdownForRecordedCostWithoutPricing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-recorded-cost.jsonl")
+	line := `{"type":"assistant","sessionId":"session-recorded-cost","costUSD":1.23,"message":{"id":"msg-recorded","model":"unknown-model","usage":{"input_tokens":10,"output_tokens":2}}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Cost.USD != 1.23 || session.ModelCosts["unknown-model"] != 1.23 {
+		t.Fatalf("Parse() recorded cost = %#v / %#v, want 1.23", session.Cost, session.ModelCosts)
+	}
+	if _, ok := session.ModelCostBreakdowns["unknown-model"]; ok {
+		t.Fatalf("Parse().ModelCostBreakdowns = %#v, want no unavailable breakdown", session.ModelCostBreakdowns)
+	}
+}
+
+func TestParseBreakdownTotalExactlyMatchesMultiRowModelCost(t *testing.T) {
+	inputAbove272K, outputAbove272K := 1e-5, 4.5e-5
+	calculator := cost.NewCalculator(cost.Table{"model-a": {
+		Input: 5e-6, Output: 3e-5,
+		InputAbove272K: &inputAbove272K, OutputAbove272K: &outputAbove272K,
+	}})
+	path := filepath.Join(t.TempDir(), "session-multi-row.jsonl")
+	lines := []string{
+		`{"type":"assistant","sessionId":"session-multi-row","requestId":"req-a","message":{"id":"msg-a","model":"model-a","usage":{"input_tokens":15224662,"output_tokens":47117160,"cache_creation_input_tokens":20882115,"cache_read_input_tokens":95037078,"cache_creation":{"ephemeral_1h_input_tokens":56166500}}}}`,
+		`{"type":"assistant","sessionId":"session-multi-row","requestId":"req-b","message":{"id":"msg-b","model":"model-a","usage":{"input_tokens":15224663,"output_tokens":47117161,"cache_creation_input_tokens":20882116,"cache_read_input_tokens":95037079,"cache_creation":{"ephemeral_1h_input_tokens":56166501}}}}`,
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := NewParser(calculator).Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	breakdown := session.ModelCostBreakdowns["model-a"]
+	if breakdown.Total() != session.ModelCosts["model-a"] {
+		t.Fatalf("breakdown total %.17g (%#x) != model cost %.17g (%#x)", breakdown.Total(), math.Float64bits(breakdown.Total()), session.ModelCosts["model-a"], math.Float64bits(session.ModelCosts["model-a"]))
 	}
 }
 

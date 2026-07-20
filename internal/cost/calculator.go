@@ -57,6 +57,16 @@ func (c Calculator) CalculateCodex(usage model.Usage, defaultModel string) model
 	return calculated
 }
 
+func (c Calculator) BreakdownCodex(usage model.Usage, defaultModel string) model.CostBreakdown {
+	pricingModel, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
+	if !ok {
+		return model.CostBreakdown{}
+	}
+	mapped := usage
+	mapped.Model = pricingModel
+	return c.Breakdown(mapped)
+}
+
 func (c Calculator) HasCodexPricing(usage model.Usage, defaultModel string) bool {
 	_, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
 	return ok
