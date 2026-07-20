@@ -25,9 +25,9 @@ func testParser() Parser {
 	}), "gpt-5")
 }
 
-func TestParserFingerprintInvalidatesOlderSubagentMetadata(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v9:") {
-		t.Fatalf("CacheFingerprint() = %q, want v9 metadata schema", got)
+func TestParserFingerprintInvalidatesEncryptedPayloadEvents(t *testing.T) {
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v10:") {
+		t.Fatalf("CacheFingerprint() = %q, want v10 event schema", got)
 	}
 }
 
@@ -433,8 +433,9 @@ func TestLoadEventsCoalescesLongMirroredUserMessage(t *testing.T) {
 
 func TestAppendCodexMessagePreservesDistinctSameKindMessages(t *testing.T) {
 	session := &model.Session{}
-	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: "Survey the northern ridge"}, false)
-	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: "Survey the southern ridge"}, false)
+	dedupTextByEvent := make(map[int]string)
+	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: "Survey the northern ridge"}, false, "Survey the northern ridge", dedupTextByEvent)
+	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: "Survey the southern ridge"}, false, "Survey the southern ridge", dedupTextByEvent)
 
 	if len(session.Events) != 2 || session.Events[0].Text != "Survey the northern ridge" || session.Events[1].Text != "Survey the southern ridge" {
 		t.Fatalf("same-kind messages = %#v, want both distinct messages", session.Events)
@@ -443,10 +444,11 @@ func TestAppendCodexMessagePreservesDistinctSameKindMessages(t *testing.T) {
 
 func TestAppendCodexMessageDoesNotDeduplicateBeyondWindow(t *testing.T) {
 	session := &model.Session{Events: []model.Event{{Kind: model.EventUser, Text: "Repeat the survey"}}}
+	dedupTextByEvent := make(map[int]string)
 	for index := range 16 {
 		session.Events = append(session.Events, model.Event{Kind: model.EventThinking, Text: "Checkpoint " + strconv.Itoa(index)})
 	}
-	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: "Repeat the survey"}, false)
+	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: "Repeat the survey"}, false, "Repeat the survey", dedupTextByEvent)
 
 	if len(session.Events) != 18 || session.Events[len(session.Events)-1].Text != "Repeat the survey" {
 		t.Fatalf("events outside the dedup window = %#v, want repeated message appended", session.Events)
@@ -939,5 +941,183 @@ func TestLoadEventsRejectsSymlinkSwap(t *testing.T) {
 	session := &model.Session{Path: linkPath, Agent: model.AgentCodex}
 	if err := testParser().LoadEvents(context.Background(), session); err == nil {
 		t.Fatal("LoadEvents() accepted a symlinked session")
+	}
+}
+
+func TestCodexElideEncryptedPreservesShortAndPlainText(t *testing.T) {
+	for _, input := range []string{
+		"ordinary lunar telemetry",
+		"gAAAAshort",
+		"gAAAA" + strings.Repeat("a", 58),
+	} {
+		if got := codexElideEncrypted(input); got != input {
+			t.Errorf("codexElideEncrypted(%q) = %q, want unchanged", input, got)
+		}
+	}
+}
+
+func TestCodexElideEncryptedReplacesFernetToken(t *testing.T) {
+	token := "gAAAA" + strings.Repeat("a", 59)
+	if got := codexElideEncrypted(token); got != "<encrypted 64 chars>" {
+		t.Fatalf("codexElideEncrypted() = %q, want 64-character placeholder", got)
+	}
+}
+
+func TestCodexElideEncryptedPreservesSurroundingJSON(t *testing.T) {
+	token := "gAAAA" + strings.Repeat("Ab9_-", 12) + "=="
+	input := `{"target":"/root/x","message":"` + token + `","plain":"visible"}`
+	want := `{"target":"/root/x","message":"<encrypted 67 chars>","plain":"visible"}`
+	got := codexElideEncrypted(input)
+	if got != want {
+		t.Fatalf("codexElideEncrypted() = %q, want %q", got, want)
+	}
+	if !json.Valid([]byte(got)) {
+		t.Fatalf("codexElideEncrypted() produced invalid JSON: %q", got)
+	}
+}
+
+func TestCodexElideEncryptedReplacesMultipleTokens(t *testing.T) {
+	first := "gAAAA" + strings.Repeat("b", 59)
+	second := "gAAAA" + strings.Repeat("C7_-", 15) + "="
+	input := "gAAAAshort " + first + " between " + second + " done"
+	want := "gAAAAshort <encrypted 64 chars> between <encrypted 66 chars> done"
+	if got := codexElideEncrypted(input); got != want {
+		t.Fatalf("codexElideEncrypted() = %q, want %q", got, want)
+	}
+}
+
+func TestCodexElideEncryptedPreservesEmbeddedPrefix(t *testing.T) {
+	input := "prefixgAAAA" + strings.Repeat("a", 59)
+	if got := codexElideEncrypted(input); got != input {
+		t.Fatalf("codexElideEncrypted() = %q, want embedded prefix unchanged", got)
+	}
+}
+
+func TestLoadEventsElidesEncryptedToolInput(t *testing.T) {
+	path := filepath.Join("testdata", "rollout-encrypted-payloads.jsonl")
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	call := session.Events[0]
+	for label, input := range map[string]string{
+		"ToolInput":    call.ToolInput,
+		"Detail.Input": call.Detail.Input,
+	} {
+		if !strings.Contains(input, `"target"`) || !strings.Contains(input, "/root/x") || !strings.Contains(input, "<encrypted 64 chars>") {
+			t.Errorf("%s = %q, want target and encrypted placeholder", label, input)
+		}
+		if strings.Contains(input, "gAAAA") {
+			t.Errorf("%s = %q, want encrypted token removed", label, input)
+		}
+		if !json.Valid([]byte(input)) {
+			t.Errorf("%s = %q, want valid JSON", label, input)
+		}
+	}
+}
+
+func TestLoadEventsElidesEncryptedToolOutput(t *testing.T) {
+	path := filepath.Join("testdata", "rollout-encrypted-payloads.jsonl")
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	call := session.Events[0]
+	for label, output := range map[string]string{
+		"Detail.Output": call.Detail.Output,
+		"ResultSummary": call.ResultSummary,
+	} {
+		if !strings.Contains(output, "<encrypted 64 chars>") || !strings.Contains(output, "delivered") {
+			t.Errorf("%s = %q, want encrypted placeholder and sibling status", label, output)
+		}
+		if strings.Contains(output, "gAAAA") {
+			t.Errorf("%s = %q, want encrypted token removed", label, output)
+		}
+	}
+}
+
+func TestLoadEventsElidesEncryptedMessageText(t *testing.T) {
+	path := filepath.Join("testdata", "rollout-encrypted-payloads.jsonl")
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	wantSibling := map[model.EventKind]string{
+		model.EventUser:          `"sender":"/root/x"`,
+		model.EventThinking:      `"phase":"planning"`,
+		model.EventAssistantText: `"reply":"ready"`,
+	}
+	for kind, sibling := range wantSibling {
+		var text string
+		for _, event := range session.Events {
+			if event.Kind == kind {
+				text = event.Text
+				break
+			}
+		}
+		if !strings.Contains(text, "<encrypted 64 chars>") || !strings.Contains(text, sibling) {
+			t.Errorf("%s text = %q, want encrypted placeholder and sibling field", kind, text)
+		}
+		if strings.Contains(text, "gAAAA") {
+			t.Errorf("%s text = %q, want encrypted token removed", kind, text)
+		}
+	}
+}
+
+func TestLoadEventsPreservesPlaintextToolMessage(t *testing.T) {
+	path := filepath.Join("testdata", "rollout-encrypted-payloads.jsonl")
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	want := `{"target":"/root/x","message":"Review the lunar route."}`
+	for _, event := range session.Events {
+		if event.Kind == model.EventToolCall && event.ToolName == "send_message" {
+			if event.ToolInput != want {
+				t.Fatalf("plaintext ToolInput = %q, want %q", event.ToolInput, want)
+			}
+			if event.Detail == nil || !strings.Contains(event.Detail.Input, "Review the lunar route.") {
+				t.Fatalf("plaintext Detail.Input = %#v, want message preserved", event.Detail)
+			}
+			return
+		}
+	}
+	t.Fatal("plaintext send_message tool call not found")
+}
+
+func TestLoadEventsPreservesDistinctEncryptedMessages(t *testing.T) {
+	first := `{"encrypted_content":"gAAAA` + strings.Repeat("a", 59) + `"}`
+	second := `{"encrypted_content":"gAAAA` + strings.Repeat("b", 59) + `"}`
+	path := filepath.Join(t.TempDir(), "rollout-encrypted-mirrors.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:00:00.000Z","type":"event_msg","payload":{"type":"user_message","message":` + strconv.Quote(first) + `}}`,
+		`{"timestamp":"2026-01-02T03:00:00.005Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":` + strconv.Quote(first) + `}]}}`,
+		`{"timestamp":"2026-01-02T03:00:01.000Z","type":"event_msg","payload":{"type":"user_message","message":` + strconv.Quote(second) + `}}`,
+		`{"timestamp":"2026-01-02T03:00:01.005Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":` + strconv.Quote(second) + `}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Events) != 2 {
+		t.Fatalf("encrypted messages = %#v, want two distinct events with mirrored copies coalesced", session.Events)
+	}
+	wantText := `{"encrypted_content":"<encrypted 64 chars>"}`
+	for index, event := range session.Events {
+		if event.Kind != model.EventUser || event.Text != wantText {
+			t.Errorf("encrypted event %d = %#v, want elided user message", index, event)
+		}
+		wantTimestamp := time.Date(2026, 1, 2, 3, 0, index, 5_000_000, time.UTC)
+		if !event.Timestamp.Equal(wantTimestamp) {
+			t.Errorf("encrypted event %d timestamp = %v, want preferred mirror timestamp %v", index, event.Timestamp, wantTimestamp)
+		}
 	}
 }

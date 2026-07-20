@@ -45,6 +45,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 	defer file.Close()
 
 	calls := make(map[string]int)
+	dedupTextByEvent := make(map[int]string)
 	currentModel := ""
 	isSubagent := session.AgentPath != ""
 	active := !isSubagent
@@ -93,95 +94,107 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 			currentModel = record.Payload.Model
 			return
 		}
+		event := model.Event{Timestamp: timestamp, Model: currentModel}
+		preferredMessage := true
 		if record.Type == "event_msg" {
 			switch record.Payload.Type {
 			case "user_message":
-				message := codexTimelineUserMessage(record.Payload.Message)
-				if message != "" {
-					appendCodexMessage(session, model.Event{Timestamp: timestamp, Kind: model.EventUser, Text: message, Model: currentModel}, false)
+				event.Kind, event.Text = model.EventUser, codexTimelineUserMessage(record.Payload.Message)
+				if event.Text == "" {
+					return
 				}
 			case "agent_message":
-				if record.Payload.Message != "" {
-					appendCodexMessage(session, model.Event{Timestamp: timestamp, Kind: model.EventAssistantText, Text: record.Payload.Message, Model: currentModel}, false)
+				event.Kind, event.Text = model.EventAssistantText, record.Payload.Message
+				if event.Text == "" {
+					return
 				}
 			case "sub_agent_activity":
 				appendCodexSubagentEvent(session, record.Payload.AgentPath, record.Payload.AgentID, record.Payload.Kind, timestamp)
+				return
 			case "context_compacted":
 				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: "context compacted", Model: currentModel})
+				return
+			default:
+				return
 			}
-			return
-		}
-		if record.Type != "response_item" {
-			return
-		}
-		event := model.Event{Timestamp: timestamp, Model: currentModel}
-		switch record.Payload.Type {
-		case "message", "agent_message":
-			event.Text = joinCodexText(record.Payload.Content)
-			if strings.HasPrefix(event.Text, "Message Type:") {
-				if !isSubagent {
+			preferredMessage = false
+		} else {
+			if record.Type != "response_item" {
+				return
+			}
+			switch record.Payload.Type {
+			case "message", "agent_message":
+				event.Text = joinCodexText(record.Payload.Content)
+				if strings.HasPrefix(event.Text, "Message Type:") {
+					if !isSubagent {
+						return
+					}
+					event.Kind, event.Text = model.EventUser, codexDelegatedPayload(event.Text)
+				} else if record.Payload.Role == "user" {
+					event.Kind = model.EventUser
+				} else if record.Payload.Role == "assistant" || record.Payload.Type == "agent_message" {
+					event.Kind = model.EventAssistantText
+				} else {
 					return
 				}
-				event.Kind, event.Text = model.EventUser, codexDelegatedPayload(event.Text)
-			} else if record.Payload.Role == "user" {
-				event.Kind = model.EventUser
-			} else if record.Payload.Role == "assistant" || record.Payload.Type == "agent_message" {
-				event.Kind = model.EventAssistantText
-			} else {
-				return
-			}
-			if event.Kind == model.EventUser {
-				event.Text = codexTimelineUserMessage(event.Text)
-			}
-			if event.Text == "" {
-				return
-			}
-		case "reasoning":
-			event.Kind, event.Text = model.EventThinking, joinCodexText(record.Payload.Summary)
-		case "function_call", "custom_tool_call":
-			event.Kind, event.CallID, event.ToolName = model.EventToolCall, record.Payload.CallID, record.Payload.Name
-			input := record.Payload.Arguments
-			if input == "" {
-				input = record.Payload.Input
-			}
-			event.ToolInput, event.Detail = codexToolPresentation(record.Payload.Name, input)
-			calls[event.CallID] = len(session.Events)
-		case "function_call_output", "custom_tool_call_output":
-			event.Kind, event.CallID = model.EventToolResult, record.Payload.CallID
-			output := codexOutputText(record.Payload.Output)
-			index, linked := calls[event.CallID]
-			summary := ""
-			if linked {
-				call := &session.Events[index]
-				if call.ToolName == "exec" || call.ToolName == "wait" {
-					var exitCode string
-					output, exitCode = codexNormalizeExecOutput(output)
-					if exitCode != "" {
-						summary = "exit " + exitCode
+				if event.Kind == model.EventUser {
+					event.Text = codexTimelineUserMessage(event.Text)
+				}
+				if event.Text == "" {
+					return
+				}
+			case "reasoning":
+				event.Kind, event.Text = model.EventThinking, joinCodexText(record.Payload.Summary)
+			case "function_call", "custom_tool_call":
+				event.Kind, event.CallID, event.ToolName = model.EventToolCall, record.Payload.CallID, record.Payload.Name
+				input := record.Payload.Arguments
+				if input == "" {
+					input = record.Payload.Input
+				}
+				input = codexElideEncrypted(input)
+				event.ToolInput, event.Detail = codexToolPresentation(record.Payload.Name, input)
+				calls[event.CallID] = len(session.Events)
+			case "function_call_output", "custom_tool_call_output":
+				event.Kind, event.CallID = model.EventToolResult, record.Payload.CallID
+				output := codexElideEncrypted(codexOutputText(record.Payload.Output))
+				index, linked := calls[event.CallID]
+				summary := ""
+				if linked {
+					call := &session.Events[index]
+					if call.ToolName == "exec" || call.ToolName == "wait" {
+						var exitCode string
+						output, exitCode = codexNormalizeExecOutput(output)
+						if exitCode != "" {
+							summary = "exit " + exitCode
+						}
 					}
 				}
-			}
-			if summary == "" {
-				summary = codexResultSummary(output)
-			}
-			event.Text = model.BoundedDetailText(summary)
-			if linked {
-				call := &session.Events[index]
-				if call.Detail != nil && event.CallID != "" {
-					call.Detail.Output = model.BoundedDetailText(output)
+				if summary == "" {
+					summary = codexResultSummary(output)
 				}
-				call.ResultSummary = event.Text
-				if !timestamp.Before(call.Timestamp) {
-					call.Duration = timestamp.Sub(call.Timestamp)
+				event.Text = model.BoundedDetailText(summary)
+				if linked {
+					call := &session.Events[index]
+					if call.Detail != nil && event.CallID != "" {
+						call.Detail.Output = model.BoundedDetailText(output)
+					}
+					call.ResultSummary = event.Text
+					if !timestamp.Before(call.Timestamp) {
+						call.Duration = timestamp.Sub(call.Timestamp)
+					}
 				}
+			default:
+				return
 			}
-		default:
-			return
+		}
+		dedupText := event.Text
+		if event.Kind == model.EventUser || event.Kind == model.EventAssistantText || event.Kind == model.EventThinking {
+			event.Text = codexElideEncrypted(event.Text)
 		}
 		event.ToolInput = model.BoundedDetailText(event.ToolInput)
 		if event.Kind == model.EventUser || event.Kind == model.EventAssistantText {
 			if event.Text != "" {
-				appendCodexMessage(session, event, true)
+				appendCodexMessage(session, event, preferredMessage, dedupText, dedupTextByEvent)
 			}
 		} else {
 			event.Text = model.BoundedDetailText(event.Text)
@@ -204,23 +217,40 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 	return nil
 }
 
-func appendCodexMessage(session *model.Session, event model.Event, preferred bool) {
+func appendCodexMessage(session *model.Session, event model.Event, preferred bool, dedupText string, dedupTextByEvent map[int]string) {
 	event.Text = model.BoundedDetailText(model.CleanTimelineText(event.Text))
+	dedupText = model.BoundedDetailText(model.CleanTimelineText(dedupText))
 	if event.Text == "" {
 		return
 	}
 	// A 16-event window is the deduplication ceiling for mirrored message copies.
+	for index := range dedupTextByEvent {
+		if index < len(session.Events)-16 {
+			delete(dedupTextByEvent, index)
+		}
+	}
 	for index := len(session.Events) - 1; index >= 0 && index >= len(session.Events)-16; index-- {
 		existing := session.Events[index]
-		if existing.Kind != event.Kind || existing.Text != event.Text {
+		existingText := existing.Text
+		if text, ok := dedupTextByEvent[index]; ok {
+			existingText = text
+		}
+		if existing.Kind != event.Kind || existingText != dedupText {
 			continue
 		}
 		if preferred {
 			session.Events[index] = event
+			if dedupTextByEvent != nil {
+				dedupTextByEvent[index] = dedupText
+			}
 		}
 		return
 	}
+	index := len(session.Events)
 	session.Events = append(session.Events, event)
+	if dedupTextByEvent != nil {
+		dedupTextByEvent[index] = dedupText
+	}
 }
 
 func codexDelegatedPayload(text string) string {
@@ -283,6 +313,55 @@ func joinCodexText(blocks []codexTextBlock) string {
 		parts = append(parts, block.Text)
 	}
 	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func codexElideEncrypted(text string) string {
+	const (
+		prefix    = "gAAAA"
+		minLength = 64
+	)
+	var elided strings.Builder
+	searchFrom, writeFrom := 0, 0
+	for searchFrom < len(text) {
+		offset := strings.Index(text[searchFrom:], prefix)
+		if offset < 0 {
+			break
+		}
+		start := searchFrom + offset
+		if start > 0 && codexFernetChar(text[start-1]) {
+			searchFrom = start + len(prefix)
+			continue
+		}
+		end := start + len(prefix)
+		for end < len(text) && codexFernetChar(text[end]) {
+			end++
+		}
+		for end < len(text) && text[end] == '=' {
+			end++
+		}
+		if end-start < minLength {
+			searchFrom = start + len(prefix)
+			continue
+		}
+		if elided.Len() == 0 {
+			elided.Grow(len(text))
+		}
+		elided.WriteString(text[writeFrom:start])
+		fmt.Fprintf(&elided, "<encrypted %d chars>", end-start)
+		writeFrom, searchFrom = end, end
+	}
+	if elided.Len() == 0 {
+		return text
+	}
+	elided.WriteString(text[writeFrom:])
+	return elided.String()
+}
+
+func codexFernetChar(char byte) bool {
+	return char >= 'A' && char <= 'Z' ||
+		char >= 'a' && char <= 'z' ||
+		char >= '0' && char <= '9' ||
+		char == '_' || char == '-'
 }
 
 func codexOutputText(output json.RawMessage) string {
