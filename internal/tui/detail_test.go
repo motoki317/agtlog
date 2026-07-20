@@ -1920,6 +1920,17 @@ func TestDetailHeaderIncludesProjectFullCWDAndAllModels(t *testing.T) {
 	}
 }
 
+func TestDetailHeaderShowsOnlyPerNodeCosts(t *testing.T) {
+	child := &model.Session{Usage: []model.Usage{{InputTokens: 2_000}}, Cost: model.Cost{USD: 2}}
+	session := &model.Session{
+		ID: "mission", Agent: model.AgentClaude, Usage: []model.Usage{{InputTokens: 1_000}}, Cost: model.Cost{USD: 1}, Subagents: []*model.Session{child},
+	}
+	line := strings.TrimSpace(newDetailState(session, 120, 12, newStyles()).headerPanelLines()[2].plain)
+	if !strings.Contains(line, "total $3.00 │ own $1.00 │ subagents $2.00") || strings.Contains(line, "tokens") || strings.Contains(line, "1000") || strings.Contains(line, "3000") {
+		t.Fatalf("detail header accounting = %q, want cost-only nodes", line)
+	}
+}
+
 func TestDetailHeaderLeadsWithEmphasizedSessionTitle(t *testing.T) {
 	profile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)

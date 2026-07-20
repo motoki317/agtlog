@@ -1582,11 +1582,6 @@ const headerFieldSep = " │ "
 
 func (d *detailState) headerPanelLines() []panelLine {
 	session := d.session
-	totalUsage := session.TotalUsage()
-	var ownUsage model.Usage
-	for _, usage := range session.Usage {
-		ownUsage = ownUsage.Add(usage)
-	}
 	totalCost := session.TotalCost()
 	subagentCost := model.Cost{}
 	missing := make(map[string]bool)
@@ -1639,11 +1634,11 @@ func (d *detailState) headerPanelLines() []panelLine {
 		line3Parts = append(line3Parts, updated)
 	}
 	detailedUsage := strings.Join([]string{
-		fmt.Sprintf("total %s tokens / %s", humanTokens(totalUsage.TotalTokens()), formatCost(totalCost)),
-		fmt.Sprintf("own %s / %s", humanTokens(ownUsage.TotalTokens()), formatCost(session.Cost)),
-		fmt.Sprintf("subagents %s / %s", humanTokens(totalUsage.TotalTokens()-ownUsage.TotalTokens()), formatCost(subagentCost)),
+		"total " + formatCost(totalCost),
+		"own " + formatCost(session.Cost),
+		"subagents " + formatCost(subagentCost),
 	}, headerFieldSep)
-	compactUsage := fmt.Sprintf("total %s tokens / %s", humanTokens(totalUsage.TotalTokens()), formatCost(totalCost))
+	compactUsage := "total " + formatCost(totalCost)
 	line3Parts = append(line3Parts, detailedUsage)
 	if ansi.StringWidth(strings.Join(line3Parts, headerFieldSep)) > innerWidth {
 		line3Parts[len(line3Parts)-1] = compactUsage

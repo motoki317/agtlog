@@ -24,7 +24,6 @@ const (
 	listTimeWidth      = 15
 	listMessagesWidth  = 5
 	listSubagentsWidth = 4
-	listTokensWidth    = 9
 	listCostWidth      = 7
 	listCursorWidth    = 2
 )
@@ -52,7 +51,6 @@ type listColumn struct {
 }
 
 type sessionPresentation struct {
-	usage         model.Usage
 	cost          model.Cost
 	subagentCount int
 	model         string
@@ -61,7 +59,7 @@ type sessionPresentation struct {
 func newSessionPresentation(session *model.Session) sessionPresentation {
 	cost := session.TotalCost()
 	return sessionPresentation{
-		usage: session.TotalUsage(), cost: cost, subagentCount: subagentCount(session),
+		cost: cost, subagentCount: subagentCount(session),
 		model: shortModelsWithCost(session, cost),
 	}
 }
@@ -142,7 +140,6 @@ func listColumns(width int, absolute ...bool) []listColumn {
 		{kind: columnAge, title: timeTitle, width: timeWidth, right: true, absoluteTime: absoluteTime},
 		{kind: columnMessages, title: "MSGS", width: listMessagesWidth, right: true},
 		{kind: columnSubagents, title: "SUBS", width: listSubagentsWidth, right: true},
-		{kind: columnTokens, title: "TOKENS", width: listTokensWidth, right: true},
 		{kind: columnCost, title: "$", width: listCostWidth, right: true},
 	}
 	for _, kind := range []listColumnKind{columnModel, columnMessages, columnSubagents, columnProject, columnAge} {
@@ -159,7 +156,7 @@ func listColumns(width int, absolute ...bool) []listColumn {
 			}
 		}
 	}
-	for _, kind := range []listColumnKind{columnCost, columnTokens, columnAgent} {
+	for _, kind := range []listColumnKind{columnCost, columnAgent} {
 		if listColumnsWidth(columns) <= width {
 			break
 		}
@@ -242,21 +239,11 @@ func sessionCellWithPresentation(session *model.Session, presentation sessionPre
 			return ""
 		}
 		return compactCount(int64(presentation.subagentCount), column.width)
-	case columnTokens:
-		return formatPresentedTokens(presentation, column.width)
 	case columnCost:
 		return formatCostWidth(presentation.cost, column.width)
 	default:
 		return ""
 	}
-}
-
-func formatTokens(session *model.Session, width int) string {
-	return formatPresentedTokens(newSessionPresentation(session), width)
-}
-
-func formatPresentedTokens(presentation sessionPresentation, width int) string {
-	return compactCount(presentation.usage.TotalTokens(), min(4, max(1, width)))
 }
 
 func sessionIdentity(session *model.Session) string {
