@@ -266,7 +266,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cycleTheme()
 			return m, nil
 		}
-		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "esc" || key.String() == "left" || key.String() == "h") {
+		if keyMsg, ok := msg.(tea.KeyMsg); ok && key.Matches(keyMsg, m.keys.Back) {
 			if last := len(m.detailStack) - 1; last >= 0 {
 				m.detail = m.detailStack[last]
 				m.detailStack = m.detailStack[:last]
@@ -276,7 +276,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "enter" || key.String() == "right" || key.String() == "l") {
+		if keyMsg, ok := msg.(tea.KeyMsg); ok && key.Matches(keyMsg, m.keys.Collapse, m.keys.Expand) {
+			if detail, ok := m.detail.(*detailState); ok {
+				if key.Matches(keyMsg, m.keys.Collapse) {
+					detail.collapseFocused()
+				} else {
+					detail.expandFocused()
+				}
+			}
+			return m, nil
+		}
+		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "enter" || key.String() == "l") {
 			if m.activateDetailSelection() {
 				return m, nil
 			}
@@ -387,13 +397,10 @@ func (m *Model) updateDetailMouse(mouse tea.MouseMsg) tea.Cmd {
 	if !ok {
 		return nil
 	}
-	if !detail.selectRow(index) {
-		return nil
-	}
+	detail.selectRow(index)
 	if detail.selectedExpandable() {
 		return detail.update(tea.KeyMsg{Type: tea.KeySpace})
 	}
-	m.activateDetailSelection()
 	return nil
 }
 

@@ -177,21 +177,115 @@ func TestEscapePopsThenReturnsToList(t *testing.T) {
 	}
 }
 
-func TestLeftAndHPopDrilledDetail(t *testing.T) {
-	for _, back := range []tea.KeyMsg{{Type: tea.KeyLeft}, {Type: tea.KeyRunes, Runes: []rune{'h'}}} {
-		t.Run(back.String(), func(t *testing.T) {
-			child := &model.Session{ID: "scout", Agent: model.AgentClaude}
-			parent := &model.Session{
-				ID: "route", Agent: model.AgentClaude, Subagents: []*model.Session{child},
-				Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
-			}
-			m := NewModel([]*model.Session{parent}, nil)
-			for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}, back} {
+func TestLeftCollapsesFocusedTimelineRow(t *testing.T) {
+	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the crater"},
+		{Kind: model.EventThinking, Text: "Choose the safest route"},
+		{Kind: model.EventAssistantText, Text: "The ridge route is clear."},
+	}}
+	m := NewModel([]*model.Session{session}, nil)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	for index, item := range detail.focusables {
+		if item.expandable {
+			detail.focus = index
+			detail.selectedLine = item.line
+			break
+		}
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m = updated.(Model)
+
+	detail = detailStateFromScreen(t, m.detail)
+	focused := detail.focusables[detail.focus]
+	if m.screen != screenDetail || len(m.detailStack) != 0 || !focused.expandable || detail.isExpanded(focused.key) {
+		t.Fatalf("left left screen=%v stack=%d expandable=%t expanded=%t, want collapsed root detail", m.screen, len(m.detailStack), focused.expandable, detail.isExpanded(focused.key))
+	}
+}
+
+func TestHPopsDrilledDetail(t *testing.T) {
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude}
+	parent := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Subagents: []*model.Session{child},
+		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
+	}
+	m := NewModel([]*model.Session{parent}, nil)
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'h'}}} {
+		updated, _ := m.Update(key)
+		m = updated.(Model)
+	}
+	if m.screen != screenDetail || detailStateFromScreen(t, m.detail).session != parent || len(m.detailStack) != 0 {
+		t.Fatalf("h did not pop to parent: screen=%v detail=%q stack=%d", m.screen, detailStateFromScreen(t, m.detail).session.ID, len(m.detailStack))
+	}
+}
+
+func TestRightExpandsFocusedTimelineRow(t *testing.T) {
+	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Survey the crater"},
+		{Kind: model.EventThinking, Text: "Choose the safest route"},
+		{Kind: model.EventAssistantText, Text: "The ridge route is clear."},
+	}}
+	detail := newDetailState(session, 80, 20, newStyles())
+	for index, item := range detail.focusables {
+		if item.expandable {
+			detail.focus = index
+			detail.selectedLine = item.line
+			detail.collapseFocused()
+			break
+		}
+	}
+	m := NewModel(nil, nil)
+	m.screen = screenDetail
+	m.detail = detail
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(Model)
+
+	detail = detailStateFromScreen(t, m.detail)
+	focused := detail.focusables[detail.focus]
+	if !focused.expandable || !detail.isExpanded(focused.key) || len(m.detailStack) != 0 {
+		t.Fatalf("right left expandable=%t expanded=%t stack=%d, want expanded root detail", focused.expandable, detail.isExpanded(focused.key), len(m.detailStack))
+	}
+}
+
+func TestArrowsNeverNavigateNonFoldableDetailScreens(t *testing.T) {
+	for _, arrow := range []tea.KeyMsg{{Type: tea.KeyLeft}, {Type: tea.KeyRight}} {
+		t.Run("timeline/"+arrow.String(), func(t *testing.T) {
+			session := &model.Session{ID: "route", Agent: model.AgentClaude, Events: []model.Event{{Kind: model.EventUser, Text: "Chart the route"}}}
+			m := NewModel([]*model.Session{session}, nil)
+			for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, arrow} {
 				updated, _ := m.Update(key)
 				m = updated.(Model)
 			}
-			if m.screen != screenDetail || detailStateFromScreen(t, m.detail).session != parent || len(m.detailStack) != 0 {
-				t.Fatalf("%q did not pop to parent: screen=%v detail=%q stack=%d", back.String(), m.screen, detailStateFromScreen(t, m.detail).session.ID, len(m.detailStack))
+			if detailStateFromScreen(t, m.detail).session != session || len(m.detailStack) != 0 {
+				t.Fatalf("%s navigated from non-foldable timeline row: detail=%T stack=%d", arrow.String(), m.detail, len(m.detailStack))
+			}
+		})
+
+		t.Run("item/"+arrow.String(), func(t *testing.T) {
+			item := newItemView(model.Event{Kind: model.EventUser, Text: "Chart the route"}, model.AgentClaude, nil, 80, 12, newStyles())
+			m := NewModel(nil, nil)
+			m.screen = screenDetail
+			m.detailStack = []detailScreen{newDetailState(&model.Session{ID: "route"}, 80, 12, m.styles)}
+			m.detail = item
+			updated, _ := m.Update(arrow)
+			m = updated.(Model)
+			if m.detail.(*itemView).event.Kind != model.EventUser || len(m.detailStack) != 1 {
+				t.Fatalf("%s navigated from item: detail=%T stack=%d", arrow.String(), m.detail, len(m.detailStack))
+			}
+		})
+
+		t.Run("subagents/"+arrow.String(), func(t *testing.T) {
+			child := &model.Session{ID: "scout", Agent: model.AgentClaude}
+			root := &model.Session{ID: "route", Agent: model.AgentClaude, Subagents: []*model.Session{child}}
+			m := NewModel([]*model.Session{root}, nil)
+			for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyTab}, arrow} {
+				updated, _ := m.Update(key)
+				m = updated.(Model)
+			}
+			detail := detailStateFromScreen(t, m.detail)
+			if detail.session != root || detail.tab != tabSubagents || detail.subagentSelection != 0 || len(m.detailStack) != 0 {
+				t.Fatalf("%s navigated from Subagents row: session=%q tab=%v selection=%d stack=%d", arrow.String(), detail.session.ID, detail.tab, detail.subagentSelection, len(m.detailStack))
 			}
 		})
 	}
@@ -273,26 +367,19 @@ func TestThemeCycleUpdatesStackedDetailScreens(t *testing.T) {
 	}
 }
 
-func TestRightAndLDrillIntoSubagents(t *testing.T) {
-	for _, open := range []tea.KeyMsg{
-		{Type: tea.KeyRight},
-		{Type: tea.KeyRunes, Runes: []rune{'l'}},
-	} {
-		t.Run(open.String(), func(t *testing.T) {
-			child := &model.Session{ID: "scout", Agent: model.AgentClaude}
-			parent := &model.Session{
-				ID: "route", Agent: model.AgentClaude, Subagents: []*model.Session{child},
-				Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
-			}
-			m := NewModel([]*model.Session{parent}, nil)
-			for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, open} {
-				updated, _ := m.Update(key)
-				m = updated.(Model)
-			}
-			if detailStateFromScreen(t, m.detail).session != child {
-				t.Fatalf("%q left detail session at %q, want child", open.String(), detailStateFromScreen(t, m.detail).session.ID)
-			}
-		})
+func TestLDrillsIntoSubagent(t *testing.T) {
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude}
+	parent := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Subagents: []*model.Session{child},
+		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
+	}
+	m := NewModel([]*model.Session{parent}, nil)
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'J'}}, {Type: tea.KeyRunes, Runes: []rune{'l'}}} {
+		updated, _ := m.Update(key)
+		m = updated.(Model)
+	}
+	if detailStateFromScreen(t, m.detail).session != child {
+		t.Fatalf("l left detail session at %q, want child", detailStateFromScreen(t, m.detail).session.ID)
 	}
 }
 
@@ -916,15 +1003,15 @@ func TestColoredDetailFillsWideTerminalAndBoundsLines(t *testing.T) {
 func TestDetailKeyBarKeepsQuitVisibleAtEightyColumns(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "lunar"}, 80, 12, newStyles())
 	keyBar := strings.Split(ansi.Strip(detail.view()), "\n")[11]
-	if !strings.Contains(keyBar, "space expand") || !strings.Contains(keyBar, "E expand all") || !strings.Contains(keyBar, "C collapse all") || !strings.Contains(keyBar, "↵ inspect") || !strings.Contains(keyBar, "q quit") || strings.Contains(keyBar, "…") {
-		t.Fatalf("80-column detail key bar = %q, want row and bulk expansion, inspect, and quit hints without truncation", keyBar)
+	if !strings.Contains(keyBar, "←/→ fold") || !strings.Contains(keyBar, "space toggle") || !strings.Contains(keyBar, "E/C all") || !strings.Contains(keyBar, "↵ inspect") || !strings.Contains(keyBar, "q quit") || strings.Contains(keyBar, "…") {
+		t.Fatalf("80-column detail key bar = %q, want folding, inspect, and quit hints without truncation", keyBar)
 	}
 }
 
 func TestDetailKeyBarUsesContextualNewcomerHints(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "route", Subagents: []*model.Session{{ID: "scout"}}}, 160, 12, newStyles())
 	keyBar := strings.Split(ansi.Strip(detail.view()), "\n")[11]
-	for _, want := range []string{"space expand", "↵ inspect", "tab switch", "w nowrap"} {
+	for _, want := range []string{"space toggle", "↵ inspect", "tab switch", "w nowrap"} {
 		if !strings.Contains(keyBar, want) {
 			t.Fatalf("wrapped Timeline key bar missing %q: %q", want, keyBar)
 		}
@@ -938,7 +1025,7 @@ func TestDetailKeyBarUsesContextualNewcomerHints(t *testing.T) {
 
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 	keyBar = strings.Split(ansi.Strip(detail.view()), "\n")[11]
-	if !strings.Contains(keyBar, "↵ open") || strings.Contains(keyBar, "↵ inspect") || strings.Contains(keyBar, "space expand") || strings.Contains(keyBar, "w wrap") || strings.Contains(keyBar, "w nowrap") {
+	if !strings.Contains(keyBar, "↵ open") || strings.Contains(keyBar, "↵ inspect") || strings.Contains(keyBar, "space toggle") || strings.Contains(keyBar, "w wrap") || strings.Contains(keyBar, "w nowrap") {
 		t.Fatalf("Subagents key bar did not limit hints to applicable actions: %q", keyBar)
 	}
 }
@@ -949,7 +1036,7 @@ func TestNarrowKeyBarsKeepWholeEssentialHints(t *testing.T) {
 			width int
 			wants []string
 		}{
-			{width: 40, wants: []string{"space expand", "↵ inspect", "esc back"}},
+			{width: 40, wants: []string{"←/→ fold", "↵ inspect", "esc back"}},
 			{width: 20, wants: []string{"↵ inspect", "esc back"}},
 			{width: 10, wants: []string{"esc back"}},
 		} {
@@ -983,12 +1070,12 @@ func TestDetailKeyBarsAdvertiseOnlyLiveContextualBindings(t *testing.T) {
 			}
 		}
 		if tab == tabTimeline {
-			for _, want := range []string{"E expand all", "C collapse all"} {
+			for _, want := range []string{"←/→ fold", "E/C all"} {
 				if !strings.Contains(keyBar, want) {
 					t.Errorf("Timeline key bar missing %q: %q", want, keyBar)
 				}
 			}
-		} else if strings.Contains(keyBar, "E expand all") || strings.Contains(keyBar, "C collapse all") {
+		} else if strings.Contains(keyBar, "E/C all") || strings.Contains(keyBar, "←/→ fold") {
 			t.Errorf("Subagents key bar advertised Timeline-only bulk action: %q", keyBar)
 		}
 	}
@@ -1736,8 +1823,8 @@ func TestDetailMouseClickSelectsTurn(t *testing.T) {
 	m = updated.(Model)
 
 	detail = detailStateFromScreen(t, m.detail)
-	if detail.focus != target || !detail.isExpanded(detail.focusables[target].key) {
-		t.Fatalf("turn click focus=%d expanded=%t, want selected expanded turn", detail.focus, detail.isExpanded(detail.focusables[target].key))
+	if detail.focus != target || detail.isExpanded(detail.focusables[target].key) {
+		t.Fatalf("turn click focus=%d expanded=%t, want selected collapsed turn", detail.focus, detail.isExpanded(detail.focusables[target].key))
 	}
 }
 
@@ -1759,16 +1846,16 @@ func TestDetailMouseSecondClickTogglesTurn(t *testing.T) {
 	updated, _ = m.Update(click)
 	m = updated.(Model)
 	detail = detailStateFromScreen(t, m.detail)
-	if detail.focus != target || !detail.isExpanded(detail.focusables[target].key) {
-		t.Fatalf("first turn click focus=%d expanded=%t, want selected expanded turn", detail.focus, detail.isExpanded(detail.focusables[target].key))
+	if detail.focus != target || detail.isExpanded(detail.focusables[target].key) {
+		t.Fatalf("first turn click focus=%d expanded=%t, want selected collapsed turn", detail.focus, detail.isExpanded(detail.focusables[target].key))
 	}
 
 	updated, _ = m.Update(click)
 	m = updated.(Model)
 
 	detail = detailStateFromScreen(t, m.detail)
-	if detail.isExpanded(detail.focusables[target].key) || m.screen != screenDetail {
-		t.Fatalf("second turn click expanded=%t screen=%v, want collapsed timeline", detail.isExpanded(detail.focusables[target].key), m.screen)
+	if !detail.isExpanded(detail.focusables[target].key) || m.screen != screenDetail {
+		t.Fatalf("second turn click expanded=%t screen=%v, want expanded timeline", detail.isExpanded(detail.focusables[target].key), m.screen)
 	}
 }
 
@@ -1792,19 +1879,19 @@ func TestDetailMouseSecondClickTogglesTool(t *testing.T) {
 	updated, _ = m.Update(click)
 	m = updated.(Model)
 	detail = detailStateFromScreen(t, m.detail)
-	if detail.focus != target || !detail.isExpanded(detail.focusables[target].key) {
-		t.Fatalf("first tool click focus=%d expanded=%t, want selected expanded tool", detail.focus, detail.isExpanded(detail.focusables[target].key))
+	if detail.focus != target || detail.isExpanded(detail.focusables[target].key) {
+		t.Fatalf("first tool click focus=%d expanded=%t, want selected collapsed tool", detail.focus, detail.isExpanded(detail.focusables[target].key))
 	}
 	updated, _ = m.Update(click)
 	m = updated.(Model)
 
 	detail = detailStateFromScreen(t, m.detail)
-	if detail.isExpanded(detail.focusables[detail.focus].key) || detail.focusables[detail.focus].event.Kind != model.EventToolCall {
-		t.Fatalf("second tool click focus=%#v expanded=%t, want collapsed tool", detail.focusables[detail.focus], detail.isExpanded(detail.focusables[detail.focus].key))
+	if !detail.isExpanded(detail.focusables[detail.focus].key) || detail.focusables[detail.focus].event.Kind != model.EventToolCall {
+		t.Fatalf("second tool click focus=%#v expanded=%t, want expanded tool", detail.focusables[detail.focus], detail.isExpanded(detail.focusables[detail.focus].key))
 	}
 }
 
-func TestDetailMouseSecondClickOpensPlainEvent(t *testing.T) {
+func TestDetailMouseClickNeverOpensPlainEvent(t *testing.T) {
 	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Survey the crater"},
 		{Kind: model.EventAssistantText, Text: "Route prepared"},
@@ -1830,13 +1917,13 @@ func TestDetailMouseSecondClickOpensPlainEvent(t *testing.T) {
 	updated, _ = m.Update(click)
 	m = updated.(Model)
 
-	item, ok := m.detail.(*itemView)
-	if !ok || item.event.Kind != model.EventAssistantText {
-		t.Fatalf("second plain-event click detail=%T event=%v, want assistant item", m.detail, item)
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.focus != target || detail.session != session || len(m.detailStack) != 0 {
+		t.Fatalf("second plain-event click focus=%d session=%q stack=%d, want selected timeline row", detail.focus, detail.session.ID, len(m.detailStack))
 	}
 }
 
-func TestSubagentsMouseSecondClickDrillsIntoSelectedRow(t *testing.T) {
+func TestSubagentsMouseClickNeverDrillsIntoSelectedRow(t *testing.T) {
 	first := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge"}
 	second := &model.Session{ID: "mapper", Agent: model.AgentCodex, Title: "Map crater"}
 	root := &model.Session{ID: "route", Agent: model.AgentClaude, Subagents: []*model.Session{first, second}}
@@ -1860,12 +1947,13 @@ func TestSubagentsMouseSecondClickDrillsIntoSelectedRow(t *testing.T) {
 	updated, _ = m.Update(click)
 	m = updated.(Model)
 
-	if detailStateFromScreen(t, m.detail).session != second || len(m.detailStack) != 1 {
-		t.Fatalf("second subagents click detail=%q stack=%d, want mapper over root", detailStateFromScreen(t, m.detail).session.ID, len(m.detailStack))
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.session != root || detail.subagentSelection != 1 || len(m.detailStack) != 0 {
+		t.Fatalf("second subagents click detail=%q selection=%d stack=%d, want selected root row", detail.session.ID, detail.subagentSelection, len(m.detailStack))
 	}
 }
 
-func TestTimelineMouseSecondClickDrillsIntoSubagentRow(t *testing.T) {
+func TestTimelineMouseClickNeverDrillsIntoSubagentRow(t *testing.T) {
 	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge"}
 	root := &model.Session{ID: "route", Agent: model.AgentCodex, Subagents: []*model.Session{child}, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Survey the crater"},
@@ -1891,8 +1979,9 @@ func TestTimelineMouseSecondClickDrillsIntoSubagentRow(t *testing.T) {
 	updated, _ = m.Update(click)
 	m = updated.(Model)
 
-	if detailStateFromScreen(t, m.detail).session != child || len(m.detailStack) != 1 {
-		t.Fatalf("second timeline subagent click detail=%q stack=%d, want scout over root", detailStateFromScreen(t, m.detail).session.ID, len(m.detailStack))
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.session != root || detail.focus != target || len(m.detailStack) != 0 {
+		t.Fatalf("second timeline subagent click detail=%q focus=%d stack=%d, want selected root row", detail.session.ID, detail.focus, len(m.detailStack))
 	}
 }
 
@@ -2778,7 +2867,6 @@ func TestEscapePopsItemViewToDetail(t *testing.T) {
 func TestOpenKeysPushNonSubagentItemView(t *testing.T) {
 	for _, open := range []tea.KeyMsg{
 		{Type: tea.KeyEnter},
-		{Type: tea.KeyRight},
 		{Type: tea.KeyRunes, Runes: []rune{'l'}},
 	} {
 		t.Run(open.String(), func(t *testing.T) {

@@ -20,7 +20,7 @@ func (m Model) helpView() string {
 		if _, item := m.detail.(*itemView); item {
 			lines = []string{
 				"j/k scroll · g/G edge",
-				"w wrap · esc/h/← back",
+				"w wrap · esc/h back",
 				"mouse wheel scroll",
 				"? help · q/ctrl-c quit",
 			}
@@ -28,13 +28,13 @@ func (m Model) helpView() string {
 				lines[1] += " · t theme"
 			}
 		} else {
-			mouseHelp := "mouse wheel scroll · click select · click again activate"
+			mouseHelp := "mouse wheel scroll · click select/toggle"
 			if m.width < 59 {
-				mouseHelp = "wheel · select · again activate"
+				mouseHelp = "wheel · select/toggle"
 			}
 			lines = []string{
 				"j/k scroll · g/G edge",
-				"space toggle · enter open",
+				"←/→ fold · space toggle · enter/l open",
 				expandAllKey + " expand all · " + collapseAllKey + " collapse all",
 				"tab tabs · w wrap",
 				"esc/h back",

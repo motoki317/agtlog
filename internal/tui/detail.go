@@ -386,6 +386,30 @@ func (d *detailState) selectedExpandable() bool {
 	return d.tab == tabTimeline && len(d.focusables) > 0 && d.focusables[d.focus].expandable
 }
 
+func (d *detailState) collapseFocused() {
+	if !d.selectedExpandable() {
+		return
+	}
+	item := d.focusables[d.focus]
+	if !d.isExpanded(item.key) {
+		return
+	}
+	d.expanded[item.key] = false
+	d.rebuildKeeping(item.key)
+}
+
+func (d *detailState) expandFocused() {
+	if !d.selectedExpandable() {
+		return
+	}
+	item := d.focusables[d.focus]
+	if d.isExpanded(item.key) {
+		return
+	}
+	d.expanded[item.key] = true
+	d.rebuildKeeping(item.key)
+}
+
 func (d *detailState) rebuildKeeping(keys ...string) {
 	d.rebuild()
 	for _, key := range keys {
@@ -1142,11 +1166,10 @@ func detailKeyText(width int, mono bool, tab detailTab, wrap bool) string {
 	if wrap {
 		wrapHint = "w nowrap"
 	}
-	expandAllHint := expandAllKey + " expand all"
-	collapseAllHint := collapseAllKey + " collapse all"
+	bulkHint := expandAllKey + "/" + collapseAllKey + " all"
 	hints := []string{"j/k scroll"}
 	if tab == tabTimeline {
-		hints = append(hints, "space expand", expandAllHint, collapseAllHint, enterHint, "tab switch", wrapHint)
+		hints = append(hints, "←/→ fold", "space toggle", bulkHint, enterHint, "tab switch", wrapHint)
 	} else {
 		hints = append(hints, enterHint, "tab switch")
 	}
@@ -1156,7 +1179,7 @@ func detailKeyText(width int, mono bool, tab detailTab, wrap bool) string {
 	}
 	hints = append(hints, "? help", "q quit")
 	return fitKeyHints(width, hints, []string{
-		"mouse scroll/click", "t theme", "? help", "j/k scroll", "tab switch", wrapHint, expandAllHint, collapseAllHint, "q quit", "space expand", enterHint,
+		"mouse scroll/click", "t theme", "? help", "j/k scroll", "tab switch", wrapHint, bulkHint, "q quit", "space toggle", "←/→ fold", enterHint,
 	})
 }
 

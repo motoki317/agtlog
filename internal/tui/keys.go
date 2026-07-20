@@ -20,6 +20,8 @@ type keyMap struct {
 	Quit        key.Binding
 	Back        key.Binding
 	Toggle      key.Binding
+	Collapse    key.Binding
+	Expand      key.Binding
 	ExpandAll   key.Binding
 	CollapseAll key.Binding
 }
@@ -38,6 +40,8 @@ func defaultKeys() keyMap {
 		Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 		Back:        key.NewBinding(key.WithKeys("esc", "h"), key.WithHelp("esc/h", "back")),
 		Toggle:      key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "expand")),
+		Collapse:    key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "collapse")),
+		Expand:      key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "expand")),
 		ExpandAll:   key.NewBinding(key.WithKeys(expandAllKey), key.WithHelp(expandAllKey, "expand all")),
 		CollapseAll: key.NewBinding(key.WithKeys(collapseAllKey), key.WithHelp(collapseAllKey, "collapse all")),
 	}
@@ -50,7 +54,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.MoveDown, k.MoveUp, k.Filter, k.Sort, k.Agent},
-		{k.Open, k.Refresh, k.Theme, k.Toggle, k.ExpandAll, k.CollapseAll},
+		{k.Open, k.Refresh, k.Theme, k.Toggle, k.Collapse, k.Expand, k.ExpandAll, k.CollapseAll},
 		{k.Back, k.Help, k.Quit},
 	}
 }
