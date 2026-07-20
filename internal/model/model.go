@@ -61,6 +61,63 @@ type Cost struct {
 	MissingPricingModels []string
 }
 
+type CostBreakdown struct {
+	Input      float64
+	Output     float64
+	CacheWrite float64
+	CacheRead  float64
+}
+
+func (c CostBreakdown) Add(other CostBreakdown) CostBreakdown {
+	return CostBreakdown{
+		Input:      c.Input + other.Input,
+		Output:     c.Output + other.Output,
+		CacheWrite: c.CacheWrite + other.CacheWrite,
+		CacheRead:  c.CacheRead + other.CacheRead,
+	}
+}
+
+func (c CostBreakdown) Total() float64 {
+	return c.Input + c.Output + c.CacheWrite + c.CacheRead
+}
+
+// ReconcileTotal absorbs only aggregation-order rounding into one component.
+func (c CostBreakdown) ReconcileTotal(target float64) CostBreakdown {
+	current := c.Total()
+	if current == target {
+		return c
+	}
+	delta := target - current
+	candidates := []*float64{&c.Input, &c.Output, &c.CacheWrite, &c.CacheRead}
+	var component *float64
+	for _, candidate := range candidates {
+		if *candidate != 0 && math.Abs(*candidate) >= math.Abs(delta) && (component == nil || math.Abs(*candidate) < math.Abs(*component)) {
+			component = candidate
+		}
+	}
+	if component == nil {
+		component = candidates[0]
+		for _, candidate := range candidates[1:] {
+			if math.Abs(*candidate) > math.Abs(*component) {
+				component = candidate
+			}
+		}
+	}
+	*component += delta
+	for range 16 {
+		current = c.Total()
+		if current == target {
+			break
+		}
+		direction := math.Inf(1)
+		if current > target {
+			direction = math.Inf(-1)
+		}
+		*component = math.Nextafter(*component, direction)
+	}
+	return c
+}
+
 type EventKind string
 
 const (

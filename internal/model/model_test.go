@@ -42,6 +42,33 @@ func TestUsageAggregationSaturatesInsteadOfOverflowing(t *testing.T) {
 	}
 }
 
+func TestCostBreakdownAddAndTotal(t *testing.T) {
+	left := CostBreakdown{Input: 1, Output: 2, CacheWrite: 3, CacheRead: 4}
+	right := CostBreakdown{Input: 0.5, Output: 1, CacheWrite: 1.5, CacheRead: 2}
+
+	got := left.Add(right)
+	want := CostBreakdown{Input: 1.5, Output: 3, CacheWrite: 4.5, CacheRead: 6}
+	if got != want {
+		t.Fatalf("CostBreakdown.Add() = %#v, want %#v", got, want)
+	}
+	if total := got.Total(); total != 15 {
+		t.Fatalf("CostBreakdown.Total() = %v, want 15", total)
+	}
+}
+
+func TestCostBreakdownReconcileTotalAbsorbsAggregationRounding(t *testing.T) {
+	breakdown := CostBreakdown{
+		Input: 150.88662000000002, Output: 2116.1922,
+		CacheWrite: 1251.1232187500002, CacheRead: 47.518538999999997,
+	}
+	want := math.Float64frombits(0x40abdb70ef911cf4)
+
+	got := breakdown.ReconcileTotal(want)
+	if total := got.Total(); total != want {
+		t.Fatalf("ReconcileTotal().Total() = %.17g (%#x), want %.17g (%#x)", total, math.Float64bits(total), want, math.Float64bits(want))
+	}
+}
+
 func TestSessionTotalCostIncludesNestedSubagents(t *testing.T) {
 	session := Session{
 		Cost: Cost{USD: 1, MissingPricingModels: []string{"unknown-a"}},

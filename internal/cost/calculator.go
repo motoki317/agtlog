@@ -57,10 +57,37 @@ func (c Calculator) CalculateCodex(usage model.Usage, defaultModel string) model
 	return calculated
 }
 
+func (c Calculator) HasCodexPricing(usage model.Usage, defaultModel string) bool {
+	_, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
+	return ok
+}
+
 func (c Calculator) Calculate(usage model.Usage) model.Cost {
 	if usage.CostUSD != nil {
 		return model.Cost{USD: *usage.CostUSD}
 	}
+	if !c.HasPricing(usage) {
+		return model.Cost{MissingPricingModels: []string{usage.Model}}
+	}
+	return model.Cost{USD: c.Breakdown(usage).Total()}
+}
+
+// Breakdown is rate-based and ignores CostUSD. No measured Claude usage row
+// supplies a logged cost; if one does, this estimate may differ from Calculate.
+func (c Calculator) Breakdown(usage model.Usage) model.CostBreakdown {
+	pricing, ok := c.resolvePricing(usage)
+	if !ok {
+		return model.CostBreakdown{}
+	}
+	return rateCostsFor(usage, pricing).breakdown()
+}
+
+func (c Calculator) HasPricing(usage model.Usage) bool {
+	_, ok := c.resolvePricing(usage)
+	return ok
+}
+
+func (c Calculator) resolvePricing(usage model.Usage) (Pricing, bool) {
 	modelName := usage.Model
 	if usage.Speed == "fast" && !strings.HasSuffix(modelName, "-fast") {
 		modelName += "-fast"
@@ -69,9 +96,19 @@ func (c Calculator) Calculate(usage model.Usage) model.Cost {
 	if !ok && usage.Speed == "fast" {
 		_, pricing, ok = c.table.Resolve(usage.Model)
 	}
-	if !ok {
-		return model.Cost{MissingPricingModels: []string{usage.Model}}
-	}
+	return pricing, ok
+}
+
+type rateCosts struct {
+	input        float64
+	output       float64
+	cacheWrite5m float64
+	cacheRead    float64
+	cacheWrite1h float64
+	multiplier   float64
+}
+
+func rateCostsFor(usage model.Usage, pricing Pricing) rateCosts {
 	cacheWrite := pricing.Input * 1.25
 	if pricing.CacheWrite != nil {
 		cacheWrite = *pricing.CacheWrite
@@ -86,15 +123,39 @@ func (c Calculator) Calculate(usage model.Usage) model.Cost {
 		// applying the ordinary input rate to avoid billing those tokens twice.
 		inputTokens = max(0, inputTokens-usage.CacheReadTokens)
 	}
-	usd := priceTokens(inputTokens, pricing.Input, pricing.InputAbove200K, pricing.InputAbove272K)
-	usd += priceTokens(usage.OutputTokens, pricing.Output, pricing.OutputAbove200K, pricing.OutputAbove272K)
-	usd += priceTokens(usage.CacheCreation5mTokens, cacheWrite, pricing.CacheWriteAbove200K, pricing.CacheWriteAbove272K)
-	usd += priceTokens(usage.CacheReadTokens, cacheRead, pricing.CacheReadAbove200K, pricing.CacheReadAbove272K)
-	usd += priceTokens(usage.CacheCreation1hTokens, pricing.Input*2, doubled(pricing.InputAbove200K), doubled(pricing.InputAbove272K))
+	multiplier := 1.0
 	if usage.Speed == "fast" && pricing.ProviderSpecificEntry.Fast != 0 {
-		usd *= pricing.ProviderSpecificEntry.Fast
+		multiplier = pricing.ProviderSpecificEntry.Fast
 	}
-	return model.Cost{USD: usd}
+	return rateCosts{
+		input:        priceTokens(inputTokens, pricing.Input, pricing.InputAbove200K, pricing.InputAbove272K),
+		output:       priceTokens(usage.OutputTokens, pricing.Output, pricing.OutputAbove200K, pricing.OutputAbove272K),
+		cacheWrite5m: priceTokens(usage.CacheCreation5mTokens, cacheWrite, pricing.CacheWriteAbove200K, pricing.CacheWriteAbove272K),
+		cacheRead:    priceTokens(usage.CacheReadTokens, cacheRead, pricing.CacheReadAbove200K, pricing.CacheReadAbove272K),
+		cacheWrite1h: priceTokens(usage.CacheCreation1hTokens, pricing.Input*2, doubled(pricing.InputAbove200K), doubled(pricing.InputAbove272K)),
+		multiplier:   multiplier,
+	}
+}
+
+func (r rateCosts) total() float64 {
+	usd := r.input
+	usd += r.output
+	usd += r.cacheWrite5m
+	usd += r.cacheRead
+	usd += r.cacheWrite1h
+	return usd * r.multiplier
+}
+
+func (r rateCosts) breakdown() model.CostBreakdown {
+	breakdown := model.CostBreakdown{
+		Input:      r.input * r.multiplier,
+		Output:     r.output * r.multiplier,
+		CacheWrite: (r.cacheWrite5m + r.cacheWrite1h) * r.multiplier,
+		CacheRead:  r.cacheRead * r.multiplier,
+	}
+	// Grouping cache-write durations and distributing the fast multiplier can
+	// otherwise move Calculate's established result by an ULP.
+	return breakdown.ReconcileTotal(r.total())
 }
 
 func priceTokens(tokens int64, base float64, above200K, above272K *float64) float64 {
