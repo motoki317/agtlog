@@ -1,8 +1,11 @@
 package tui
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -20,6 +23,8 @@ type itemView struct {
 	height   int
 	styles   styles
 	wrap     bool
+	now      time.Time
+	showRaw  bool
 	lines    []detailLine
 	rendered []renderedRow
 }
@@ -30,11 +35,15 @@ var (
 )
 
 func newItemView(event model.Event, agent model.AgentKind, crumbs []string, width, height int, styles styles) *itemView {
+	return newItemViewWithState(event, agent, crumbs, width, height, styles, event.Timestamp, false, true)
+}
+
+func newItemViewWithState(event model.Event, agent model.AgentKind, crumbs []string, width, height int, styles styles, now time.Time, showRaw, wrap bool) *itemView {
 	item := &itemView{
 		event: event, agent: agent, crumbs: append([]string(nil), crumbs...), styles: styles,
-		viewport: newViewport(max(1, width-2), max(1, height-3)), wrap: true,
+		viewport: newViewport(max(1, width-2), max(1, height-3)), wrap: wrap, now: now, showRaw: showRaw,
 	}
-	item.lines = itemEventLines(event, agent)
+	item.rebuildLines()
 	item.resize(width, height)
 	return item
 }
@@ -62,6 +71,15 @@ func (i *itemView) setWrap(wrap bool) {
 	i.rebuild()
 }
 
+func (i *itemView) setNow(now time.Time) {
+	if i.now.Equal(now) {
+		return
+	}
+	i.now = now
+	i.rebuildLines()
+	i.rebuild()
+}
+
 func (i *itemView) scrollWheel(button tea.MouseButton) {
 	scrollViewport(&i.viewport, button)
 }
@@ -84,6 +102,12 @@ func (i *itemView) update(msg tea.Msg) tea.Cmd {
 		i.viewport.GotoBottom()
 	case "w":
 		i.setWrap(!i.wrap)
+	case rawRecordKey:
+		if i.event.Raw != "" {
+			i.showRaw = !i.showRaw
+			i.rebuildLines()
+			i.rebuild()
+		}
 	}
 	return nil
 }
@@ -128,7 +152,7 @@ func (i *itemView) view() string {
 	if panelHeight == i.height {
 		return panel
 	}
-	keyBar := i.styles.keyHint.Render(fitPlain(itemKeyText(i.width), i.width, false))
+	keyBar := i.styles.keyHint.Render(fitPlain(itemKeyText(i.width, i.showRaw), i.width, false))
 	return panel + "\n" + keyBar
 }
 
@@ -162,6 +186,61 @@ func (i *itemView) title() string {
 
 func (i *itemView) styleLine(plain string, line detailLine) string {
 	return styleDetailRole(i.styles, line.role, plain)
+}
+
+func (i *itemView) rebuildLines() {
+	metadata := itemMetadataLines(i.event, i.now, i.agent)
+	content := itemEventLines(i.event, i.agent)
+	i.lines = append(i.lines[:0], metadata...)
+	if len(content) > 0 {
+		i.lines = append(i.lines, detailLine{text: "", role: detailSecondary, agent: i.agent})
+		i.lines = append(i.lines, content...)
+	}
+	if i.showRaw && i.event.Raw != "" {
+		i.lines = append(i.lines, detailLine{text: "", role: detailSecondary, agent: i.agent})
+		i.lines = appendItemSection(i.lines, "raw:", prettyRawRecord(i.event.Raw), detailRow, i.agent)
+	}
+}
+
+func itemMetadataLines(event model.Event, now time.Time, agent model.AgentKind) []detailLine {
+	fields := []struct {
+		label string
+		value string
+	}{
+		{label: "kind", value: string(event.Kind)},
+	}
+	if !event.Timestamp.IsZero() {
+		fields = append(fields,
+			struct{ label, value string }{label: "relative time", value: formatAge(now, event.Timestamp)},
+			struct{ label, value string }{label: "absolute time", value: formatDetailTime(event.Timestamp, true)},
+		)
+	}
+	if event.Kind == model.EventToolCall && event.Duration > 0 {
+		fields = append(fields, struct{ label, value string }{label: "duration", value: formatDuration(event.Duration)})
+	}
+	fields = append(fields,
+		struct{ label, value string }{label: "model", value: event.Model},
+		struct{ label, value string }{label: "tool", value: event.ToolName},
+		struct{ label, value string }{label: "call-id", value: event.CallID},
+		struct{ label, value string }{label: "agent-id", value: event.AgentID},
+	)
+	lines := make([]detailLine, 0, len(fields))
+	for _, field := range fields {
+		if field.value == "" {
+			continue
+		}
+		lines = append(lines, detailLine{text: detailPlainText(field.label + ": " + field.value), role: detailSecondary, agent: agent})
+	}
+	return lines
+}
+
+func prettyRawRecord(raw string) string {
+	raw = model.BoundedRawRecord(raw)
+	var pretty bytes.Buffer
+	if json.Indent(&pretty, []byte(raw), "", "  ") == nil {
+		return pretty.String()
+	}
+	return raw
 }
 
 func itemEventLines(event model.Event, agent model.AgentKind) []detailLine {
@@ -201,7 +280,11 @@ func itemEventLines(event model.Event, agent model.AgentKind) []detailLine {
 			lines = append(lines, detailLine{text: plain, role: role, agent: agent})
 		}
 	}
-	return appendItemSection(lines, "output:", output, detailRow, agent)
+	lines = appendItemSection(lines, "output:", output, detailRow, agent)
+	if event.ResultSummary != "" && event.Detail != nil && event.Detail.Output != "" {
+		lines = appendItemSection(lines, "result-summary:", event.ResultSummary, detailRow, agent)
+	}
+	return lines
 }
 
 func appendItemSection(lines []detailLine, label, text string, role detailRole, agent model.AgentKind) []detailLine {
@@ -243,7 +326,14 @@ func itemLabel(event model.Event, agent model.AgentKind) string {
 	}
 }
 
-func itemKeyText(width int) string {
+func itemKeyText(width int, showRaw bool) string {
 	timeHint := timeFormatKey + " time"
-	return fitKeyHints(width, []string{"j/k scroll", "w wrap", timeHint, "esc back", "wheel scroll"}, []string{"wheel scroll", "j/k scroll", "w wrap", timeHint})
+	rawHint := rawRecordKey + " raw"
+	if showRaw {
+		rawHint = rawRecordKey + " hide raw"
+		if width < ansi.StringWidth(rawHint+"   esc back") {
+			rawHint = rawRecordKey + " raw*"
+		}
+	}
+	return fitKeyHints(width, []string{"j/k scroll", "w wrap", rawHint, timeHint, "esc back", "wheel scroll"}, []string{"wheel scroll", "j/k scroll", "w wrap", timeHint, rawHint})
 }

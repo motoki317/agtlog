@@ -443,9 +443,8 @@ func (m *Model) activateDetailSelection() bool {
 			crumbs = append(crumbs, label)
 		}
 		m.detailStack = append(m.detailStack, m.detail)
-		item := newItemView(event, detail.session.Agent, crumbs, m.width, m.height, m.styles)
+		item := newItemViewWithState(event, detail.session.Agent, crumbs, m.width, m.height, m.styles, m.now(), false, detail.wrap)
 		item.focusKey = detail.focusables[detail.focus].key
-		item.setWrap(detail.wrap)
 		m.detail = item
 		return true
 	}
@@ -596,9 +595,8 @@ func (m *Model) replaceDetailTree(root *model.Session) {
 				if label := detailCrumbLabel(parent.session); label != "" {
 					crumbs = append(crumbs, label)
 				}
-				replacement := newItemView(event, parent.session.Agent, crumbs, m.width, m.height, m.styles)
+				replacement := newItemViewWithState(event, parent.session.Agent, crumbs, m.width, m.height, m.styles, m.now(), item.showRaw, item.wrap)
 				replacement.focusKey = item.focusKey
-				replacement.setWrap(item.wrap)
 				replacement.viewport.SetYOffset(item.viewport.YOffset)
 				replacements = append(replacements, replacement)
 			}
@@ -716,6 +714,8 @@ func (m *Model) refreshDetailTimes() {
 			detail.now = now
 			detail.absoluteTime = m.absoluteTime
 			detail.rebuildPreservingViewport()
+		} else if item, ok := screen.(*itemView); ok {
+			item.setNow(now)
 		}
 		return screen
 	}

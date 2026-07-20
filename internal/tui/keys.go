@@ -6,6 +6,7 @@ const (
 	expandAllKey   = "E"
 	collapseAllKey = "C"
 	timeFormatKey  = "T"
+	rawRecordKey   = "R"
 )
 
 type keyMap struct {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1059,8 +1060,13 @@ func TestNarrowKeyBarsKeepWholeEssentialHints(t *testing.T) {
 	t.Run("item", func(t *testing.T) {
 		item := newItemView(model.Event{Kind: model.EventThinking, Text: "Chart route"}, model.AgentClaude, nil, 20, 8, newStyles())
 		keyBar := strings.TrimSpace(strings.Split(ansi.Strip(item.view()), "\n")[7])
-		if !strings.Contains(keyBar, "esc back") || strings.Contains(keyBar, "…") || ansi.StringWidth(keyBar) > 20 {
+		if !strings.Contains(keyBar, "R raw") || !strings.Contains(keyBar, "esc back") || strings.Contains(keyBar, "…") || ansi.StringWidth(keyBar) > 20 {
 			t.Fatalf("20-column item key bar lost a whole back hint: %q", keyBar)
+		}
+		item.showRaw = true
+		keyBar = itemKeyText(20, item.showRaw)
+		if !strings.Contains(keyBar, "R raw*") || !strings.Contains(keyBar, "esc back") || ansi.StringWidth(keyBar) > 20 {
+			t.Fatalf("20-column item key bar lost raw state: %q", keyBar)
 		}
 	})
 }
@@ -1095,7 +1101,7 @@ func TestWideKeyBarsAdvertiseMouse(t *testing.T) {
 	if keyBar := detailKeyText(160, false, tabTimeline, true); !strings.Contains(keyBar, "mouse scroll/click") {
 		t.Fatalf("wide detail key bar missing mouse hint: %q", keyBar)
 	}
-	if keyBar := itemKeyText(160); !strings.Contains(keyBar, "wheel scroll") {
+	if keyBar := itemKeyText(160, false); !strings.Contains(keyBar, "wheel scroll") {
 		t.Fatalf("wide item key bar missing mouse hint: %q", keyBar)
 	}
 }
@@ -1202,40 +1208,60 @@ func TestDrilledDetailFollowsRootLiveUpdate(t *testing.T) {
 }
 
 func TestOpenItemFollowsRootLiveUpdate(t *testing.T) {
+	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
 	root := &model.Session{
 		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Project: "starship", Title: "Plan route",
 		Events: []model.Event{
 			{Kind: model.EventUser, Text: "Check the route"},
-			{Kind: model.EventToolCall, CallID: "call-route", ToolName: "Bash", ToolInput: "check-route", Detail: &model.ToolDetail{Input: "check-route", Output: "running"}},
+			{Timestamp: now.Add(-5 * time.Minute), Kind: model.EventToolCall, CallID: "call-route", ToolName: "Bash", ToolInput: "check-route", Raw: `{"status":"running","padding":"` + strings.Repeat("x", 300) + `"}`, Detail: &model.ToolDetail{Input: "check-route", Output: "running"}},
 		},
 	}
-	m := NewModel([]*model.Session{root}, nil)
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyDown}, {Type: tea.KeyDown}, {Type: tea.KeyEnter}} {
-		updated, _ := m.Update(key)
+	m := newModelWithClock([]*model.Session{root}, nil, func() time.Time { return now })
+	for _, msg := range []tea.Msg{tea.WindowSizeMsg{Width: 80, Height: 10}, tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyDown}, tea.KeyMsg{Type: tea.KeyDown}, tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}}, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}}, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}}} {
+		updated, _ := m.Update(msg)
 		m = updated.(Model)
+	}
+	before := m.detail.(*itemView)
+	oldOffset := before.viewport.YOffset
+	if !before.showRaw || before.wrap || oldOffset == 0 {
+		t.Fatalf("pre-update item state raw=%t wrap=%t offset=%d", before.showRaw, before.wrap, oldOffset)
 	}
 
 	replacement := &model.Session{
 		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Project: "voyage", Title: "Plan updated route",
 		Events: []model.Event{
 			{Kind: model.EventUser, Text: "Check the route"},
-			{Kind: model.EventToolCall, CallID: "call-route", ToolName: "Bash", ToolInput: "check-route", Detail: &model.ToolDetail{Input: "check-route", Output: "finished"}},
+			{Timestamp: now.Add(-7 * time.Minute), Kind: model.EventToolCall, CallID: "call-route", ToolName: "Bash", ToolInput: "check-route", Raw: `{"status":"finished","padding":"` + strings.Repeat("y", 300) + `"}`, Detail: &model.ToolDetail{Input: "check-route", Output: "finished"}},
 		},
 	}
 	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
 	m = updated.(Model)
 
 	view := ansi.Strip(m.View())
-	if _, ok := m.detail.(*itemView); !ok || len(m.detailStack) != 1 {
+	item, ok := m.detail.(*itemView)
+	if !ok || len(m.detailStack) != 1 {
 		t.Fatalf("live update left screen=%T stack=%d, want refreshed item", m.detail, len(m.detailStack))
 	}
-	for _, want := range []string{"voyage › Plan updated route › Bash", "finished"} {
+	if !item.showRaw || item.wrap || item.viewport.YOffset != oldOffset {
+		t.Fatalf("refreshed item state raw=%t wrap=%t offset=%d, want raw=true wrap=false offset=%d", item.showRaw, item.wrap, item.viewport.YOffset, oldOffset)
+	}
+	for _, want := range []string{"voyage › Plan updated route › Bash", "R hide raw"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("refreshed item missing %q:\n%s", want, view)
 		}
 	}
-	if strings.Contains(view, "running") {
-		t.Fatalf("refreshed item retained stale output:\n%s", view)
+	var refreshedLines []string
+	for _, line := range item.lines {
+		refreshedLines = append(refreshedLines, line.text)
+	}
+	content := strings.Join(refreshedLines, "\n")
+	for _, want := range []string{"finished", "relative time: 7m", `"status": "finished"`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("refreshed item content missing %q:\n%s", want, content)
+		}
+	}
+	if strings.Contains(content, "running") {
+		t.Fatalf("refreshed item retained stale output:\n%s", content)
 	}
 }
 
@@ -2773,6 +2799,110 @@ func TestItemToolLinesShowInputAndDiffBeforeOutput(t *testing.T) {
 	}
 }
 
+func TestItemViewStartsWithPresentMetadataAndOmitsEmptyFields(t *testing.T) {
+	event := model.Event{
+		Kind: model.EventToolCall, Model: "gpt-5.6-sol", ToolName: "exec_command",
+		CallID: "call-route", AgentID: "agent-scout", Duration: 1250 * time.Millisecond,
+		ToolInput: "check route",
+	}
+	item := newItemView(event, model.AgentCodex, nil, 80, 18, newStyles())
+
+	var lines []string
+	for _, line := range item.lines {
+		lines = append(lines, line.text)
+	}
+	for _, want := range []string{
+		"kind: tool-call",
+		"duration: 1.2s",
+		"model: gpt-5.6-sol",
+		"tool: exec_command",
+		"call-id: call-route",
+		"agent-id: agent-scout",
+	} {
+		if !slices.Contains(lines, want) {
+			t.Errorf("item metadata missing %q: %#v", want, lines)
+		}
+	}
+	for _, omitted := range []string{"relative time:", "absolute time:"} {
+		for _, line := range lines {
+			if strings.HasPrefix(line, omitted) {
+				t.Errorf("zero timestamp rendered %q", line)
+			}
+		}
+	}
+}
+
+func TestItemViewShowsBothTimesAndTogglesPrettyRawRecord(t *testing.T) {
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	event := model.Event{
+		Timestamp: now.Add(-5 * time.Minute), Kind: model.EventUser, Text: "Inspect the route",
+		Raw: `{"type":"user","message":{"content":"Inspect the route"}}`,
+	}
+	item := newItemView(event, model.AgentClaude, nil, 80, 18, newStyles())
+	item.setNow(now)
+
+	plain := ansi.Strip(item.view())
+	for _, want := range []string{"relative time: 5m", "absolute time: Jan 2 11:55:00", "R raw"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("item view missing %q before raw toggle:\n%s", want, plain)
+		}
+	}
+	if strings.Contains(plain, `"message": {`) {
+		t.Fatalf("raw record visible before toggle:\n%s", plain)
+	}
+
+	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	plain = ansi.Strip(item.view())
+	for _, want := range []string{"raw:", `"message": {`, `"content": "Inspect the route"`, "R hide raw"} {
+		if !strings.Contains(plain, want) {
+			t.Fatalf("item view missing %q after raw toggle:\n%s", want, plain)
+		}
+	}
+}
+
+func TestItemRawPanelReelidesEncryptedTokens(t *testing.T) {
+	token := "gAAAA" + strings.Repeat("A", 70)
+	item := newItemView(model.Event{
+		Kind: model.EventSystem,
+		Raw:  `{"secret":` + strconv.Quote(token) + `}`,
+	}, model.AgentCodex, nil, 80, 12, newStyles())
+	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+
+	plain := ansi.Strip(item.view())
+	if strings.Contains(plain, token) || !strings.Contains(plain, "<encrypted 75 chars>") {
+		t.Fatalf("raw panel did not safely elide encrypted token:\n%s", plain)
+	}
+}
+
+func TestItemRawPanelSanitizesMalformedTerminalText(t *testing.T) {
+	item := newItemView(model.Event{
+		Kind: model.EventSystem,
+		Raw:  "malformed\x1b[2J\u202erecord",
+	}, model.AgentCodex, nil, 40, 10, newStyles())
+	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+
+	view := item.view()
+	if strings.Contains(view, "\x1b[2J") || strings.Contains(view, "\u202e") || !strings.Contains(ansi.Strip(view), "malformed record") {
+		t.Fatalf("raw panel did not sanitize terminal text:\n%q", view)
+	}
+}
+
+func TestItemToolLinesKeepResultSummarySeparateFromFullOutput(t *testing.T) {
+	lines := itemEventLines(model.Event{
+		Kind: model.EventToolCall, ToolName: "exec_command", ToolInput: "check route",
+		ResultSummary: "exit 0", Detail: &model.ToolDetail{Output: "route ready"},
+	}, model.AgentCodex)
+	var texts []string
+	for _, line := range lines {
+		texts = append(texts, line.text)
+	}
+	for _, want := range []string{"output:", "route ready", "result-summary:", "exit 0"} {
+		if !slices.Contains(texts, want) {
+			t.Errorf("tool item missing %q: %#v", want, texts)
+		}
+	}
+}
+
 func TestItemToolBodyRendersReadableContent(t *testing.T) {
 	lines := itemEventLines(model.Event{
 		Kind: model.EventToolCall, ToolName: "exec", ToolInput: "make build",
@@ -2912,8 +3042,8 @@ func TestItemViewWrapToggleRebuildsFlatPlainRows(t *testing.T) {
 	}
 
 	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
-	if item.wrap || len(item.rendered) != 1 {
-		t.Fatalf("first wrap toggle state = wrap %t rows %d, want one truncated row", item.wrap, len(item.rendered))
+	if item.wrap || len(item.rendered) != len(item.lines) {
+		t.Fatalf("first wrap toggle state = wrap %t rows %d, want one row per source line (%d)", item.wrap, len(item.rendered), len(item.lines))
 	}
 
 	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})

@@ -115,10 +115,10 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 					return
 				}
 			case "sub_agent_activity":
-				appendCodexSubagentEvent(session, record.Payload.AgentPath, record.Payload.AgentID, record.Payload.Kind, timestamp)
+				appendCodexSubagentEvent(session, record.Payload.AgentPath, record.Payload.AgentID, record.Payload.Kind, timestamp, model.BoundedRawRecord(string(line)))
 				return
 			case "context_compacted":
-				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: "context compacted", Model: currentModel})
+				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: "context compacted", Raw: model.BoundedRawRecord(string(line)), Model: currentModel})
 				return
 			default:
 				return
@@ -207,11 +207,13 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 		event.ToolInput = model.BoundedDetailText(event.ToolInput)
 		if event.Kind == model.EventUser || event.Kind == model.EventAssistantText {
 			if event.Text != "" {
+				event.Raw = model.BoundedRawRecord(string(line))
 				appendCodexMessage(session, event, preferredMessage, dedupText, dedupTextByEvent)
 			}
 		} else {
 			event.Text = model.BoundedDetailText(event.Text)
 			if event.Text != "" || event.Kind == model.EventToolCall || event.Kind == model.EventToolResult {
+				event.Raw = model.BoundedRawRecord(string(line))
 				session.Events = append(session.Events, event)
 			}
 		}
@@ -281,7 +283,7 @@ func clearCodexEvents(session *model.Session) {
 	}
 }
 
-func appendCodexSubagentEvent(root *model.Session, agentPath, agentID, activity string, timestamp time.Time) {
+func appendCodexSubagentEvent(root *model.Session, agentPath, agentID, activity string, timestamp time.Time, raw string) {
 	parts := agentPathParts(agentPath)
 	base := agentPathParts(root.AgentPath)
 	if len(base) > 0 && len(parts) > len(base) {
@@ -310,9 +312,9 @@ func appendCodexSubagentEvent(root *model.Session, agentPath, agentID, activity 
 		}
 		if index == len(parts)-1 {
 			if activity == "started" {
-				parent.Events = append(parent.Events, model.Event{Timestamp: timestamp, Kind: model.EventSubagent, AgentID: agentID, Subagent: child})
+				parent.Events = append(parent.Events, model.Event{Timestamp: timestamp, Kind: model.EventSubagent, Raw: raw, AgentID: agentID, Subagent: child})
 			} else {
-				child.Events = append(child.Events, model.Event{Timestamp: timestamp, Kind: model.EventSystem, Text: activity, AgentID: agentID})
+				child.Events = append(child.Events, model.Event{Timestamp: timestamp, Kind: model.EventSystem, Text: activity, Raw: raw, AgentID: agentID})
 			}
 			return
 		}
@@ -329,52 +331,7 @@ func joinCodexText(blocks []codexTextBlock) string {
 }
 
 func codexElideEncrypted(text string) string {
-	const (
-		prefix    = "gAAAA"
-		minLength = 64
-	)
-	var elided strings.Builder
-	searchFrom, writeFrom := 0, 0
-	for searchFrom < len(text) {
-		offset := strings.Index(text[searchFrom:], prefix)
-		if offset < 0 {
-			break
-		}
-		start := searchFrom + offset
-		if start > 0 && codexFernetChar(text[start-1]) {
-			searchFrom = start + len(prefix)
-			continue
-		}
-		end := start + len(prefix)
-		for end < len(text) && codexFernetChar(text[end]) {
-			end++
-		}
-		for end < len(text) && text[end] == '=' {
-			end++
-		}
-		if end-start < minLength {
-			searchFrom = start + len(prefix)
-			continue
-		}
-		if elided.Len() == 0 {
-			elided.Grow(len(text))
-		}
-		elided.WriteString(text[writeFrom:start])
-		fmt.Fprintf(&elided, "<encrypted %d chars>", end-start)
-		writeFrom, searchFrom = end, end
-	}
-	if elided.Len() == 0 {
-		return text
-	}
-	elided.WriteString(text[writeFrom:])
-	return elided.String()
-}
-
-func codexFernetChar(char byte) bool {
-	return char >= 'A' && char <= 'Z' ||
-		char >= 'a' && char <= 'z' ||
-		char >= '0' && char <= '9' ||
-		char == '_' || char == '-'
+	return model.ElideEncrypted(text)
 }
 
 func codexOutputText(output json.RawMessage) string {

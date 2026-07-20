@@ -1,4 +1,13 @@
 ╭─ starship › Plot route › Edit ───────────────────────────────────────────────╮
+│kind: tool-call                                                               │
+│relative time: 5m                                                             │
+│absolute time: Jan 2 05:59:00                                                 │
+│duration: 750ms                                                               │
+│model: claude-opus-4-8                                                        │
+│tool: Edit                                                                    │
+│call-id: call-route                                                           │
+│agent-id: agent-builder                                                       │
+│                                                                              │
 │input:                                                                        │
 │/workspace/starship/route.go                                                  │
 │-burn = 3                                                                     │
@@ -7,12 +16,25 @@
 │output:                                                                       │
 │route updated                                                                 │
 │checks ready                                                                  │
+│result-summary:                                                               │
+│route updated                                                                 │
 │                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
+│raw:                                                                          │
+│{                                                                             │
+│  "type": "assistant",                                                        │
+│  "message": {                                                                │
+│    "model": "claude-opus-4-8",                                               │
+│    "content": [                                                              │
+│      {                                                                       │
+│        "type": "tool_use",                                                   │
+│        "id": "call-route",                                                   │
+│        "name": "Edit"                                                        │
+│      }                                                                       │
+│    ]                                                                         │
+│  }                                                                           │
+│}                                                                             │
 │                                                                              │
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-j/k scroll   w wrap   T time   esc back   wheel scroll
+j/k scroll   w wrap   R hide raw   T time   esc back   wheel scroll

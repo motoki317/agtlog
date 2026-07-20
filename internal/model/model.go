@@ -83,9 +83,11 @@ type ToolDetail struct {
 }
 
 type Event struct {
-	Timestamp     time.Time
-	Kind          EventKind
-	Text          string
+	Timestamp time.Time
+	Kind      EventKind
+	Text      string
+	// Raw is the structurally complete source JSON after encrypted-token elision and length bounding, not a byte-verbatim copy. A verbatim view would require lazily rereading the source line on toggle.
+	Raw           string
 	Model         string
 	CallID        string
 	ToolName      string

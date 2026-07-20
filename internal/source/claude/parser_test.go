@@ -28,6 +28,35 @@ func mainFixture() string {
 	return filepath.Join("testdata", "project-alpha", "session-main.jsonl")
 }
 
+func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v10:") {
+		t.Fatalf("CacheFingerprint() = %q, want v10 presentation schema", got)
+	}
+}
+
+func TestLoadEventsPopulatesBoundedEncryptedElidedRawRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-raw.jsonl")
+	token := "gAAAA" + strings.Repeat("A", 70)
+	line := `{"type":"user","timestamp":"2026-01-02T03:04:05Z","message":{"content":` + strconv.Quote("Inspect "+token+strings.Repeat(" route", 900)) + `}}`
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path}
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 1 {
+		t.Fatalf("LoadEvents().Events = %#v, want one", session.Events)
+	}
+	raw := session.Events[0].Raw
+	if raw == "" || strings.Contains(raw, token) || !strings.Contains(raw, "<encrypted 75 chars>") || !json.Valid([]byte(raw)) {
+		t.Fatalf("Event.Raw = %q, want populated with encrypted token elided", raw)
+	}
+	if len([]rune(raw)) > 4096 {
+		t.Fatalf("Event.Raw rune count = %d, want bounded", len([]rune(raw)))
+	}
+}
+
 func TestParseUsesAITitle(t *testing.T) {
 	session, err := testParser().Parse(mainFixture())
 	if err != nil {

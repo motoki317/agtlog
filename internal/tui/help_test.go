@@ -55,7 +55,7 @@ func TestItemHelpIncludesOnlyItemBindings(t *testing.T) {
 	m.screen = screenDetail
 	m.detail = newItemView(model.Event{Kind: model.EventThinking, Text: "Chart route"}, model.AgentClaude, nil, m.width, m.height, m.styles)
 	view := m.helpView()
-	for _, want := range []string{"j/k scroll", "g/G edge", "w wrap", "T time", "mouse wheel scroll", "esc/h back", "t theme", "? help", "q/ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "w wrap", "R raw", "T time", "mouse wheel scroll", "esc/h back", "t theme", "? help", "q/ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("item help missing %q:\n%s", want, view)
 		}

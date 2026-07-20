@@ -64,7 +64,7 @@ func NewParser(calculator cost.Calculator) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v9:" + p.calculator.Fingerprint()
+	return "claude-parser-v10:" + p.calculator.Fingerprint()
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
@@ -110,10 +110,19 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 		if json.Unmarshal(line, &record) != nil {
 			return
 		}
+		var raw string
+		rawLoaded := false
+		rawRecord := func() string {
+			if !rawLoaded {
+				raw = model.BoundedRawRecord(string(line))
+				rawLoaded = true
+			}
+			return raw
+		}
 		timestamp, _ := time.Parse(time.RFC3339Nano, record.Timestamp)
 		if record.Type == "system" {
 			if record.Subtype == "compact_boundary" {
-				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: model.BoundedDetailText(record.Content)})
+				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: model.BoundedDetailText(record.Content), Raw: rawRecord()})
 			}
 			return
 		}
@@ -122,7 +131,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 		}
 		if record.Type == "user" {
 			if text := userText(record.Message.Content); text != "" {
-				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventUser, Text: model.BoundedDetailText(text)})
+				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventUser, Text: model.BoundedDetailText(text), Raw: rawRecord()})
 			}
 		}
 		var blocks []struct {
@@ -197,6 +206,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 			}
 			event.Text = model.BoundedDetailText(event.Text)
 			if event.Text != "" || event.Kind == model.EventToolCall || event.Kind == model.EventToolResult || event.Kind == model.EventSubagent {
+				event.Raw = rawRecord()
 				session.Events = append(session.Events, event)
 			}
 		}

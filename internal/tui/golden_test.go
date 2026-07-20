@@ -87,24 +87,26 @@ func TestGoldenItemFrame(t *testing.T) {
 		Usage: []model.Usage{{InputTokens: 64_000, OutputTokens: 4_000}}, Cost: model.Cost{USD: 0.48},
 		Events: []model.Event{
 			{Kind: model.EventUser, Text: "Adjust the lunar route"},
-			{Kind: model.EventToolCall, ToolName: "Edit", ToolInput: "/workspace/starship/route.go", ResultSummary: "route updated", Detail: &model.ToolDetail{
-				Input:  "/workspace/starship/route.go",
-				Diff:   "-burn = 3\n burn = estimate\n+burn = 4",
-				Output: "route updated\nchecks ready",
-			}},
+			{Timestamp: goldenNow.Add(-5 * time.Minute), Kind: model.EventToolCall, Model: "claude-opus-4-8", ToolName: "Edit", ToolInput: "/workspace/starship/route.go", CallID: "call-route", AgentID: "agent-builder", ResultSummary: "route updated", Duration: 750 * time.Millisecond,
+				Raw: `{"type":"assistant","message":{"model":"claude-opus-4-8","content":[{"type":"tool_use","id":"call-route","name":"Edit"}]}}`, Detail: &model.ToolDetail{
+					Input:  "/workspace/starship/route.go",
+					Diff:   "-burn = 3\n burn = estimate\n+burn = 4",
+					Output: "route updated\nchecks ready",
+				}},
 			{Kind: model.EventAssistantText, Text: "The lunar route is ready"},
 		},
 	}
 	m := newModelWithClock([]*model.Session{session}, nil, func() time.Time { return goldenNow })
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 18))
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 40))
 	for _, key := range []tea.KeyMsg{
 		{Type: tea.KeyEnter},
 		{Type: tea.KeyUp},
 		{Type: tea.KeyEnter},
+		{Type: tea.KeyRunes, Runes: []rune{'R'}},
 	} {
 		tm.Send(key)
 	}
-	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "checks ready") }, teatest.WithDuration(time.Second))
+	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "call-route") }, teatest.WithDuration(time.Second))
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}
