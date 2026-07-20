@@ -47,6 +47,7 @@ type Model struct {
 	watchingRoots     int
 	theme             Theme
 	styles            styles
+	absoluteTime      bool
 	now               func() time.Time
 	ctx               context.Context
 	refreshGeneration uint64
@@ -145,6 +146,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if _, ok := msg.(ageTickMsg); ok {
 		m.syncList(m.selectedIdentity())
+		m.refreshDetailTimes()
 		return m, nextAgeTick()
 	}
 	if refreshed, ok := msg.(refreshedMsg); ok {
@@ -258,6 +260,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if !m.filtering && key.Matches(keyMsg, m.keys.Help) {
 			m.helpOpen = true
+			return m, nil
+		}
+		if !m.filtering && key.Matches(keyMsg, m.keys.TimeFormat) {
+			m.toggleTimeFormat()
 			return m, nil
 		}
 	}
@@ -421,6 +427,7 @@ func (m *Model) activateDetailSelection() bool {
 		m.detailStack = append(m.detailStack, m.detail)
 		child := newDetailStateBase(subagent, m.width, m.height, m.styles)
 		child.now = m.now()
+		child.absoluteTime = m.absoluteTime
 		child.crumbs = crumbs
 		child.defaultExpanded = detail.defaultExpanded
 		child.wrap = wrap
@@ -454,6 +461,9 @@ func (m *Model) openListSelection() tea.Cmd {
 	m.detailStack = nil
 	detail := newDetailState(m.visible[index], m.width, m.height, m.styles)
 	detail.now = m.now()
+	detail.absoluteTime = m.absoluteTime
+	detail.rebuild()
+	detail.anchorBottom()
 	m.detail = detail
 	if m.registry == nil {
 		return nil
@@ -640,6 +650,7 @@ func (m *Model) replacementDetailState(previous *detailState, session, root *mod
 	}
 	replacement := newDetailStateBase(session, m.width, m.height, m.styles)
 	replacement.now = m.now()
+	replacement.absoluteTime = m.absoluteTime
 	replacement.wrap = previous.wrap
 	replacement.defaultExpanded = previous.defaultExpanded
 	replacement.crumbs = detailBreadcrumbs(root, session)
@@ -689,6 +700,30 @@ func (m *Model) cycleTheme() {
 	for index, detail := range m.detailStack {
 		m.detailStack[index] = cloneDetailScreen(detail)
 		setDetailScreenStyles(m.detailStack[index], m.styles)
+	}
+}
+
+func (m *Model) toggleTimeFormat() {
+	m.absoluteTime = !m.absoluteTime
+	m.refreshDetailTimes()
+}
+
+func (m *Model) refreshDetailTimes() {
+	now := m.now()
+	refresh := func(screen detailScreen) detailScreen {
+		screen = cloneDetailScreen(screen)
+		if detail, ok := screen.(*detailState); ok {
+			detail.now = now
+			detail.absoluteTime = m.absoluteTime
+			detail.rebuildPreservingViewport()
+		}
+		return screen
+	}
+	if m.detail != nil {
+		m.detail = refresh(m.detail)
+	}
+	for index, screen := range m.detailStack {
+		m.detailStack[index] = refresh(screen)
 	}
 }
 

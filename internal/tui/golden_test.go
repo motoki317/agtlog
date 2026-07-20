@@ -54,11 +54,11 @@ func TestGoldenDetailFrame(t *testing.T) {
 		Models: []string{"claude-opus-4-8"}, GitBranch: "orbit/alpha", StartedAt: goldenNow.Add(-20 * time.Minute), UpdatedAt: goldenNow,
 		Usage: []model.Usage{{InputTokens: 120_000, OutputTokens: 8_000}}, Cost: model.Cost{USD: 0.84}, Subagents: []*model.Session{child},
 		Events: []model.Event{
-			{Kind: model.EventUser, Text: "Delegate the survey"},
-			{Kind: model.EventThinking, Text: "Select a safe path"},
-			{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/starship/map.go", ResultSummary: "map ready", Duration: 400 * time.Millisecond, Detail: &model.ToolDetail{Input: "/workspace/starship/map.go", Output: "map ready"}},
-			{Kind: model.EventAssistantText, Text: "Survey delegated"},
-			{Kind: model.EventSubagent, ToolName: "Agent", Subagent: child},
+			{Timestamp: goldenNow.Add(-14 * time.Minute), Kind: model.EventUser, Text: "Delegate the survey"},
+			{Timestamp: goldenNow.Add(-13 * time.Minute), Kind: model.EventThinking, Text: "Select a safe path"},
+			{Timestamp: goldenNow.Add(-12 * time.Minute), Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/starship/map.go", ResultSummary: "map ready", Duration: 400 * time.Millisecond, Detail: &model.ToolDetail{Input: "/workspace/starship/map.go", Output: "map ready"}},
+			{Timestamp: goldenNow.Add(-11 * time.Minute), Kind: model.EventAssistantText, Text: "Survey delegated"},
+			{Timestamp: goldenNow.Add(-10 * time.Minute), Kind: model.EventSubagent, ToolName: "Agent", Subagent: child},
 		},
 	}
 	m := newModelWithClock([]*model.Session{parent}, nil, func() time.Time { return goldenNow })

@@ -244,5 +244,6 @@ func itemLabel(event model.Event, agent model.AgentKind) string {
 }
 
 func itemKeyText(width int) string {
-	return fitKeyHints(width, []string{"j/k scroll", "w wrap", "esc back", "wheel scroll"}, []string{"wheel scroll", "j/k scroll", "w wrap"})
+	timeHint := timeFormatKey + " time"
+	return fitKeyHints(width, []string{"j/k scroll", "w wrap", timeHint, "esc back", "wheel scroll"}, []string{"wheel scroll", "j/k scroll", "w wrap", timeHint})
 }

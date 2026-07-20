@@ -12,7 +12,7 @@ import (
 func TestListHelpIncludesEveryRequiredBinding(t *testing.T) {
 	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
 	view := m.helpView()
-	for _, want := range []string{"j/k ↑/↓", "pgup/pgdn page", "home/end/g/G edge", "/ filter", "s sort", "a agent", "enter open", "r refresh", "mouse wheel scroll · click select · click again open", "shift+drag terminal copy", "t theme", "? help", "q/ctrl-c quit"} {
+	for _, want := range []string{"j/k ↑/↓", "pgup/pgdn page", "home/end/g/G edge", "/ filter", "s sort", "a agent", "T time", "enter open", "r refresh", "mouse wheel scroll · click select · click again open", "shift+drag terminal copy", "t theme", "? help", "q/ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("list help missing %q:\n%s", want, view)
 		}
@@ -23,7 +23,7 @@ func TestDetailHelpIncludesEveryRequiredBinding(t *testing.T) {
 	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
 	m.screen = screenDetail
 	view := m.helpView()
-	for _, want := range []string{"j/k scroll", "g/G edge", "←/→ fold", "space toggle", "E expand all", "C collapse all", "enter/l open", "tab tabs", "w wrap", "mouse wheel scroll · click select/toggle", "esc/h back", "? help", "ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "←/→ fold", "space toggle", "E expand all", "C collapse all", "enter/l open", "tab tabs", "w wrap", "T time", "mouse wheel scroll · click select/toggle", "esc/h back", "? help", "ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("detail help missing %q:\n%s", want, view)
 		}
@@ -40,7 +40,7 @@ func TestDetailHelpKeepsBindingsVisibleAtFortyColumns(t *testing.T) {
 	m.width = 40
 	m.screen = screenDetail
 	view := ansi.Strip(m.helpView())
-	for _, want := range []string{"j/k scroll", "g/G edge", "←/→ fold", "space toggle", "E expand all", "C collapse all", "enter/l open", "tab tabs", "w wrap", "esc/h back", "? help", "q/ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "←/→ fold", "space toggle", "E expand all", "C collapse all", "enter/l open", "tab tabs", "w wrap", "T time", "esc/h back", "? help", "q/ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("40-column detail help missing %q:\n%s", want, view)
 		}
@@ -55,7 +55,7 @@ func TestItemHelpIncludesOnlyItemBindings(t *testing.T) {
 	m.screen = screenDetail
 	m.detail = newItemView(model.Event{Kind: model.EventThinking, Text: "Chart route"}, model.AgentClaude, nil, m.width, m.height, m.styles)
 	view := m.helpView()
-	for _, want := range []string{"j/k scroll", "g/G edge", "w wrap", "mouse wheel scroll", "esc/h back", "t theme", "? help", "q/ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "w wrap", "T time", "mouse wheel scroll", "esc/h back", "t theme", "? help", "q/ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("item help missing %q:\n%s", want, view)
 		}

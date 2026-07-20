@@ -24,6 +24,7 @@ type detailState struct {
 	width             int
 	height            int
 	now               time.Time
+	absoluteTime      bool
 	loading           bool
 	err               error
 	styles            styles
@@ -140,6 +141,13 @@ type flattenedSubagent struct {
 }
 
 const detailPreviewLineCap = 40
+
+const (
+	detailRelativeTimeWidth = 4
+	detailClockTimeWidth    = 8
+	detailDatedTimeWidth    = 15
+	detailTimeGapWidth      = 1
+)
 
 func newViewport(width, height int) viewport.Model {
 	view := viewport.New(width, height)
@@ -656,19 +664,22 @@ func (d *detailState) rebuildRendered() {
 	content := make([]string, 0, len(d.lines))
 	for detailIndex, line := range d.lines {
 		d.renderedStarts = append(d.renderedStarts, len(d.rendered))
-		prefix := "  "
-		if detailIndex == d.selectedLine {
-			prefix = "› "
-		}
-		plain := prefix + line.text
-		rows := []string{plain}
-		if d.wrap && !line.nowrap && ansi.StringWidth(plain) > d.viewport.Width {
-			rows = strings.Split(ansi.Hardwrap(plain, d.viewport.Width, true), "\n")
+		markerWidth := min(2, d.viewport.Width)
+		gutterWidth := min(d.timelineGutterWidth(), max(0, d.viewport.Width-markerWidth))
+		bodyWidth := max(0, d.viewport.Width-markerWidth-gutterWidth)
+		rows := []string{line.text}
+		if d.wrap && !line.nowrap && bodyWidth > 0 && ansi.StringWidth(line.text) > bodyWidth {
+			rows = strings.Split(ansi.Hardwrap(line.text, bodyWidth, true), "\n")
 		}
 		for rowIndex, row := range rows {
-			row = fitPlain(row, d.viewport.Width, false)
-			d.rendered = append(d.rendered, renderedRow{detailIndex: detailIndex, text: row, first: rowIndex == 0})
-			content = append(content, row)
+			first := rowIndex == 0
+			marker := "  "
+			if first && detailIndex == d.selectedLine {
+				marker = "› "
+			}
+			plain := fitPlain(marker, markerWidth, false) + d.timelineGutter(line.event, first, gutterWidth) + fitPlain(row, bodyWidth, false)
+			d.rendered = append(d.rendered, renderedRow{detailIndex: detailIndex, text: plain, first: first})
+			content = append(content, plain)
 		}
 	}
 	d.viewport.SetContent(strings.Join(content, "\n"))
@@ -681,6 +692,59 @@ func (d *detailState) rebuildRendered() {
 	} else if selectedRow >= d.viewport.YOffset+d.viewport.Height {
 		d.viewport.SetYOffset(selectedRow - d.viewport.Height + 1)
 	}
+}
+
+func (d *detailState) rebuildPreservingViewport() {
+	pinned := d.tab == tabTimeline && d.pinnedToBottom()
+	anchorDetail, anchorOffset := -1, 0
+	if offset := d.viewport.YOffset; offset >= 0 && offset < len(d.rendered) {
+		anchorDetail = d.rendered[offset].detailIndex
+		anchorOffset = offset - d.firstRenderedRow(anchorDetail)
+	}
+	d.rebuild()
+	if pinned {
+		d.anchorBottom()
+		return
+	}
+	start := d.firstRenderedRow(anchorDetail)
+	if start < 0 {
+		return
+	}
+	end := len(d.rendered)
+	if anchorDetail+1 < len(d.renderedStarts) {
+		end = d.renderedStarts[anchorDetail+1]
+	}
+	d.viewport.SetYOffset(start + min(anchorOffset, max(0, end-start-1)))
+}
+
+func (d *detailState) timelineGutterWidth() int {
+	if d.tab != tabTimeline {
+		return 0
+	}
+	width := detailRelativeTimeWidth
+	if d.absoluteTime {
+		width = detailClockTimeWidth
+		if sessionSpansMultipleDates(d.session) {
+			width = detailDatedTimeWidth
+		}
+	}
+	return width + detailTimeGapWidth
+}
+
+func (d *detailState) timelineGutter(event model.Event, first bool, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	stamp := ""
+	if first && !event.Timestamp.IsZero() {
+		if d.absoluteTime {
+			stamp = formatDetailTime(event.Timestamp, sessionSpansMultipleDates(d.session))
+		} else {
+			stamp = formatAge(d.now, event.Timestamp)
+		}
+	}
+	stampWidth := max(0, width-detailTimeGapWidth)
+	return fitPlain(stamp, stampWidth, true) + strings.Repeat(" ", width-stampWidth)
 }
 
 func (d *detailState) firstRenderedRow(detailIndex int) int {
@@ -1173,13 +1237,14 @@ func detailKeyText(width int, mono bool, tab detailTab, wrap bool) string {
 	} else {
 		hints = append(hints, enterHint, "tab switch")
 	}
+	hints = append(hints, timeFormatKey+" time")
 	hints = append(hints, "esc back", "mouse scroll/click")
 	if !mono {
 		hints = append(hints, "t theme")
 	}
 	hints = append(hints, "? help", "q quit")
 	return fitKeyHints(width, hints, []string{
-		"mouse scroll/click", "t theme", "? help", "j/k scroll", "tab switch", wrapHint, bulkHint, "q quit", "space toggle", "←/→ fold", enterHint,
+		"mouse scroll/click", "t theme", "? help", "j/k scroll", "tab switch", wrapHint, bulkHint, "q quit", "space toggle", "←/→ fold", timeFormatKey + " time", enterHint,
 	})
 }
 
@@ -1272,7 +1337,7 @@ func (d *detailState) headerPanelLines() []panelLine {
 	if branch := terminalText(session.GitBranch, 96); branch != "" {
 		line3Parts = append(line3Parts, "branch "+branch)
 	}
-	started, updated := formatDetailTime(session.StartedAt), formatDetailTime(session.UpdatedAt)
+	started, updated := formatHeaderTime(session.StartedAt), formatHeaderTime(session.UpdatedAt)
 	if started != "" && updated != "" {
 		line3Parts = append(line3Parts, started+"→"+updated)
 	} else if started != "" {
@@ -1308,9 +1373,28 @@ func (d *detailState) headerPanelLines() []panelLine {
 }
 
 func (d *detailState) styleLine(line string, detail detailLine, selected, first bool) string {
+	gutterWidth := min(d.timelineGutterWidth(), max(0, ansi.StringWidth(line)-2))
+	hasGutter := gutterWidth > 0 && ansi.StringWidth(line) == d.viewport.Width
+	if selected && hasGutter && !d.styles.mono {
+		marker := ansi.Cut(line, 0, 2)
+		gutter := ansi.Cut(line, 2, 2+gutterWidth)
+		body := ansi.Cut(line, 2+gutterWidth, ansi.StringWidth(line))
+		mutedSelection := d.styles.selected.Foreground(d.styles.muted.GetForeground())
+		return d.styles.selected.Render(marker) + mutedSelection.Render(gutter) + d.styles.selected.Render(body)
+	}
 	if selected {
 		return d.styles.selected.Render(line)
 	}
+	if hasGutter {
+		marker := ansi.Cut(line, 0, 2)
+		gutter := ansi.Cut(line, 2, 2+gutterWidth)
+		body := ansi.Cut(line, 2+gutterWidth, ansi.StringWidth(line))
+		return d.styles.row.Render(marker) + d.styles.muted.Render(gutter) + d.styleLineBody(body, detail, first)
+	}
+	return d.styleLineBody(line, detail, first)
+}
+
+func (d *detailState) styleLineBody(line string, detail detailLine, first bool) string {
 	if detail.role == detailRow && detail.subagentSession != nil {
 		return d.styleSubagentLine(line, detail)
 	}
@@ -1437,9 +1521,28 @@ func detailModels(session *model.Session) string {
 	return strings.Join(labels, ", ")
 }
 
-func formatDetailTime(value time.Time) string {
+func formatHeaderTime(value time.Time) string {
 	if value.IsZero() {
 		return ""
 	}
 	return value.Format("Jan 02 15:04")
+}
+
+func formatDetailTime(value time.Time, includeDate bool) string {
+	if value.IsZero() {
+		return ""
+	}
+	if includeDate {
+		return value.Format("Jan 2 15:04:05")
+	}
+	return value.Format("15:04:05")
+}
+
+func sessionSpansMultipleDates(session *model.Session) bool {
+	if session == nil || session.StartedAt.IsZero() || session.UpdatedAt.IsZero() {
+		return false
+	}
+	startYear, startMonth, startDay := session.StartedAt.Date()
+	endYear, endMonth, endDay := session.UpdatedAt.Date()
+	return startYear != endYear || startMonth != endMonth || startDay != endDay
 }

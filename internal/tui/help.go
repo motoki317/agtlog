@@ -8,7 +8,7 @@ func (m Model) helpView() string {
 	lines := []string{
 		"j/k ↑/↓ move · / filter",
 		"pgup/pgdn page · home/end/g/G edge",
-		"s sort · a agent",
+		"s sort · a agent · " + timeFormatKey + " time",
 		"enter open · r refresh",
 		listMouseHelp,
 		"? help · q/ctrl-c quit",
@@ -20,7 +20,7 @@ func (m Model) helpView() string {
 		if _, item := m.detail.(*itemView); item {
 			lines = []string{
 				"j/k scroll · g/G edge",
-				"w wrap · esc/h back",
+				"w wrap · " + timeFormatKey + " time · esc/h back",
 				"mouse wheel scroll",
 				"? help · q/ctrl-c quit",
 			}
@@ -36,7 +36,7 @@ func (m Model) helpView() string {
 				"j/k scroll · g/G edge",
 				"←/→ fold · space toggle · enter/l open",
 				expandAllKey + " expand all · " + collapseAllKey + " collapse all",
-				"tab tabs · w wrap",
+				"tab tabs · w wrap · " + timeFormatKey + " time",
 				"esc/h back",
 				mouseHelp,
 				"? help · q/ctrl-c quit",

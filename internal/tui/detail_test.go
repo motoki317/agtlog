@@ -914,7 +914,9 @@ func TestWrappedAssistantProseDoesNotColorLabelTextOnContinuation(t *testing.T) 
 			continue
 		}
 		found = true
-		if got, want := detail.styleLine(row.text, detail.lines[row.detailIndex], false, row.first), styleSet.row.Render(row.text); got != want {
+		gutterWidth := detail.timelineGutterWidth()
+		want := styleSet.row.Render(ansi.Cut(row.text, 0, 2)) + styleSet.muted.Render(ansi.Cut(row.text, 2, 2+gutterWidth)) + styleSet.row.Render(ansi.Cut(row.text, 2+gutterWidth, ansi.StringWidth(row.text)))
+		if got := detail.styleLine(row.text, detail.lines[row.detailIndex], false, row.first); got != want {
 			t.Fatalf("wrapped assistant prose styling = %q, want neutral continuation %q", got, want)
 		}
 	}
@@ -932,10 +934,12 @@ func TestUserPromptColorsOnlyTheLabelOverTheFullRowTint(t *testing.T) {
 	line := detail.lines[0]
 	plain := detail.rendered[0].text
 	label := glyphCollapsed + " you:"
-	start := strings.Index(plain, label)
+	gutterWidth := detail.timelineGutterWidth()
+	body := ansi.Cut(plain, 2+gutterWidth, ansi.StringWidth(plain))
+	start := strings.Index(body, label)
 	base := lipgloss.NewStyle().Foreground(lipgloss.Color("#ABB2BF")).Background(lipgloss.Color("#262B33"))
 	labelStyle := base.Foreground(lipgloss.Color("#61AFEF")).Bold(true)
-	want := base.Render(plain[:start]) + labelStyle.Render(label) + base.Render(plain[start+len(label):])
+	want := styleSet.row.Render(ansi.Cut(plain, 0, 2)) + styleSet.muted.Render(ansi.Cut(plain, 2, 2+gutterWidth)) + base.Render(body[:start]) + labelStyle.Render(label) + base.Render(body[start+len(label):])
 
 	if got := detail.styleLine(plain, line, false, true); got != want {
 		t.Fatalf("user prompt styling = %q, want neutral prose and a full-row tint as %q", got, want)
@@ -1011,7 +1015,7 @@ func TestDetailKeyBarKeepsQuitVisibleAtEightyColumns(t *testing.T) {
 func TestDetailKeyBarUsesContextualNewcomerHints(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "route", Subagents: []*model.Session{{ID: "scout"}}}, 160, 12, newStyles())
 	keyBar := strings.Split(ansi.Strip(detail.view()), "\n")[11]
-	for _, want := range []string{"space toggle", "↵ inspect", "tab switch", "w nowrap"} {
+	for _, want := range []string{"space toggle", "↵ inspect", "tab switch", "w nowrap", "T time"} {
 		if !strings.Contains(keyBar, want) {
 			t.Fatalf("wrapped Timeline key bar missing %q: %q", want, keyBar)
 		}
@@ -1025,7 +1029,7 @@ func TestDetailKeyBarUsesContextualNewcomerHints(t *testing.T) {
 
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 	keyBar = strings.Split(ansi.Strip(detail.view()), "\n")[11]
-	if !strings.Contains(keyBar, "↵ open") || strings.Contains(keyBar, "↵ inspect") || strings.Contains(keyBar, "space toggle") || strings.Contains(keyBar, "w wrap") || strings.Contains(keyBar, "w nowrap") {
+	if !strings.Contains(keyBar, "↵ open") || !strings.Contains(keyBar, "T time") || strings.Contains(keyBar, "↵ inspect") || strings.Contains(keyBar, "space toggle") || strings.Contains(keyBar, "w wrap") || strings.Contains(keyBar, "w nowrap") {
 		t.Fatalf("Subagents key bar did not limit hints to applicable actions: %q", keyBar)
 	}
 }
@@ -2111,7 +2115,7 @@ func TestPinnedDetailTimelineStaysPinnedAcrossResize(t *testing.T) {
 	m = updated.(Model)
 	detail := detailStateFromScreen(t, m.detail)
 	view := ansi.Strip(m.View())
-	if !detail.pinnedToBottom() || !strings.Contains(view, "Final telemetry") || !strings.Contains(view, "sample") {
+	if !detail.pinnedToBottom() || !strings.Contains(view, "Final tele") || !strings.Contains(view, "metry sample") {
 		t.Fatalf("post-resize tail-follow bottom=%t:\n%s", detail.pinnedToBottom(), view)
 	}
 }
@@ -2141,6 +2145,135 @@ func TestSpaceCollapsesDefaultExpandedTurn(t *testing.T) {
 		if strings.Contains(line.text, "Choose the safest route") {
 			t.Fatalf("collapsed turn retained child row %q", line.text)
 		}
+	}
+}
+
+func TestTimelineGutterShowsRelativeEventTime(t *testing.T) {
+	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	session := &model.Session{ID: "route", Agent: model.AgentClaude, Events: []model.Event{{
+		Timestamp: now.Add(-5 * time.Minute), Kind: model.EventUser, Text: "Survey the crater",
+	}}}
+	detail := newDetailState(session, 80, 12, newStyles())
+	detail.now = now
+	detail.rebuild()
+
+	line := strings.TrimRight(detail.rendered[0].text, " ")
+	if !strings.HasPrefix(line, "›   5m ") {
+		t.Fatalf("relative timeline row = %q, want fixed right-aligned 5m gutter", line)
+	}
+}
+
+func TestTimelineGutterKeepsAbsoluteAndContinuationWidthsFixed(t *testing.T) {
+	started := time.Date(2026, time.July, 19, 23, 55, 0, 0, time.UTC)
+	eventTime := time.Date(2026, time.July, 20, 11, 55, 7, 0, time.UTC)
+	session := &model.Session{
+		ID: "route", Agent: model.AgentClaude, StartedAt: started, UpdatedAt: eventTime,
+		Events: []model.Event{
+			{Timestamp: eventTime, Kind: model.EventUser, Text: strings.Repeat("charted route ", 12)},
+			{Kind: model.EventSystem, Text: "timestamp unavailable"},
+		},
+	}
+	detail := newDetailState(session, 40, 16, newStyles())
+	detail.absoluteTime = true
+	detail.rebuild()
+
+	gutterWidth := detail.timelineGutterWidth()
+	if gutterWidth != detailDatedTimeWidth+detailTimeGapWidth {
+		t.Fatalf("dated gutter width = %d, want %d", gutterWidth, detailDatedTimeWidth+detailTimeGapWidth)
+	}
+	first := detail.rendered[0].text
+	if got := ansi.Cut(first, 2, 2+gutterWidth); got != "Jul 20 11:55:07 " {
+		t.Fatalf("absolute gutter = %q, want dated seconds clock", got)
+	}
+	for index, row := range detail.rendered {
+		if width := ansi.StringWidth(row.text); width != detail.viewport.Width {
+			t.Errorf("rendered row %d width = %d, want %d", index, width, detail.viewport.Width)
+		}
+		if !row.first && strings.TrimSpace(ansi.Cut(row.text, 2, 2+gutterWidth)) != "" {
+			t.Errorf("continuation row %d gutter is not blank: %q", index, ansi.Cut(row.text, 2, 2+gutterWidth))
+		}
+	}
+	zeroStart := detail.firstRenderedRow(len(detail.lines) - 1)
+	if got := strings.TrimSpace(ansi.Cut(detail.rendered[zeroStart].text, 2, 2+gutterWidth)); got != "" {
+		t.Fatalf("zero-timestamp gutter = %q, want blank", got)
+	}
+}
+
+func TestTimeToggleUpdatesListAndTimelineTogether(t *testing.T) {
+	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	eventTime := now.Add(-5 * time.Minute)
+	session := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Project: "starship", Title: "Chart route",
+		StartedAt: now.Add(-time.Hour), UpdatedAt: eventTime,
+		Events: []model.Event{{Timestamp: eventTime, Kind: model.EventUser, Text: "Survey the crater"}},
+	}
+	m := newModelWithClock([]*model.Session{session}, nil, func() time.Time { return now })
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if view := ansi.Strip(m.View()); !strings.Contains(view, "  5m ") || strings.Contains(view, "11:55:00") {
+		t.Fatalf("relative detail did not start in age mode:\n%s", view)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(timeFormatKey[0])}})
+	m = updated.(Model)
+	if view := ansi.Strip(m.View()); !m.absoluteTime || !strings.Contains(view, "11:55:00") || strings.Contains(view, "  5m ") {
+		t.Fatalf("absolute detail did not switch with global flag:\n%s", view)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	m = updated.(Model)
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "TIME") || !strings.Contains(view, "11:55:00") {
+		t.Fatalf("list did not share absolute time mode:\n%s", view)
+	}
+}
+
+func TestTimeRefreshPreservesScrolledViewportAwayFromFocus(t *testing.T) {
+	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	events := make([]model.Event, 20)
+	for index := range events {
+		events[index] = model.Event{Timestamp: now.Add(-time.Duration(index) * time.Minute), Kind: model.EventUser, Text: fmt.Sprintf("Survey sector %02d", index)}
+	}
+	m := newModelWithClock([]*model.Session{{ID: "route", Agent: model.AgentClaude, Events: events}}, nil, func() time.Time { return now })
+	for _, msg := range []tea.Msg{tea.WindowSizeMsg{Width: 40, Height: 10}, tea.KeyMsg{Type: tea.KeyEnter}} {
+		updated, _ := m.Update(msg)
+		m = updated.(Model)
+	}
+	detail := detailStateFromScreen(t, m.detail)
+	detail.viewport.GotoTop()
+	if detail.focus != len(detail.focusables)-1 || detail.viewport.YOffset != 0 {
+		t.Fatalf("fixture focus=%d/%d offset=%d, want distant focus with top viewport", detail.focus, len(detail.focusables)-1, detail.viewport.YOffset)
+	}
+
+	updated, _ := m.Update(ageTickMsg{})
+	m = updated.(Model)
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.viewport.YOffset != 0 || detail.rendered[0].detailIndex != 0 {
+		t.Fatalf("age tick moved scrolled viewport to offset=%d detail=%d", detail.viewport.YOffset, detail.rendered[detail.viewport.YOffset].detailIndex)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	m = updated.(Model)
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.viewport.YOffset != 0 || detail.rendered[0].detailIndex != 0 {
+		t.Fatalf("time toggle moved scrolled viewport to offset=%d detail=%d", detail.viewport.YOffset, detail.rendered[detail.viewport.YOffset].detailIndex)
+	}
+}
+
+func TestSelectedTimelineGutterKeepsMutedForeground(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	styleSet := newStyles(themes["default"])
+	detail := newDetailState(&model.Session{ID: "route", Events: []model.Event{{Timestamp: now.Add(-5 * time.Minute), Kind: model.EventUser, Text: "Survey"}}}, 40, 12, styleSet)
+	detail.now = now
+	detail.rebuild()
+	plain := detail.rendered[0].text
+	gutterWidth := detail.timelineGutterWidth()
+	mutedSelection := styleSet.selected.Foreground(styleSet.muted.GetForeground())
+	wantGutter := mutedSelection.Render(ansi.Cut(plain, 2, 2+gutterWidth))
+
+	if styled := detail.styleLine(plain, detail.lines[0], true, true); !strings.Contains(styled, wantGutter) {
+		t.Fatalf("selected row did not retain muted gutter foreground: %q", styled)
 	}
 }
 
@@ -2922,7 +3055,7 @@ func TestDetailNavigationSupportsVimEdges(t *testing.T) {
 	if want := detail.focusables[detail.focus].line; detail.selectedLine != want || detail.viewport.YOffset == 0 || want < detail.viewport.YOffset || want >= detail.viewport.YOffset+detail.viewport.Height {
 		t.Fatalf("G selection line=%d offset=%d height=%d, want visible line %d below top", detail.selectedLine, detail.viewport.YOffset, detail.viewport.Height, want)
 	}
-	if view := ansi.Strip(detail.view()); !strings.Contains(view, "›   claude: The valley is clear") {
+	if view := ansi.Strip(detail.view()); !strings.Contains(view, strings.TrimRight(detail.rendered[detail.firstRenderedRow(detail.selectedLine)].text, " ")) {
 		t.Fatalf("G did not keep the last focusable visible:\n%s", view)
 	}
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
@@ -2932,7 +3065,7 @@ func TestDetailNavigationSupportsVimEdges(t *testing.T) {
 	if want := detail.focusables[detail.focus].line; detail.selectedLine != want || detail.viewport.YOffset != 0 {
 		t.Fatalf("g selection line=%d offset=%d, want line %d at top", detail.selectedLine, detail.viewport.YOffset, want)
 	}
-	if view := ansi.Strip(detail.view()); !strings.Contains(view, "› ▸ you: Survey the ridge") {
+	if view := ansi.Strip(detail.view()); !strings.Contains(view, strings.TrimRight(detail.rendered[detail.firstRenderedRow(detail.selectedLine)].text, " ")) {
 		t.Fatalf("g did not keep the first focusable visible:\n%s", view)
 	}
 }
@@ -2951,10 +3084,11 @@ func TestDetailNavigationMovesTheVisibleSelectionMarker(t *testing.T) {
 	newText := detail.lines[detail.selectedLine].text
 	view := ansi.Strip(detail.view())
 
-	if strings.Contains(view, "› "+oldText) {
+	gutter := strings.Repeat(" ", detail.timelineGutterWidth())
+	if strings.Contains(view, "› "+gutter+oldText) {
 		t.Fatalf("navigation left the visible marker on %q:\n%s", oldText, view)
 	}
-	if !strings.Contains(view, "› "+newText) {
+	if !strings.Contains(view, "› "+gutter+newText) {
 		t.Fatalf("navigation did not move the visible marker to %q:\n%s", newText, view)
 	}
 }
@@ -2980,8 +3114,9 @@ func TestWrapToggleUsesFlatRowsAndHighlightsEverySelectedRow(t *testing.T) {
 	if selectedRows != len(detail.rendered) {
 		t.Fatalf("selected rows = %d/%d, want every wrapped row selected", selectedRows, len(detail.rendered))
 	}
-	if highlighted := strings.Count(detail.view(), "\x1b[7m"); highlighted != selectedRows {
-		t.Fatalf("highlighted rows = %d, want %d selected rows", highlighted, selectedRows)
+	visibleSelectedRows := min(selectedRows, detail.viewport.Height)
+	if highlighted := strings.Count(detail.view(), "\x1b[7m"); highlighted != visibleSelectedRows {
+		t.Fatalf("highlighted rows = %d, want %d visible selected rows", highlighted, visibleSelectedRows)
 	}
 
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})

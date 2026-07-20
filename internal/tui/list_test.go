@@ -364,6 +364,38 @@ func TestListColumnsFillWidthAndDropLowValueFieldsInOrder(t *testing.T) {
 	}
 }
 
+func TestAbsoluteListTimeUsesDatedSecondsForMultiDateSession(t *testing.T) {
+	session := &model.Session{
+		StartedAt: time.Date(2026, time.September, 29, 23, 55, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, time.September, 30, 1, 2, 3, 0, time.UTC),
+	}
+	columns := listColumns(160, true)
+	for _, column := range columns {
+		if column.kind != columnAge {
+			continue
+		}
+		if got := sessionCell(session, time.Time{}, column); got != "Sep 30 01:02:03" || ansi.StringWidth(got) != column.width {
+			t.Fatalf("absolute list time = %q (width %d/%d), want dated seconds", got, ansi.StringWidth(got), column.width)
+		}
+		return
+	}
+	t.Fatal("absolute list columns omitted TIME")
+}
+
+func TestTimeAndThemeKeysRemainDistinct(t *testing.T) {
+	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	m = updated.(Model)
+	if !m.absoluteTime || m.theme.Name != "default" {
+		t.Fatalf("T set absolute=%t theme=%q, want time-only toggle", m.absoluteTime, m.theme.Name)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
+	m = updated.(Model)
+	if !m.absoluteTime || m.theme.Name == "default" {
+		t.Fatalf("t set absolute=%t theme=%q, want theme-only toggle", m.absoluteTime, m.theme.Name)
+	}
+}
+
 func (s *refreshTestSource) Agent() model.AgentKind { return model.AgentClaude }
 func (s *refreshTestSource) Roots() []string        { return []string{"/workspace"} }
 func (s *refreshTestSource) Discover(context.Context) ([]string, error) {

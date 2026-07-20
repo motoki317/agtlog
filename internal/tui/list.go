@@ -21,6 +21,7 @@ const (
 	listTitlePreferred = 40
 	listModelWidth     = 13
 	listAgeWidth       = 4
+	listTimeWidth      = 15
 	listMessagesWidth  = 5
 	listSubagentsWidth = 4
 	listTokensWidth    = 9
@@ -43,10 +44,11 @@ const (
 )
 
 type listColumn struct {
-	kind  listColumnKind
-	title string
-	width int
-	right bool
+	kind         listColumnKind
+	title        string
+	width        int
+	right        bool
+	absoluteTime bool
 }
 
 type sessionPresentation struct {
@@ -123,16 +125,21 @@ func (m Model) compactListIndex() int {
 	return max(0, min(m.listOffset, len(m.visible)-1))
 }
 
-func listColumns(width int) []listColumn {
+func listColumns(width int, absolute ...bool) []listColumn {
 	if width <= 0 {
 		return nil
+	}
+	absoluteTime := len(absolute) > 0 && absolute[0]
+	timeTitle, timeWidth := "AGE", listAgeWidth
+	if absoluteTime {
+		timeTitle, timeWidth = "TIME", listTimeWidth
 	}
 	columns := []listColumn{
 		{kind: columnAgent, title: "AGENT", width: listAgentWidth},
 		{kind: columnProject, title: "PROJECT", width: listProjectWidth},
 		{kind: columnTitle, title: "TITLE", width: listTitleWidth},
 		{kind: columnModel, title: "MODEL", width: listModelWidth},
-		{kind: columnAge, title: "AGE", width: listAgeWidth, right: true},
+		{kind: columnAge, title: timeTitle, width: timeWidth, right: true, absoluteTime: absoluteTime},
 		{kind: columnMessages, title: "MSGS", width: listMessagesWidth, right: true},
 		{kind: columnSubagents, title: "SUBS", width: listSubagentsWidth, right: true},
 		{kind: columnTokens, title: "TOKENS", width: listTokensWidth, right: true},
@@ -224,6 +231,9 @@ func sessionCellWithPresentation(session *model.Session, presentation sessionPre
 	case columnModel:
 		return terminalText(presentation.model, 96)
 	case columnAge:
+		if column.absoluteTime {
+			return formatDetailTime(session.UpdatedAt, sessionSpansMultipleDates(session))
+		}
 		return formatAge(now, session.UpdatedAt)
 	case columnMessages:
 		return compactCount(int64(session.Messages), column.width)
@@ -469,7 +479,7 @@ func (m Model) compactListView(layout listLayout) string {
 	}
 	if len(content) < layout.compactPanelHeight-2 {
 		if len(m.visible) > 0 {
-			columns := listColumns(max(0, innerWidth-listCursorWidth))
+			columns := listColumns(max(0, innerWidth-listCursorWidth), m.absoluteTime)
 			index := m.compactListIndex()
 			content = append(content, renderSessionPanelLine(m.visible[index], m.now(), columns, innerWidth, index == m.cursor, m.styles))
 		} else {
@@ -514,7 +524,7 @@ func (m Model) filterInputLine(width int) string {
 func (m Model) sessionsPanel(height int) string {
 	innerWidth := max(0, m.width-2)
 	innerHeight := max(0, height-2)
-	columns := listColumns(max(0, innerWidth-listCursorWidth))
+	columns := listColumns(max(0, innerWidth-listCursorWidth), m.absoluteTime)
 	content := make([]panelLine, 0, innerHeight)
 	if innerHeight > 0 {
 		content = append(content, renderListHeaderLine(columns, innerWidth, m.styles))
@@ -630,12 +640,12 @@ func styleSessionCell(cell string, session *model.Session, presentation sessionP
 }
 
 func (m Model) renderKeyBar() string {
-	hints := []string{"↑/↓ move", "/ filter", "s sort", "a agent", "↵ open", "r refresh", "mouse scroll/click"}
+	hints := []string{"↑/↓ move", "/ filter", "s sort", "a agent", timeFormatKey + " time", "↵ open", "r refresh", "mouse scroll/click"}
 	if !m.styles.mono {
 		hints = append(hints, "t theme")
 	}
 	hints = append(hints, "? help", "q quit")
-	plain := fitKeyHints(m.width, hints, []string{"mouse scroll/click", "t theme", "r refresh", "a agent", "s sort", "? help", "/ filter", "↑/↓ move", "q quit", "↵ open"})
+	plain := fitKeyHints(m.width, hints, []string{"mouse scroll/click", "t theme", "r refresh", "a agent", "s sort", "? help", "/ filter", "↑/↓ move", timeFormatKey + " time", "q quit", "↵ open"})
 	return m.styles.keyHint.Render(fitPlain(plain, m.width, false))
 }
 

@@ -4,15 +4,15 @@
 │branch orbit/alpha │ Jan 02 05:44→Jan 02 06:04 │ total 173k tokens / $1.16    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ [Timeline]  Subagents (1) ──────────────────────────────────────────────────╮
-│  ▸ you: Delegate the survey                                                  │
-│  ▾ ● claude: Survey delegated · 1 thinking · 1 tools · 1 subagents           │
-│    ◇ thinking: Select a safe path                                            │
-│    ▾ ⚙ Read(/workspace/starship/map.go) · 400ms                              │
-│      output:                                                                 │
-│      map ready                                                               │
-│    claude: Survey delegated                                                  │
-│›   ⑃ Task(Scout terrain) opus-4.8 · 45k · $0.32                              │
+│   14m ▸ you: Delegate the survey                                             │
+│   11m ▾ ● claude: Survey delegated · 1 thinking · 1 tools · 1 subagents      │
+│   13m   ◇ thinking: Select a safe path                                       │
+│   12m   ▾ ⚙ Read(/workspace/starship/map.go) · 400ms                         │
+│           output:                                                            │
+│           map ready                                                          │
+│   11m   claude: Survey delegated                                             │
+│›  10m   ⑃ Task(Scout terrain) opus-4.8 · 45k · $0.32                         │
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-←/→ fold   space toggle   E/C all   ↵ inspect   w nowrap   esc back   q quit
+←/→ fold   space toggle   E/C all   ↵ inspect   T time   esc back   q quit

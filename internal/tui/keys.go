@@ -5,6 +5,7 @@ import "github.com/charmbracelet/bubbles/key"
 const (
 	expandAllKey   = "E"
 	collapseAllKey = "C"
+	timeFormatKey  = "T"
 )
 
 type keyMap struct {
@@ -16,6 +17,7 @@ type keyMap struct {
 	Open        key.Binding
 	Refresh     key.Binding
 	Theme       key.Binding
+	TimeFormat  key.Binding
 	Help        key.Binding
 	Quit        key.Binding
 	Back        key.Binding
@@ -36,6 +38,7 @@ func defaultKeys() keyMap {
 		Open:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 		Refresh:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
 		Theme:       key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "theme")),
+		TimeFormat:  key.NewBinding(key.WithKeys(timeFormatKey), key.WithHelp(timeFormatKey, "time")),
 		Help:        key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 		Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 		Back:        key.NewBinding(key.WithKeys("esc", "h"), key.WithHelp("esc/h", "back")),
@@ -54,7 +57,7 @@ func (k keyMap) ShortHelp() []key.Binding {
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.MoveDown, k.MoveUp, k.Filter, k.Sort, k.Agent},
-		{k.Open, k.Refresh, k.Theme, k.Toggle, k.Collapse, k.Expand, k.ExpandAll, k.CollapseAll},
+		{k.Open, k.Refresh, k.Theme, k.TimeFormat, k.Toggle, k.Collapse, k.Expand, k.ExpandAll, k.CollapseAll},
 		{k.Back, k.Help, k.Quit},
 	}
 }
