@@ -24,7 +24,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v17:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
+	return "codex-parser-v18:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
 }
 
 type tokenUsage struct {
@@ -33,6 +33,11 @@ type tokenUsage struct {
 	OutputTokens          int64 `json:"output_tokens"`
 	ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
 	TotalTokens           int64 `json:"total_tokens"`
+}
+
+type tokenUsageRecord struct {
+	model string
+	usage tokenUsage
 }
 
 type logRecord struct {
@@ -79,6 +84,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	var summedLast tokenUsage
 	usageByModel := make(map[string]*tokenUsage)
 	var usageOrder []string
+	var pricingRecords []tokenUsageRecord
 	hasLast := false
 	seenModels := make(map[string]bool)
 	metaSeen := false
@@ -171,30 +177,44 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 			}
 			usageByModel[currentModel] = &modelTotal
 			summedLast = allModelsTotal
+			pricingRecords = append(pricingRecords, tokenUsageRecord{model: currentModel, usage: *record.Payload.Info.Last})
 			hasLast = true
 		}
 	})
 	if err != nil {
 		return nil, err
 	}
+	// Per-turn pricing is safe only when Codex's cumulative total confirms that
+	// the Last records form a clean partition; every other path stays lumped.
+	cleanPartition := lastTotal != nil && hasLast && summedLast == *lastTotal
 	if lastTotal != nil && (!hasLast || summedLast != *lastTotal) {
 		usageByModel = map[string]*tokenUsage{lastTotalModel: lastTotal}
 		usageOrder = []string{lastTotalModel}
 	}
-	missingPricing := make(map[string]bool)
+	if !cleanPartition {
+		pricingRecords = pricingRecords[:0]
+		for _, usageModel := range usageOrder {
+			pricingRecords = append(pricingRecords, tokenUsageRecord{model: usageModel, usage: *usageByModel[usageModel]})
+		}
+	}
+	priceableModels := make(map[string]bool, len(usageOrder))
 	for _, usageModel := range usageOrder {
-		selected := usageByModel[usageModel]
-		if selected.ReasoningOutputTokens > math.MaxInt64-selected.OutputTokens {
+		usage, ok := codexUsage(usageModel, *usageByModel[usageModel])
+		if !ok {
 			continue
 		}
-		usage := model.Usage{
-			Model:                  usageModel,
-			InputTokens:            selected.InputTokens,
-			OutputTokens:           selected.OutputTokens + selected.ReasoningOutputTokens,
-			CacheReadTokens:        selected.CachedInputTokens,
-			InputIncludesCacheRead: true,
-		}
 		session.Usage = append(session.Usage, usage)
+		priceableModels[usageModel] = true
+	}
+	missingPricing := make(map[string]bool)
+	for _, record := range pricingRecords {
+		if !priceableModels[record.model] {
+			continue
+		}
+		usage, ok := codexUsage(record.model, record.usage)
+		if !ok {
+			continue
+		}
 		calculated := p.calculator.CalculateCodex(usage, p.defaultPricingModel)
 		if session.ModelCosts == nil {
 			session.ModelCosts = make(map[string]float64)
@@ -220,6 +240,19 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 		session.Title = model.CleanTitle(filepath.Base(session.AgentPath))
 	}
 	return session, nil
+}
+
+func codexUsage(usageModel string, selected tokenUsage) (model.Usage, bool) {
+	if selected.ReasoningOutputTokens > math.MaxInt64-selected.OutputTokens {
+		return model.Usage{}, false
+	}
+	return model.Usage{
+		Model:                  usageModel,
+		InputTokens:            selected.InputTokens,
+		OutputTokens:           selected.OutputTokens + selected.ReasoningOutputTokens,
+		CacheReadTokens:        selected.CachedInputTokens,
+		InputIncludesCacheRead: true,
+	}, true
 }
 
 func titleFromUserMessage(message string) string {

@@ -25,9 +25,32 @@ func testParser() Parser {
 	}), "gpt-5")
 }
 
+func tieredTestParser() Parser {
+	above := 2.0
+	return NewParser(cost.NewCalculator(cost.Table{
+		"gpt-5.6": {Input: 1, InputAbove272K: &above},
+	}), "gpt-5")
+}
+
+func parseTieredSession(t *testing.T, events ...string) *model.Session {
+	t.Helper()
+	lines := append([]string{
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"turn_context","payload":{"model":"gpt-5.6"}}`,
+	}, events...)
+	path := filepath.Join(t.TempDir(), "rollout-tiered.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := tieredTestParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	return session
+}
+
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v17:") {
-		t.Fatalf("CacheFingerprint() = %q, want v17 bucket schema", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v18:") {
+		t.Fatalf("CacheFingerprint() = %q, want v18 per-request costs", got)
 	}
 }
 
@@ -257,6 +280,73 @@ func TestParseCalculatesEstimatedCodexCost(t *testing.T) {
 	}
 	if !reflect.DeepEqual(session.ModelCostBreakdowns, wantBreakdowns) {
 		t.Fatalf("Parse().ModelCostBreakdowns = %#v, want %#v", session.ModelCostBreakdowns, wantBreakdowns)
+	}
+}
+
+func TestParsePricesCleanPerTurnUsageBelowTierSeparately(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":150000}}}}`,
+	)
+	want := model.CostBuckets{{RatePerToken: 1, Tokens: 300_000}}
+	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want only base-rate bucket %#v", got, want)
+	}
+	if session.ModelCosts["gpt-5.6"] != 300_000 || session.Cost.USD != 300_000 {
+		t.Fatalf("Parse() costs = model %v, session %v; want 300000", session.ModelCosts["gpt-5.6"], session.Cost.USD)
+	}
+	wantUsage := []model.Usage{{Model: "gpt-5.6", InputTokens: 300_000, InputIncludesCacheRead: true}}
+	if !reflect.DeepEqual(session.Usage, wantUsage) {
+		t.Fatalf("Parse().Usage = %#v, want aggregate %#v", session.Usage, wantUsage)
+	}
+}
+
+func TestParsePricesOnlyLargeTurnAboveTier(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":450000},"last_token_usage":{"input_tokens":300000}}}}`,
+	)
+	want := model.CostBuckets{
+		{RatePerToken: 1, Tokens: 422_000},
+		{RatePerToken: 2, Tokens: 28_000, AboveThreshold: true},
+	}
+	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want only the large turn above tier %#v", got, want)
+	}
+}
+
+func TestParsePricesMismatchedDeltasAsCumulativeFallback(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000,"output_tokens":400000},"last_token_usage":{"input_tokens":150000}}}}`,
+	)
+	want := model.CostBuckets{
+		{RatePerToken: 1, Tokens: 272_000},
+		{RatePerToken: 2, Tokens: 28_000, AboveThreshold: true},
+	}
+	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want cumulative fallback %#v", got, want)
+	}
+	if session.ModelCosts["gpt-5.6"] != 328_000 || session.Cost.USD != 328_000 {
+		t.Fatalf("Parse() fallback costs = model %v, session %v; want 328000", session.ModelCosts["gpt-5.6"], session.Cost.USD)
+	}
+	wantUsage := []model.Usage{{Model: "gpt-5.6", InputTokens: 300_000, OutputTokens: 400_000, InputIncludesCacheRead: true}}
+	if !reflect.DeepEqual(session.Usage, wantUsage) {
+		t.Fatalf("Parse().Usage = %#v, want full cumulative fallback %#v", session.Usage, wantUsage)
+	}
+}
+
+func TestParsePricesDeltasWithoutCumulativeAsAggregateFallback(t *testing.T) {
+	session := parseTieredSession(t,
+		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":150000}}}}`,
+	)
+	want := model.CostBuckets{
+		{RatePerToken: 1, Tokens: 272_000},
+		{RatePerToken: 2, Tokens: 28_000, AboveThreshold: true},
+	}
+	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want unverified deltas lumped %#v", got, want)
 	}
 }
 
