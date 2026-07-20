@@ -173,8 +173,8 @@ func TestCalculatePreservesLegacyFloatingPointOrder(t *testing.T) {
 			if math.Float64bits(got.USD) != test.wantBits {
 				t.Fatalf("Calculate().USD = %.17g (%#x), want legacy bits %#x", got.USD, math.Float64bits(got.USD), test.wantBits)
 			}
-			if total := calculator.Breakdown(usage).Total(); math.Float64bits(total) != test.wantBits {
-				t.Fatalf("Breakdown().Total() = %.17g (%#x), want Calculate bits %#x", total, math.Float64bits(total), test.wantBits)
+			if total := calculator.Breakdown(usage).Total(); math.Abs(total-got.USD) > 1e-9 {
+				t.Fatalf("Breakdown().Total() = %.17g, want displayed-cost equivalent to %.17g", total, got.USD)
 			}
 		})
 	}
@@ -249,7 +249,10 @@ func TestBreakdownSeparatesRateDerivedTokenCosts(t *testing.T) {
 				CacheCreation5mTokens: 250_000, CacheCreation1hTokens: 250_000, CacheReadTokens: 250_000,
 			},
 			want: model.CostBreakdown{
-				Input: 550_000, Output: 1_050_000, CacheWrite: 2_650_000, CacheRead: 137_500,
+				Input:      model.CostBuckets{{RatePerToken: 2, Tokens: 200_000}, {RatePerToken: 3, Tokens: 50_000, AboveThreshold: true}},
+				Output:     model.CostBuckets{{RatePerToken: 4, Tokens: 200_000}, {RatePerToken: 5, Tokens: 50_000, AboveThreshold: true}},
+				CacheWrite: model.CostBuckets{{RatePerToken: 6, Tokens: 250_000}, {RatePerToken: 4, Tokens: 200_000}, {RatePerToken: 7, Tokens: 50_000, AboveThreshold: true}},
+				CacheRead:  model.CostBuckets{{RatePerToken: 0.5, Tokens: 200_000}, {RatePerToken: 0.75, Tokens: 50_000, AboveThreshold: true}},
 			},
 		},
 		{
@@ -258,19 +261,22 @@ func TestBreakdownSeparatesRateDerivedTokenCosts(t *testing.T) {
 				Model: "model-a", Speed: "fast", InputTokens: 10, OutputTokens: 3,
 				CacheReadTokens: 4, InputIncludesCacheRead: true,
 			},
-			want: model.CostBreakdown{Input: 24, Output: 24, CacheRead: 4},
+			want: model.CostBreakdown{
+				Input: model.CostBuckets{{RatePerToken: 4, Tokens: 6}}, Output: model.CostBuckets{{RatePerToken: 8, Tokens: 3}},
+				CacheRead: model.CostBuckets{{RatePerToken: 1, Tokens: 4}},
+			},
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got := calculator.Breakdown(test.usage)
-			if got != test.want {
+			if !reflect.DeepEqual(got, test.want) {
 				t.Fatalf("Breakdown() = %#v, want %#v", got, test.want)
 			}
 			calculated := calculator.Calculate(test.usage)
-			total := got.Input + got.Output + got.CacheWrite + got.CacheRead
-			if total != calculated.USD {
+			total := got.Total()
+			if math.Abs(total-calculated.USD) > 1e-9 {
 				t.Fatalf("Breakdown total = %v, Calculate().USD = %v", total, calculated.USD)
 			}
 		})

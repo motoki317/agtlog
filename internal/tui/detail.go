@@ -628,14 +628,35 @@ func ownModelCostLines(session *model.Session) []string {
 			CacheCreation1hTokens: usage.CacheCreation1hTokens,
 		}.TotalTokens()
 		groups := []struct {
-			label  string
-			tokens int64
-			usd    float64
+			label   string
+			tokens  int64
+			buckets model.CostBuckets
+			terms   string
 		}{
-			{label: "input", tokens: usage.InputTokens, usd: breakdown.Input},
-			{label: "cache write", tokens: cacheWrite, usd: breakdown.CacheWrite},
-			{label: "cache read", tokens: usage.CacheReadTokens, usd: breakdown.CacheRead},
-			{label: "output", tokens: usage.OutputTokens, usd: breakdown.Output},
+			{label: "input", tokens: usage.InputTokens, buckets: breakdown.Input},
+			{label: "cache write", tokens: cacheWrite, buckets: breakdown.CacheWrite},
+			{label: "cache read", tokens: usage.CacheReadTokens, buckets: breakdown.CacheRead},
+			{label: "output", tokens: usage.OutputTokens, buckets: breakdown.Output},
+		}
+		if priced {
+			for _, group := range groups {
+				if group.buckets.TotalTokens() != group.tokens {
+					priced = false
+					break
+				}
+			}
+		}
+		bucketTokenWidth, termsWidth := 0, 0
+		if priced {
+			for _, group := range groups {
+				for _, bucket := range group.buckets {
+					bucketTokenWidth = max(bucketTokenWidth, ansi.StringWidth(humanTokens(bucket.Tokens)))
+				}
+			}
+			for index := range groups {
+				groups[index].terms = formatRateTerms(groups[index].buckets, bucketTokenWidth)
+				termsWidth = max(termsWidth, ansi.StringWidth(groups[index].terms))
+			}
 		}
 		for _, group := range groups {
 			if group.tokens <= 0 {
@@ -645,21 +666,23 @@ func ownModelCostLines(session *model.Session) []string {
 				lines = append(lines, fmt.Sprintf("  %-12s %s · price unavailable", group.label, humanTokens(group.tokens)))
 				continue
 			}
-			groupCost := model.Cost{USD: group.usd, Estimated: session.Cost.Estimated}
-			lines = append(lines, fmt.Sprintf("  %-12s %s × %s = %s",
-				group.label, humanTokens(group.tokens), formatMillionRate(group.usd/float64(group.tokens)), formatCost(groupCost)))
+			groupCost := model.Cost{USD: group.buckets.Cost(), Estimated: session.Cost.Estimated}
+			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s",
+				group.label, termsWidth, group.terms, formatCost(groupCost)))
 		}
 		if priced {
-			lines = append(lines, "  subtotal = "+formatCost(model.Cost{USD: breakdown.Total(), Estimated: session.Cost.Estimated}))
+			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s", "subtotal", termsWidth, "", formatCost(model.Cost{USD: breakdown.Total(), Estimated: session.Cost.Estimated})))
 		}
 	}
 	return lines
 }
 
 func validCostBreakdown(breakdown model.CostBreakdown) bool {
-	for _, value := range []float64{breakdown.Input, breakdown.Output, breakdown.CacheWrite, breakdown.CacheRead} {
-		if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
-			return false
+	for _, buckets := range []model.CostBuckets{breakdown.Input, breakdown.Output, breakdown.CacheWrite, breakdown.CacheRead} {
+		for _, bucket := range buckets {
+			if bucket.Tokens < 0 || bucket.RatePerToken < 0 || math.IsNaN(bucket.RatePerToken) || math.IsInf(bucket.RatePerToken, 0) {
+				return false
+			}
 		}
 	}
 	return true
@@ -673,11 +696,22 @@ func displayModelName(name string) string {
 }
 
 func formatMillionRate(rate float64) string {
-	text := strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.8f", rate*1_000_000), "0"), ".")
+	text := strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.6f", rate*1_000_000), "0"), ".")
 	if text == "" {
 		text = "0"
 	}
 	return "$" + text + "/Mtok"
+}
+
+func formatRateTerms(buckets model.CostBuckets, tokenWidth int) string {
+	terms := make([]string, 0, len(buckets))
+	for _, bucket := range buckets {
+		if bucket.Tokens <= 0 {
+			continue
+		}
+		terms = append(terms, fmt.Sprintf("%*s × %s", tokenWidth, humanTokens(bucket.Tokens), formatMillionRate(bucket.RatePerToken)))
+	}
+	return strings.Join(terms, " + ")
 }
 
 func sessionCostTree(session *model.Session) []string {
@@ -958,12 +992,15 @@ func (d *detailState) rebuildRendered() {
 
 func wordWrapRows(value string, width int) []string {
 	var rows []string
-	for _, row := range strings.Split(ansi.Wordwrap(value, width, ""), "\n") {
+	protected := strings.ReplaceAll(value, " × $", "\u00a0×\u00a0$")
+	for _, row := range strings.Split(ansi.Wordwrap(protected, width, ""), "\n") {
 		if ansi.StringWidth(row) <= width {
-			rows = append(rows, row)
+			rows = append(rows, strings.ReplaceAll(row, "\u00a0", " "))
 			continue
 		}
-		rows = append(rows, strings.Split(ansi.Hardwrap(row, width, true), "\n")...)
+		for _, hardwrapped := range strings.Split(ansi.Hardwrap(row, width, true), "\n") {
+			rows = append(rows, strings.ReplaceAll(hardwrapped, "\u00a0", " "))
+		}
 	}
 	return rows
 }

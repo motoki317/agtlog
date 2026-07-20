@@ -10,11 +10,11 @@
 │                                                                                                                      │
 │  Own model costs · $0.84                                                                                             │
 │  claude-opus-4-8                                                                                                     │
-│    input        120k × $5/Mtok = $0.60                                                                               │
+│    input        120k × $5/Mtok    = $0.60                                                                            │
 │    cache write  4000 × $6.25/Mtok = $0.03                                                                            │
-│    cache read   30k × $0.5/Mtok = $0.01                                                                              │
-│    output       8000 × $25/Mtok = $0.20                                                                              │
-│    subtotal = $0.84                                                                                                  │
+│    cache read    30k × $0.5/Mtok  = $0.01                                                                            │
+│    output       8000 × $25/Mtok   = $0.20                                                                            │
+│    subtotal                       = $0.84                                                                            │
 │  Codex: always estimated from the default pricing model. Claude: logged or priced cost.                              │
 │                                                                                                                      │
 │  Definitions                                                                                                         │

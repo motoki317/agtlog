@@ -64,7 +64,7 @@ func NewParser(calculator cost.Calculator) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v11:" + p.calculator.Fingerprint()
+	return "claude-parser-v12:" + p.calculator.Fingerprint()
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
@@ -734,7 +734,6 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 	}
 	seenModels := make(map[string]bool)
 	missingPricing := make(map[string]bool)
-	loggedCostModels := make(map[string]bool)
 	for _, record := range deduplicate(usageRecords) {
 		session.Usage = append(session.Usage, record.Usage)
 		if !seenModels[record.Usage.Model] {
@@ -746,19 +745,12 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 			session.ModelCosts = make(map[string]float64)
 		}
 		session.ModelCosts[record.Usage.Model] += calculated.USD
-		if record.Usage.CostUSD != nil {
-			loggedCostModels[record.Usage.Model] = true
-		}
 		if p.calculator.HasPricing(record.Usage) {
 			if session.ModelCostBreakdowns == nil {
 				session.ModelCostBreakdowns = make(map[string]model.CostBreakdown)
 			}
 			current := session.ModelCostBreakdowns[record.Usage.Model]
-			current = current.Add(p.calculator.Breakdown(record.Usage))
-			if !loggedCostModels[record.Usage.Model] {
-				current = current.ReconcileTotal(session.ModelCosts[record.Usage.Model])
-			}
-			session.ModelCostBreakdowns[record.Usage.Model] = current
+			session.ModelCostBreakdowns[record.Usage.Model] = current.Add(p.calculator.Breakdown(record.Usage))
 		}
 		session.Cost.USD += calculated.USD
 		session.Cost.Estimated = session.Cost.Estimated || calculated.Estimated

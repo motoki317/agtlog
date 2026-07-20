@@ -76,20 +76,22 @@ func (c Calculator) Calculate(usage model.Usage) model.Cost {
 	if usage.CostUSD != nil {
 		return model.Cost{USD: *usage.CostUSD}
 	}
-	if !c.HasPricing(usage) {
+	pricing, ok := c.resolvePricing(usage)
+	if !ok {
 		return model.Cost{MissingPricingModels: []string{usage.Model}}
 	}
-	return model.Cost{USD: c.Breakdown(usage).Total()}
+	return model.Cost{USD: rateCostsFor(usage, pricing).total()}
 }
 
-// Breakdown is rate-based and ignores CostUSD. No measured Claude usage row
-// supplies a logged cost; if one does, this estimate may differ from Calculate.
+// Breakdown reports the actual token/rate buckets applied and ignores CostUSD.
+// No measured Claude usage row supplies a logged cost; if one does, this rate
+// estimate may differ from Calculate.
 func (c Calculator) Breakdown(usage model.Usage) model.CostBreakdown {
 	pricing, ok := c.resolvePricing(usage)
 	if !ok {
 		return model.CostBreakdown{}
 	}
-	return rateCostsFor(usage, pricing).breakdown()
+	return bucketBreakdownFor(usage, pricing)
 }
 
 func (c Calculator) HasPricing(usage model.Usage) bool {
@@ -156,16 +158,60 @@ func (r rateCosts) total() float64 {
 	return usd * r.multiplier
 }
 
-func (r rateCosts) breakdown() model.CostBreakdown {
-	breakdown := model.CostBreakdown{
-		Input:      r.input * r.multiplier,
-		Output:     r.output * r.multiplier,
-		CacheWrite: (r.cacheWrite5m + r.cacheWrite1h) * r.multiplier,
-		CacheRead:  r.cacheRead * r.multiplier,
+func bucketBreakdownFor(usage model.Usage, pricing Pricing) model.CostBreakdown {
+	cacheWrite := pricing.Input * 1.25
+	if pricing.CacheWrite != nil {
+		cacheWrite = *pricing.CacheWrite
 	}
-	// Grouping cache-write durations and distributing the fast multiplier can
-	// otherwise move Calculate's established result by an ULP.
-	return breakdown.ReconcileTotal(r.total())
+	cacheRead := pricing.Input * 0.1
+	if pricing.CacheRead != nil {
+		cacheRead = *pricing.CacheRead
+	}
+	inputTokens := usage.InputTokens
+	if usage.InputIncludesCacheRead {
+		inputTokens = max(0, inputTokens-usage.CacheReadTokens)
+	}
+	multiplier := 1.0
+	if usage.Speed == "fast" && pricing.ProviderSpecificEntry.Fast != 0 {
+		multiplier = pricing.ProviderSpecificEntry.Fast
+	}
+	cacheWrite5mBase, cacheWrite5mAbove := priceTokenBucketTiers(
+		usage.CacheCreation5mTokens, cacheWrite, pricing.CacheWriteAbove200K, pricing.CacheWriteAbove272K, multiplier,
+	)
+	cacheWrite1hBase, cacheWrite1hAbove := priceTokenBucketTiers(
+		usage.CacheCreation1hTokens, pricing.Input*2, doubled(pricing.InputAbove200K), doubled(pricing.InputAbove272K), multiplier,
+	)
+	cacheWriteBuckets := cacheWrite5mBase.Add(cacheWrite1hBase)
+	cacheWriteBuckets = cacheWriteBuckets.Add(cacheWrite5mAbove)
+	cacheWriteBuckets = cacheWriteBuckets.Add(cacheWrite1hAbove)
+	return model.CostBreakdown{
+		Input:      priceTokenBuckets(inputTokens, pricing.Input, pricing.InputAbove200K, pricing.InputAbove272K, multiplier),
+		Output:     priceTokenBuckets(usage.OutputTokens, pricing.Output, pricing.OutputAbove200K, pricing.OutputAbove272K, multiplier),
+		CacheWrite: cacheWriteBuckets,
+		CacheRead:  priceTokenBuckets(usage.CacheReadTokens, cacheRead, pricing.CacheReadAbove200K, pricing.CacheReadAbove272K, multiplier),
+	}
+}
+
+func priceTokenBuckets(tokens int64, base float64, above200K, above272K *float64, multiplier float64) model.CostBuckets {
+	baseBuckets, aboveBuckets := priceTokenBucketTiers(tokens, base, above200K, above272K, multiplier)
+	return baseBuckets.Add(aboveBuckets)
+}
+
+func priceTokenBucketTiers(tokens int64, base float64, above200K, above272K *float64, multiplier float64) (model.CostBuckets, model.CostBuckets) {
+	if tokens <= 0 {
+		return nil, nil
+	}
+	threshold := int64(200_000)
+	above := above200K
+	if above == nil && above272K != nil {
+		threshold = 272_000
+		above = above272K
+	}
+	if above == nil || tokens <= threshold {
+		return model.CostBuckets{{RatePerToken: base * multiplier, Tokens: tokens}}, nil
+	}
+	return model.CostBuckets{{RatePerToken: base * multiplier, Tokens: threshold}},
+		model.CostBuckets{{RatePerToken: *above * multiplier, Tokens: tokens - threshold, AboveThreshold: true}}
 }
 
 func priceTokens(tokens int64, base float64, above200K, above272K *float64) float64 {

@@ -29,8 +29,8 @@ func mainFixture() string {
 }
 
 func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v11:") {
-		t.Fatalf("CacheFingerprint() = %q, want v11 summary schema", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v12:") {
+		t.Fatalf("CacheFingerprint() = %q, want v12 bucket schema", got)
 	}
 }
 
@@ -160,8 +160,14 @@ func TestParseCalculatesOwnCostPerMessageModel(t *testing.T) {
 		t.Fatalf("Parse().Cost.USD = %v, want %v", session.Cost.USD, want)
 	}
 	wantBreakdowns := map[string]model.CostBreakdown{
-		"claude-opus-4-8": {Input: 100, Output: 40, CacheWrite: 12.5, CacheRead: 0.5},
-		"claude-fable-5":  {Input: 60, Output: 30, CacheWrite: 15.5},
+		"claude-opus-4-8": {
+			Input: model.CostBuckets{{RatePerToken: 1, Tokens: 100}}, Output: model.CostBuckets{{RatePerToken: 2, Tokens: 20}},
+			CacheWrite: model.CostBuckets{{RatePerToken: 1.25, Tokens: 10}}, CacheRead: model.CostBuckets{{RatePerToken: 0.1, Tokens: 5}},
+		},
+		"claude-fable-5": {
+			Input: model.CostBuckets{{RatePerToken: 2, Tokens: 30}}, Output: model.CostBuckets{{RatePerToken: 3, Tokens: 10}},
+			CacheWrite: model.CostBuckets{{RatePerToken: 2.5, Tokens: 3}, {RatePerToken: 4, Tokens: 2}},
+		},
 	}
 	if !reflect.DeepEqual(session.ModelCostBreakdowns, wantBreakdowns) {
 		t.Fatalf("Parse().ModelCostBreakdowns = %#v, want %#v", session.ModelCostBreakdowns, wantBreakdowns)
@@ -187,7 +193,7 @@ func TestParseDoesNotInventBreakdownForRecordedCostWithoutPricing(t *testing.T) 
 	}
 }
 
-func TestParseBreakdownTotalExactlyMatchesMultiRowModelCost(t *testing.T) {
+func TestParseBreakdownTotalMatchesMultiRowModelCostToDisplayedPrecision(t *testing.T) {
 	inputAbove272K, outputAbove272K := 1e-5, 4.5e-5
 	calculator := cost.NewCalculator(cost.Table{"model-a": {
 		Input: 5e-6, Output: 3e-5,
@@ -207,8 +213,8 @@ func TestParseBreakdownTotalExactlyMatchesMultiRowModelCost(t *testing.T) {
 		t.Fatal(err)
 	}
 	breakdown := session.ModelCostBreakdowns["model-a"]
-	if breakdown.Total() != session.ModelCosts["model-a"] {
-		t.Fatalf("breakdown total %.17g (%#x) != model cost %.17g (%#x)", breakdown.Total(), math.Float64bits(breakdown.Total()), session.ModelCosts["model-a"], math.Float64bits(session.ModelCosts["model-a"]))
+	if math.Abs(breakdown.Total()-session.ModelCosts["model-a"]) > 1e-9 {
+		t.Fatalf("breakdown total %.17g differs visibly from model cost %.17g", breakdown.Total(), session.ModelCosts["model-a"])
 	}
 }
 

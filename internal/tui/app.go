@@ -813,7 +813,7 @@ func cloneSessionGraph(session *model.Session, cloned map[*model.Session]*model.
 	}
 	copy.ModelCostBreakdowns = make(map[string]model.CostBreakdown, len(session.ModelCostBreakdowns))
 	for name, breakdown := range session.ModelCostBreakdowns {
-		copy.ModelCostBreakdowns[name] = breakdown
+		copy.ModelCostBreakdowns[name] = breakdown.Clone()
 	}
 	copy.Cost.MissingPricingModels = append([]string(nil), session.Cost.MissingPricingModels...)
 	copy.Events = append([]model.Event(nil), session.Events...)

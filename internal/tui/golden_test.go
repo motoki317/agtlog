@@ -161,12 +161,12 @@ func TestGoldenInfoFrame(t *testing.T) {
 	mapper := &model.Session{
 		ID: "mapper", Agent: model.AgentCodex, Title: "Map the cavern", Models: []string{"gpt-5.6-sol"},
 		Usage: []model.Usage{{Model: "gpt-5.6-sol", InputTokens: 8_000, OutputTokens: 2_000}}, ModelCosts: map[string]float64{"gpt-5.6-sol": 0.12},
-		ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5.6-sol": {Input: 0.08, Output: 0.04}}, Cost: model.Cost{USD: 0.12, Estimated: true},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5.6-sol": {Input: testCostBuckets(8_000, 0.08), Output: testCostBuckets(2_000, 0.04)}}, Cost: model.Cost{USD: 0.12, Estimated: true},
 	}
 	scout := &model.Session{
 		ID: "scout", Agent: model.AgentClaude, Title: "Scout the ridge", Models: []string{"claude-opus-4-8"},
 		Usage: []model.Usage{{Model: "claude-opus-4-8", InputTokens: 40_000, OutputTokens: 5_000}}, ModelCosts: map[string]float64{"claude-opus-4-8": 0.32},
-		ModelCostBreakdowns: map[string]model.CostBreakdown{"claude-opus-4-8": {Input: 0.20, Output: 0.12}}, Cost: model.Cost{USD: 0.32}, Subagents: []*model.Session{mapper},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"claude-opus-4-8": {Input: testCostBuckets(40_000, 0.20), Output: testCostBuckets(5_000, 0.12)}}, Cost: model.Cost{USD: 0.32}, Subagents: []*model.Session{mapper},
 	}
 	root := &model.Session{
 		ID: "route", Agent: model.AgentClaude, Path: "/workspace/starship/route.jsonl", CWD: "/workspace/starship", Project: "starship", Title: "Plan route",

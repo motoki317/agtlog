@@ -43,29 +43,28 @@ func TestUsageAggregationSaturatesInsteadOfOverflowing(t *testing.T) {
 }
 
 func TestCostBreakdownAddAndTotal(t *testing.T) {
-	left := CostBreakdown{Input: 1, Output: 2, CacheWrite: 3, CacheRead: 4}
-	right := CostBreakdown{Input: 0.5, Output: 1, CacheWrite: 1.5, CacheRead: 2}
+	left := CostBreakdown{
+		Input:     CostBuckets{{RatePerToken: 1, Tokens: 2}, {RatePerToken: 2, Tokens: 3, AboveThreshold: true}},
+		CacheRead: CostBuckets{{RatePerToken: 0.5, Tokens: 4}},
+	}
+	right := CostBreakdown{
+		Input:     CostBuckets{{RatePerToken: 1, Tokens: 5}, {RatePerToken: 3, Tokens: 7}},
+		CacheRead: CostBuckets{{RatePerToken: 0.5, Tokens: 6}},
+	}
 
 	got := left.Add(right)
-	want := CostBreakdown{Input: 1.5, Output: 3, CacheWrite: 4.5, CacheRead: 6}
-	if got != want {
+	want := CostBreakdown{
+		Input:     CostBuckets{{RatePerToken: 1, Tokens: 7}, {RatePerToken: 3, Tokens: 7}, {RatePerToken: 2, Tokens: 3, AboveThreshold: true}},
+		CacheRead: CostBuckets{{RatePerToken: 0.5, Tokens: 10}},
+	}
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("CostBreakdown.Add() = %#v, want %#v", got, want)
 	}
-	if total := got.Total(); total != 15 {
-		t.Fatalf("CostBreakdown.Total() = %v, want 15", total)
+	if tokens := got.Input.TotalTokens(); tokens != 17 {
+		t.Fatalf("Input.TotalTokens() = %d, want 17", tokens)
 	}
-}
-
-func TestCostBreakdownReconcileTotalAbsorbsAggregationRounding(t *testing.T) {
-	breakdown := CostBreakdown{
-		Input: 150.88662000000002, Output: 2116.1922,
-		CacheWrite: 1251.1232187500002, CacheRead: 47.518538999999997,
-	}
-	want := math.Float64frombits(0x40abdb70ef911cf4)
-
-	got := breakdown.ReconcileTotal(want)
-	if total := got.Total(); total != want {
-		t.Fatalf("ReconcileTotal().Total() = %.17g (%#x), want %.17g (%#x)", total, math.Float64bits(total), want, math.Float64bits(want))
+	if total := got.Total(); total != 39 {
+		t.Fatalf("CostBreakdown.Total() = %v, want 39", total)
 	}
 }
 

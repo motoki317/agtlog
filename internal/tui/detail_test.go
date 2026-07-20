@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
+	"github.com/motoki317/agtlog/internal/cost"
 	"github.com/motoki317/agtlog/internal/model"
 	"github.com/motoki317/agtlog/internal/source"
 	"github.com/muesli/termenv"
@@ -20,6 +21,10 @@ import (
 
 type detailTestSource struct {
 	session *model.Session
+}
+
+func testCostBuckets(tokens int64, usd float64) model.CostBuckets {
+	return model.CostBuckets{{RatePerToken: usd / float64(tokens), Tokens: tokens}}
 }
 
 func detailStateFromScreen(t testing.TB, screen detailScreen) *detailState {
@@ -507,12 +512,12 @@ func TestThirdDetailTabExplainsCostAndRecursiveTree(t *testing.T) {
 	child := &model.Session{
 		ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge",
 		Usage: []model.Usage{{Model: "model-b", InputTokens: 40, OutputTokens: 10}}, ModelCosts: map[string]float64{"model-b": 0.05},
-		ModelCostBreakdowns: map[string]model.CostBreakdown{"model-b": {Input: 0.04, Output: 0.01}}, Cost: model.Cost{USD: 0.05},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"model-b": {Input: testCostBuckets(40, 0.04), Output: testCostBuckets(10, 0.01)}}, Cost: model.Cost{USD: 0.05},
 	}
 	root := &model.Session{
 		ID: "route", Agent: model.AgentClaude, Title: "Plan route",
 		Usage: []model.Usage{{Model: "model-a", InputTokens: 100, OutputTokens: 20, CacheReadTokens: 10}}, ModelCosts: map[string]float64{"model-a": 0.13},
-		ModelCostBreakdowns: map[string]model.CostBreakdown{"model-a": {Input: 0.10, Output: 0.02, CacheRead: 0.01}}, Cost: model.Cost{USD: 0.13}, Subagents: []*model.Session{child},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"model-a": {Input: testCostBuckets(100, 0.10), Output: testCostBuckets(20, 0.02), CacheRead: testCostBuckets(10, 0.01)}}, Cost: model.Cost{USD: 0.13}, Subagents: []*model.Session{child},
 	}
 	detail := newDetailState(root, 100, 30, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
@@ -526,9 +531,9 @@ func TestThirdDetailTabExplainsCostAndRecursiveTree(t *testing.T) {
 		"Own model costs · $0.13",
 		"model-a",
 		"input        100 × $1000/Mtok = $0.10",
-		"cache read   10 × $1000/Mtok = $0.01",
-		"output       20 × $1000/Mtok = $0.02",
-		"subtotal = $0.13",
+		"cache read    10 × $1000/Mtok = $0.01",
+		"output        20 × $1000/Mtok = $0.02",
+		"subtotal                      = $0.13",
 		"Codex: always estimated from the default pricing model. Claude: logged or priced cost.",
 		"own: this session's own turns",
 		"subagents: delegated child sessions",
@@ -573,7 +578,7 @@ func TestInfoTokenFlowNormalizesInclusiveInputBeforeSessionAggregation(t *testin
 }
 
 func TestInfoTabWithoutSubagentsDegradesToTotalAndOwn(t *testing.T) {
-	session := &model.Session{ID: "route", Agent: model.AgentCodex, Usage: []model.Usage{{Model: "gpt-5", InputTokens: 80, OutputTokens: 20}}, ModelCosts: map[string]float64{"gpt-5": 0.2}, ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5": {Input: 0.1, Output: 0.1}}, Cost: model.Cost{USD: 0.2, Estimated: true}}
+	session := &model.Session{ID: "route", Agent: model.AgentCodex, Usage: []model.Usage{{Model: "gpt-5", InputTokens: 80, OutputTokens: 20}}, ModelCosts: map[string]float64{"gpt-5": 0.2}, ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5": {Input: testCostBuckets(80, 0.1), Output: testCostBuckets(20, 0.1)}}, Cost: model.Cost{USD: 0.2, Estimated: true}}
 	detail := newDetailState(session, 80, 28, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
@@ -597,7 +602,7 @@ func TestInfoModelMathHandlesInclusiveCacheAndMissingPricing(t *testing.T) {
 			{Model: "unknown-model", InputTokens: 5},
 		},
 		ModelCosts:          map[string]float64{"gpt-5": 0.11, "unknown-model": 0},
-		ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5": {Input: 0.08, Output: 0.01, CacheRead: 0.02}, "unknown-model": {}},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5": {Input: testCostBuckets(80, 0.08), Output: testCostBuckets(10, 0.01), CacheRead: testCostBuckets(20, 0.02)}, "unknown-model": {}},
 		Cost:                model.Cost{USD: 0.11, Estimated: true, MissingPricingModels: []string{"unknown-model"}},
 	}
 	text := ""
@@ -611,7 +616,7 @@ func TestInfoModelMathHandlesInclusiveCacheAndMissingPricing(t *testing.T) {
 		"input        80 × $1000/Mtok = ~$0.08",
 		"cache read   20 × $1000/Mtok = ~$0.02",
 		"output       10 × $1000/Mtok = ~$0.01",
-		"subtotal = ~$0.11",
+		"subtotal                     = ~$0.11",
 		"unknown-model! (est.)",
 		"input        5 · price unavailable",
 	} {
@@ -662,7 +667,7 @@ func TestInfoTokenFlowRendersWithinNarrowWidths(t *testing.T) {
 	session := &model.Session{
 		ID: "route", Agent: model.AgentCodex,
 		Usage:      []model.Usage{{Model: "gpt-5.6-sol", InputTokens: 48_000_000, OutputTokens: 350_000, CacheReadTokens: 42_000_000, InputIncludesCacheRead: true}},
-		ModelCosts: map[string]float64{"gpt-5.6-sol": 60}, ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5.6-sol": {Input: 30, Output: 10, CacheRead: 20}},
+		ModelCosts: map[string]float64{"gpt-5.6-sol": 60}, ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5.6-sol": {Input: testCostBuckets(6_000_000, 30), Output: testCostBuckets(350_000, 10), CacheRead: testCostBuckets(42_000_000, 20)}},
 		Cost: model.Cost{USD: 60, Estimated: true},
 	}
 	for _, width := range []int{40, 80} {
@@ -682,23 +687,25 @@ func TestInfoTokenFlowRendersWithinNarrowWidths(t *testing.T) {
 }
 
 func TestInfoWordWrappingKeepsRatesAndCurrencyAtomic(t *testing.T) {
-	const tokens = int64(1_256_500)
-	const usd = 1.24
+	inputAbove272K := 0.000010
+	calculator := cost.NewCalculator(cost.Table{"gpt-5.6": {Input: 0.000005, InputAbove272K: &inputAbove272K}})
+	usage := model.Usage{Model: "gpt-5.6-sol", InputTokens: 450_000}
+	breakdown := calculator.BreakdownCodex(usage, "gpt-5.6")
+	calculated := calculator.CalculateCodex(usage, "gpt-5.6")
 	session := &model.Session{
 		Agent:               model.AgentCodex,
-		Usage:               []model.Usage{{Model: "gpt-5.6-sol", InputTokens: tokens}},
-		ModelCosts:          map[string]float64{"gpt-5.6-sol": usd},
-		ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5.6-sol": {Input: usd}},
-		Cost:                model.Cost{USD: usd, Estimated: true},
+		Usage:               []model.Usage{usage},
+		ModelCosts:          map[string]float64{"gpt-5.6-sol": calculated.USD},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5.6-sol": breakdown},
+		Cost:                calculated,
 	}
-	rate := formatMillionRate(usd / float64(tokens))
 	currency := formatCost(session.Cost)
 
 	for _, width := range []int{40, 80} {
 		detail := newDetailState(session, width, 40, newStyles())
 		detail.tab = tabInfo
 		detail.rebuild()
-		for _, atom := range []string{rate, currency} {
+		for _, atom := range []string{"272k × $5/Mtok", "178k × $10/Mtok", currency} {
 			found := false
 			for _, row := range detail.rendered {
 				found = found || strings.Contains(ansi.Strip(row.text), atom)
@@ -707,6 +714,73 @@ func TestInfoWordWrappingKeepsRatesAndCurrencyAtomic(t *testing.T) {
 				t.Errorf("%d-column Info wrapping split %q:\n%s", width, atom, ansi.Strip(detail.view()))
 			}
 		}
+	}
+}
+
+func TestInfoModelMathAggregatesRealRateBucketsAcrossRecords(t *testing.T) {
+	inputAbove272K, cacheRead, cacheReadAbove272K := 0.000010, 0.0000005, 0.000001
+	calculator := cost.NewCalculator(cost.Table{"gpt-5.6": {
+		Input: 0.000005, InputAbove272K: &inputAbove272K,
+		CacheRead: &cacheRead, CacheReadAbove272K: &cacheReadAbove272K,
+	}})
+	usage := []model.Usage{
+		{Model: "gpt-5.6-sol", InputTokens: 1_350_000, CacheReadTokens: 1_000_000, InputIncludesCacheRead: true},
+		{Model: "gpt-5.6-sol", InputTokens: 25_100_000, CacheReadTokens: 25_000_000, InputIncludesCacheRead: true},
+	}
+	var breakdown model.CostBreakdown
+	var total model.Cost
+	for _, record := range usage {
+		breakdown = breakdown.Add(calculator.BreakdownCodex(record, "gpt-5.6"))
+		calculated := calculator.CalculateCodex(record, "gpt-5.6")
+		total.USD += calculated.USD
+		total.Estimated = true
+	}
+	session := &model.Session{
+		Agent: model.AgentCodex, Usage: usage, ModelCosts: map[string]float64{"gpt-5.6-sol": total.USD},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5.6-sol": breakdown}, Cost: total,
+	}
+
+	text := strings.Join(ownModelCostLines(session), "\n")
+	for _, want := range []string{
+		"372k × $5/Mtok +  78k × $10/Mtok",
+		"544k × $0.5/Mtok +  25M × $1/Mtok",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("real-rate breakdown missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "$6.") || strings.Contains(text, "$0.9") {
+		t.Fatalf("Info model math rendered an effective rate:\n%s", text)
+	}
+}
+
+func TestInfoModelMathRendersCacheWriteBaseRatesBeforeAboveTierRates(t *testing.T) {
+	baseInput, highInput := 0.000002, 0.000003
+	baseWrite, highWrite := 0.000006, 0.000007
+	calculator := cost.NewCalculator(cost.Table{"model-a": {
+		Input: baseInput, InputAbove200K: &highInput,
+		CacheWrite: &baseWrite, CacheWriteAbove200K: &highWrite,
+	}})
+	usage := []model.Usage{
+		{Model: "model-a", CacheCreation5mTokens: 250_000},
+		{Model: "model-a", CacheCreation1hTokens: 250_000},
+	}
+	var breakdown model.CostBreakdown
+	var total float64
+	for _, record := range usage {
+		breakdown = breakdown.Add(calculator.Breakdown(record))
+		total += calculator.Calculate(record).USD
+	}
+	session := &model.Session{
+		Usage: usage, ModelCosts: map[string]float64{"model-a": total},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"model-a": breakdown},
+		Cost:                model.Cost{USD: total},
+	}
+
+	text := strings.Join(ownModelCostLines(session), "\n")
+	want := "250k × $6/Mtok + 200k × $4/Mtok +  50k × $7/Mtok"
+	if !strings.Contains(text, want) {
+		t.Fatalf("cache-write rates not rendered base-first; missing %q:\n%s", want, text)
 	}
 }
 
@@ -3640,10 +3714,18 @@ func TestWrappedEdgeNavigationUsesFlatRowOffsets(t *testing.T) {
 
 func TestCloneSessionRebindsSubagentEvents(t *testing.T) {
 	child := &model.Session{ID: "scout"}
-	parent := &model.Session{ID: "root", Subagents: []*model.Session{child}, Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}}}
+	parent := &model.Session{
+		ID: "root", Subagents: []*model.Session{child}, Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"model-a": {Input: model.CostBuckets{{RatePerToken: 1, Tokens: 2}}}},
+	}
 	cloned := cloneSession(parent)
 
 	if cloned.Subagents[0] == child || cloned.Events[0].Subagent != cloned.Subagents[0] {
 		t.Fatalf("cloned graph retained original link: %#v", cloned)
+	}
+	breakdown := cloned.ModelCostBreakdowns["model-a"]
+	breakdown.Input[0].Tokens = 9
+	if parent.ModelCostBreakdowns["model-a"].Input[0].Tokens != 2 {
+		t.Fatal("cloned cost buckets retained original backing slice")
 	}
 }

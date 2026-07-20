@@ -61,61 +61,92 @@ type Cost struct {
 	MissingPricingModels []string
 }
 
+type CostBucket struct {
+	RatePerToken   float64
+	Tokens         int64
+	AboveThreshold bool
+}
+
+func (c CostBucket) Cost() float64 {
+	return c.RatePerToken * float64(c.Tokens)
+}
+
+type CostBuckets []CostBucket
+
+func (c CostBuckets) Add(other CostBuckets) CostBuckets {
+	result := append(CostBuckets(nil), c...)
+	for _, addition := range other {
+		matched := false
+		for index := range result {
+			if result[index].RatePerToken == addition.RatePerToken {
+				result[index].Tokens = saturatingAdd(result[index].Tokens, addition.Tokens)
+				result[index].AboveThreshold = result[index].AboveThreshold && addition.AboveThreshold
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			result = append(result, addition)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	base := make(CostBuckets, 0, len(result))
+	above := make(CostBuckets, 0, len(result))
+	for _, bucket := range result {
+		if bucket.AboveThreshold {
+			above = append(above, bucket)
+		} else {
+			base = append(base, bucket)
+		}
+	}
+	return append(base, above...)
+}
+
+func (c CostBuckets) Cost() float64 {
+	var total float64
+	for _, bucket := range c {
+		total += bucket.Cost()
+	}
+	return total
+}
+
+func (c CostBuckets) TotalTokens() int64 {
+	var total int64
+	for _, bucket := range c {
+		total = saturatingAdd(total, bucket.Tokens)
+	}
+	return total
+}
+
 type CostBreakdown struct {
-	Input      float64
-	Output     float64
-	CacheWrite float64
-	CacheRead  float64
+	Input      CostBuckets
+	Output     CostBuckets
+	CacheWrite CostBuckets
+	CacheRead  CostBuckets
 }
 
 func (c CostBreakdown) Add(other CostBreakdown) CostBreakdown {
 	return CostBreakdown{
-		Input:      c.Input + other.Input,
-		Output:     c.Output + other.Output,
-		CacheWrite: c.CacheWrite + other.CacheWrite,
-		CacheRead:  c.CacheRead + other.CacheRead,
+		Input:      c.Input.Add(other.Input),
+		Output:     c.Output.Add(other.Output),
+		CacheWrite: c.CacheWrite.Add(other.CacheWrite),
+		CacheRead:  c.CacheRead.Add(other.CacheRead),
+	}
+}
+
+func (c CostBreakdown) Clone() CostBreakdown {
+	return CostBreakdown{
+		Input:      append(CostBuckets(nil), c.Input...),
+		Output:     append(CostBuckets(nil), c.Output...),
+		CacheWrite: append(CostBuckets(nil), c.CacheWrite...),
+		CacheRead:  append(CostBuckets(nil), c.CacheRead...),
 	}
 }
 
 func (c CostBreakdown) Total() float64 {
-	return c.Input + c.Output + c.CacheWrite + c.CacheRead
-}
-
-// ReconcileTotal absorbs only aggregation-order rounding into one component.
-func (c CostBreakdown) ReconcileTotal(target float64) CostBreakdown {
-	current := c.Total()
-	if current == target {
-		return c
-	}
-	delta := target - current
-	candidates := []*float64{&c.Input, &c.Output, &c.CacheWrite, &c.CacheRead}
-	var component *float64
-	for _, candidate := range candidates {
-		if *candidate != 0 && math.Abs(*candidate) >= math.Abs(delta) && (component == nil || math.Abs(*candidate) < math.Abs(*component)) {
-			component = candidate
-		}
-	}
-	if component == nil {
-		component = candidates[0]
-		for _, candidate := range candidates[1:] {
-			if math.Abs(*candidate) > math.Abs(*component) {
-				component = candidate
-			}
-		}
-	}
-	*component += delta
-	for range 16 {
-		current = c.Total()
-		if current == target {
-			break
-		}
-		direction := math.Inf(1)
-		if current > target {
-			direction = math.Inf(-1)
-		}
-		*component = math.Nextafter(*component, direction)
-	}
-	return c
+	return c.Input.Cost() + c.Output.Cost() + c.CacheWrite.Cost() + c.CacheRead.Cost()
 }
 
 type EventKind string

@@ -26,8 +26,8 @@ func testParser() Parser {
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v16:") {
-		t.Fatalf("CacheFingerprint() = %q, want v16 summary schema", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v17:") {
+		t.Fatalf("CacheFingerprint() = %q, want v17 bucket schema", got)
 	}
 }
 
@@ -250,7 +250,10 @@ func TestParseCalculatesEstimatedCodexCost(t *testing.T) {
 		t.Fatalf("Parse().Cost = %#v, want USD %v estimated", session.Cost, want)
 	}
 	wantBreakdowns := map[string]model.CostBreakdown{
-		"gpt-5.6-sol": {Input: 400, Output: 120, CacheRead: 25},
+		"gpt-5.6-sol": {
+			Input: model.CostBuckets{{RatePerToken: 2, Tokens: 200}}, Output: model.CostBuckets{{RatePerToken: 3, Tokens: 40}},
+			CacheRead: model.CostBuckets{{RatePerToken: 0.5, Tokens: 50}},
+		},
 	}
 	if !reflect.DeepEqual(session.ModelCostBreakdowns, wantBreakdowns) {
 		t.Fatalf("Parse().ModelCostBreakdowns = %#v, want %#v", session.ModelCostBreakdowns, wantBreakdowns)
