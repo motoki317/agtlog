@@ -25,9 +25,9 @@ func testParser() Parser {
 	}), "gpt-5")
 }
 
-func TestParserFingerprintInvalidatesWrappedToolEvents(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v11:") {
-		t.Fatalf("CacheFingerprint() = %q, want v11 event schema", got)
+func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v12:") {
+		t.Fatalf("CacheFingerprint() = %q, want v12 presentation schema", got)
 	}
 }
 
@@ -113,6 +113,33 @@ func TestParseDerivesTitleFromMeaningfulBriefLine(t *testing.T) {
 	}
 	if session.Title != "Add lunar telemetry dashboard" {
 		t.Fatalf("Parse().Title = %q, want meaningful brief title", session.Title)
+	}
+}
+
+func TestParseDerivesTitleFromRealTask(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{name: "rollout-work-preamble.jsonl", want: "Real Title"},
+		{name: "rollout-advisor-preamble.jsonl", want: "Review request: compare lunar routes"},
+		{name: "rollout-plain.jsonl", want: "Plot an imaginary comet route."},
+		{name: "rollout-brief.jsonl", want: "Milestone Z"},
+		{name: "rollout-preamble-only.jsonl", want: ""},
+		{name: "rollout-advisor-preamble-only.jsonl", want: ""},
+		{name: "rollout-unicode-preamble-only.jsonl", want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join("testdata", "titles", test.name)
+			session, err := testParser().Parse(path)
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			if session.Title != test.want {
+				t.Fatalf("Parse().Title = %q, want %q", session.Title, test.want)
+			}
+		})
 	}
 }
 
@@ -496,6 +523,20 @@ func TestCodexTimelineUserMessagePreservesOrdinaryTurns(t *testing.T) {
 		if got := codexTimelineUserMessage(message); got != message {
 			t.Errorf("codexTimelineUserMessage(%q) = %q, want ordinary turn preserved", message, got)
 		}
+	}
+}
+
+func TestCodexTimelineUserMessageHandlesTruncatedTag(t *testing.T) {
+	message := "<instructions>\nFictional wrapper text\n<"
+	if got := codexTimelineUserMessage(message); got != "" {
+		t.Fatalf("codexTimelineUserMessage() = %q, want empty truncated preamble", got)
+	}
+}
+
+func TestCodexTimelineUserMessageStripsConcatenatedTags(t *testing.T) {
+	message := strings.Repeat("<INSTRUCTIONS></INSTRUCTIONS>", 1_000) + "Chart the fictional moon."
+	if got := codexTimelineUserMessage(message); got != "Chart the fictional moon." {
+		t.Fatalf("codexTimelineUserMessage() = %q, want task after concatenated tags", got)
 	}
 }
 

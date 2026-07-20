@@ -24,7 +24,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v11:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
+	return "codex-parser-v12:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
 }
 
 type tokenUsage struct {
@@ -211,8 +211,12 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 }
 
 func titleFromUserMessage(message string) string {
+	task := codexTimelineUserMessage(message)
+	if task == "" {
+		task = message
+	}
 	var fallback, skippedTag string
-	for _, line := range strings.Split(message, "\n") {
+	for _, line := range strings.Split(task, "\n") {
 		line = strings.TrimSpace(line)
 		lower := strings.ToLower(line)
 		if skippedTag != "" {
@@ -221,7 +225,7 @@ func titleFromUserMessage(message string) string {
 			}
 			continue
 		}
-		if tag := codexPreambleTag(lower); tag != "" {
+		if tag := codexPreambleTag(line); tag != "" {
 			if !strings.Contains(lower, "</"+tag+">") {
 				skippedTag = tag
 			}
@@ -250,7 +254,8 @@ func titleFromUserMessage(message string) string {
 
 func codexPreambleTag(line string) string {
 	for _, tag := range []string{"recommended_plugins", "instructions", "environment_context"} {
-		if strings.HasPrefix(line, "<"+tag) {
+		prefix := "<" + tag
+		if len(line) >= len(prefix) && strings.EqualFold(line[:len(prefix)], prefix) {
 			return tag
 		}
 	}
@@ -262,27 +267,27 @@ func codexPreambleUserMessage(text string) bool {
 	if line == "" {
 		return false
 	}
-	if codexPreambleTag(strings.ToLower(line)) != "" {
+	if codexPreambleTag(line) != "" {
 		return true
 	}
 	title := strings.ToLower(model.CleanTitle(line))
-	return strings.HasPrefix(title, codexAutonomousAgentPreamble)
+	return strings.HasPrefix(title, codexAutonomousAgentPreamble) || strings.HasPrefix(title, codexAdvisorPreamble)
 }
 
 func codexTimelineUserMessage(text string) string {
 	text = strings.TrimSpace(text)
 	for text != "" {
-		line, rest, _ := strings.Cut(text, "\n")
-		line = strings.TrimSpace(line)
-		if tag := codexPreambleTag(strings.ToLower(line)); tag != "" {
+		if tag := codexPreambleTag(text); tag != "" {
 			closing := "</" + tag + ">"
-			index := strings.Index(strings.ToLower(text), closing)
+			index := codexIndexEqualFold(text, closing)
 			if index < 0 {
 				return ""
 			}
 			text = strings.TrimSpace(text[index+len(closing):])
 			continue
 		}
+		line, rest, _ := strings.Cut(text, "\n")
+		line = strings.TrimSpace(line)
 		if codexPreambleUserMessage(text) {
 			return codexTaskAfterDelimiter(text)
 		}
@@ -293,6 +298,24 @@ func codexTimelineUserMessage(text string) string {
 		return text
 	}
 	return ""
+}
+
+func codexIndexEqualFold(text, target string) int {
+	for offset := 0; offset+len(target) <= len(text); {
+		index := strings.IndexByte(text[offset:], target[0])
+		if index < 0 {
+			return -1
+		}
+		index += offset
+		if index+len(target) > len(text) {
+			return -1
+		}
+		if strings.EqualFold(text[index:index+len(target)], target) {
+			return index
+		}
+		offset = index + 1
+	}
+	return -1
 }
 
 func codexTaskAfterDelimiter(text string) string {
@@ -327,7 +350,10 @@ func codexFirstNonemptyLine(text string) string {
 	}
 }
 
-const codexAutonomousAgentPreamble = "you are an autonomous implementation agent"
+const (
+	codexAutonomousAgentPreamble = "you are an autonomous implementation agent"
+	codexAdvisorPreamble         = "you are an independent, cross-model reviewer"
+)
 
 func codexTitleBoilerplate(line string) bool {
 	title := strings.ToLower(model.CleanTitle(line))
@@ -335,7 +361,7 @@ func codexTitleBoilerplate(line string) bool {
 		return true
 	}
 	for _, prefix := range []string{
-		"agents.md instructions", codexAutonomousAgentPreamble,
+		"agents.md instructions", codexAutonomousAgentPreamble, codexAdvisorPreamble,
 		"deliver the complete implementation", "work from the task below",
 		"you receive no conversation history", "the orchestrator accepts or rejects",
 		"here is a list of plugins", "before the first substantive task",
