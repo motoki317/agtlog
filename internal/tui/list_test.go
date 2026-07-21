@@ -721,16 +721,6 @@ func TestMissingPricingIsFlaggedInRowAndFooter(t *testing.T) {
 	}
 }
 
-func TestAPIErrorSessionHasSingleWarningGlyph(t *testing.T) {
-	t.Setenv("NO_COLOR", "1")
-	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, HasError: true}
-	column := listColumns(160)[0]
-	cell := sessionCell(session, time.Now(), column)
-	if got := strings.Count(cell, glyphWarning); got != 1 {
-		t.Fatalf("error row agent = %q, want one warning glyph", cell)
-	}
-}
-
 func TestEnterOpensSelectedSessionDetail(t *testing.T) {
 	m := NewModel([]*model.Session{
 		{ID: "first", Agent: model.AgentClaude},

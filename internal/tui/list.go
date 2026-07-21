@@ -216,11 +216,7 @@ func sessionCell(session *model.Session, now time.Time, column listColumn) strin
 func sessionCellWithPresentation(session *model.Session, presentation sessionPresentation, now time.Time, column listColumn) string {
 	switch column.kind {
 	case columnAgent:
-		label := terminalText(string(session.Agent), 32)
-		if session.HasError {
-			label = ansi.Truncate(label, max(0, column.width-1), "") + glyphWarning
-		}
-		return label
+		return terminalText(string(session.Agent), 32)
 	case columnProject:
 		return terminalText(session.Project, 96)
 	case columnTitle:
@@ -605,9 +601,6 @@ func styleSessionCell(cell string, session *model.Session, presentation sessionP
 			agentStyle = styles.claude
 		} else if session.Agent == model.AgentCodex {
 			agentStyle = styles.codex
-		}
-		if marker := strings.Index(cell, glyphWarning); marker >= 0 {
-			return agentStyle.Render(cell[:marker]) + styles.warning.Render(glyphWarning) + agentStyle.Render(cell[marker+len(glyphWarning):])
 		}
 		return agentStyle.Render(cell)
 	case columnAge, columnMessages:
