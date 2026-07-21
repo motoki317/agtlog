@@ -40,17 +40,58 @@ type logRecord struct {
 		ID      string          `json:"id"`
 		Model   string          `json:"model"`
 		Content json.RawMessage `json:"content"`
-		Usage   struct {
-			InputTokens              int64 `json:"input_tokens"`
-			OutputTokens             int64 `json:"output_tokens"`
-			CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-			CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
-			CacheCreation            *struct {
-				Ephemeral1hInputTokens int64 `json:"ephemeral_1h_input_tokens"`
-				Ephemeral5mInputTokens int64 `json:"ephemeral_5m_input_tokens"`
-			} `json:"cache_creation"`
-		} `json:"usage"`
+		Usage   claudeUsageJSON `json:"usage"`
 	} `json:"message"`
+}
+
+type claudeUsageJSON struct {
+	InputTokens              int64 `json:"input_tokens"`
+	OutputTokens             int64 `json:"output_tokens"`
+	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	CacheCreation            *struct {
+		Ephemeral1hInputTokens int64 `json:"ephemeral_1h_input_tokens"`
+		Ephemeral5mInputTokens int64 `json:"ephemeral_5m_input_tokens"`
+	} `json:"cache_creation"`
+}
+
+// claudeUsage maps a logged usage block to model.Usage. Callers that price the
+// record add Speed and CostUSD; the timeline only needs the token counts.
+func claudeUsage(modelName string, tokens claudeUsageJSON) model.Usage {
+	usage := model.Usage{
+		Model:           modelName,
+		InputTokens:     tokens.InputTokens,
+		OutputTokens:    tokens.OutputTokens,
+		CacheReadTokens: tokens.CacheReadInputTokens,
+	}
+	if tokens.CacheCreation != nil {
+		usage.CacheCreation1hTokens = tokens.CacheCreation.Ephemeral1hInputTokens
+		usage.CacheCreation5mTokens = tokens.CacheCreation.Ephemeral5mInputTokens
+	} else {
+		usage.CacheCreation5mTokens = tokens.CacheCreationInputTokens
+	}
+	return usage
+}
+
+// claudeRequestUsage returns the billable usage an assistant line reports, or
+// false for synthetic and empty lines that carry none.
+func claudeRequestUsage(modelName string, tokens claudeUsageJSON) (model.Usage, bool) {
+	if modelName == "" || modelName == "<synthetic>" {
+		return model.Usage{}, false
+	}
+	usage := claudeUsage(modelName, tokens)
+	if !validUsage(usage) || usage.TotalTokens() == 0 {
+		return model.Usage{}, false
+	}
+	return usage, true
+}
+
+// setEventUsage records a request's usage and priced cost on the event that heads
+// it, so the timeline can total a turn's flow and cost and read its latest context.
+func (p Parser) setEventUsage(event *model.Event, usage model.Usage) {
+	event.Usage = &usage
+	event.Cost = p.calculator.Breakdown(usage)
+	event.Priced = p.calculator.HasPricing(usage)
 }
 
 type userContentRecord struct {
@@ -95,15 +136,23 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 	session.Events = nil
 	calls := make(map[string]int)
 	linkedSubagents := make(map[*model.Session]bool)
+	// One API response is written across several lines (thinking, text, each
+	// tool_use) that repeat its usage, and streaming re-logs the same request with
+	// growing counts. Attribute each request to a single head event, keeping the
+	// highest-token report, so a turn totals each billed request once and in full.
+	headOf := make(map[string]int)
 	err = jsonl.ForEachContext(ctx, file, func(line []byte) {
 		var record struct {
 			Type      string `json:"type"`
 			Subtype   string `json:"subtype"`
 			Content   string `json:"content"`
 			Timestamp string `json:"timestamp"`
+			RequestID string `json:"requestId"`
 			Message   struct {
+				ID      string          `json:"id"`
 				Model   string          `json:"model"`
 				Content json.RawMessage `json:"content"`
+				Usage   claudeUsageJSON `json:"usage"`
 			} `json:"message"`
 			ToolUseResult json.RawMessage `json:"toolUseResult"`
 		}
@@ -148,6 +197,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 		if json.Unmarshal(record.Message.Content, &blocks) != nil {
 			return
 		}
+		turnStart := len(session.Events)
 		for _, block := range blocks {
 			event := model.Event{Timestamp: timestamp, Model: record.Message.Model}
 			switch block.Type {
@@ -208,6 +258,22 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 			if event.Text != "" || event.Kind == model.EventToolCall || event.Kind == model.EventToolResult || event.Kind == model.EventSubagent {
 				event.Raw = rawRecord()
 				session.Events = append(session.Events, event)
+			}
+		}
+		if record.Type == "assistant" {
+			if usage, ok := claudeRequestUsage(record.Message.Model, record.Message.Usage); ok {
+				key := record.Message.ID + "\x00" + record.RequestID
+				dedupe := record.Message.ID != ""
+				if index, seen := headOf[key]; dedupe && seen {
+					if usage.TotalTokens() > session.Events[index].Usage.TotalTokens() {
+						p.setEventUsage(&session.Events[index], usage)
+					}
+				} else if len(session.Events) > turnStart {
+					p.setEventUsage(&session.Events[turnStart], usage)
+					if dedupe {
+						headOf[key] = turnStart
+					}
+				}
 			}
 		}
 	})
@@ -704,20 +770,9 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 			session.GitBranch = record.GitBranch
 		}
 		if record.Type == "assistant" && hasUsage && record.Message.Model != "" && record.Message.Model != "<synthetic>" {
-			usage := model.Usage{
-				Model:           record.Message.Model,
-				InputTokens:     record.Message.Usage.InputTokens,
-				OutputTokens:    record.Message.Usage.OutputTokens,
-				CacheReadTokens: record.Message.Usage.CacheReadInputTokens,
-				Speed:           record.Speed,
-				CostUSD:         record.CostUSD,
-			}
-			if record.Message.Usage.CacheCreation != nil {
-				usage.CacheCreation1hTokens = record.Message.Usage.CacheCreation.Ephemeral1hInputTokens
-				usage.CacheCreation5mTokens = record.Message.Usage.CacheCreation.Ephemeral5mInputTokens
-			} else {
-				usage.CacheCreation5mTokens = record.Message.Usage.CacheCreationInputTokens
-			}
+			usage := claudeUsage(record.Message.Model, record.Message.Usage)
+			usage.Speed = record.Speed
+			usage.CostUSD = record.CostUSD
 			if !validUsage(usage) {
 				return
 			}

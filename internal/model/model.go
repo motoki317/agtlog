@@ -45,6 +45,35 @@ func (u Usage) TotalTokens() int64 {
 	return total
 }
 
+// PromptTokens is the size of the request prompt. Because the API is stateless
+// the whole conversation is re-sent each request, so this equals the context
+// window occupied at that request. Cache reads are part of the prompt: input
+// already counts them when the source folds them in (Codex) and does not when it
+// keeps them separate (Claude); cache writes are prompt tokens either way.
+func (u Usage) PromptTokens() int64 {
+	prompt := u.InputTokens
+	if !u.InputIncludesCacheRead {
+		prompt = saturatingAdd(prompt, u.CacheReadTokens)
+	}
+	prompt = saturatingAdd(prompt, u.CacheCreation5mTokens)
+	prompt = saturatingAdd(prompt, u.CacheCreation1hTokens)
+	return prompt
+}
+
+// FlowTokens is the new tokens a request adds: freshly written input plus all
+// output, excluding context re-read from cache. It answers "what did this turn
+// add", the per-turn counterpart to the cumulative PromptTokens.
+func (u Usage) FlowTokens() int64 {
+	input := u.InputTokens
+	if u.InputIncludesCacheRead {
+		input = max(0, input-u.CacheReadTokens)
+	}
+	flow := saturatingAdd(input, u.OutputTokens)
+	flow = saturatingAdd(flow, u.CacheCreation5mTokens)
+	flow = saturatingAdd(flow, u.CacheCreation1hTokens)
+	return flow
+}
+
 func saturatingAdd(left, right int64) int64 {
 	if right > 0 && left > math.MaxInt64-right {
 		return math.MaxInt64
@@ -185,6 +214,17 @@ type Event struct {
 	Duration      time.Duration
 	AgentID       string
 	Subagent      *Session
+	// Usage is the API request usage the log attributes to this event, set on the
+	// single event that a billed request (Claude assistant line, Codex token_count)
+	// produces so a turn can sum FlowTokens and read the last PromptTokens without
+	// double counting. Nil for events without their own request.
+	Usage *Usage
+	// Cost is the priced breakdown of that same request, kept beside Usage so the
+	// timeline can split input-side from output-side cost. Empty when Priced is
+	// false. CostEstimated marks a rate estimate (always so for Codex).
+	Cost          CostBreakdown
+	Priced        bool
+	CostEstimated bool
 }
 
 type Session struct {

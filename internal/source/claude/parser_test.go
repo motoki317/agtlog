@@ -412,6 +412,71 @@ func TestLoadEventsBuildsLinkedClaudeTurn(t *testing.T) {
 	}
 }
 
+func TestLoadEventsAttachesRequestUsageToAssistantTurn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-usage.jsonl")
+	content := strings.Join([]string{
+		`{"type":"user","timestamp":"2026-01-02T03:00:00Z","message":{"content":"Inspect the engine"}}`,
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:01Z","message":{"model":"claude-opus-4-8","content":[{"type":"thinking","thinking":"Check the state"},{"type":"text","text":"The engine is ready."}],"usage":{"input_tokens":3000,"output_tokens":4000,"cache_read_input_tokens":37000,"cache_creation_input_tokens":500}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	var withUsage []int
+	for index, event := range session.Events {
+		if event.Usage != nil {
+			withUsage = append(withUsage, index)
+		}
+	}
+	// Usage lands on the first block of the assistant line only, so a turn sums each
+	// billed request exactly once rather than per rendered block.
+	if len(withUsage) != 1 || session.Events[withUsage[0]].Kind != model.EventThinking {
+		t.Fatalf("events carrying usage = %v, want the single thinking block", withUsage)
+	}
+	usage := session.Events[withUsage[0]].Usage
+	if usage.PromptTokens() != 40_500 || usage.FlowTokens() != 7_500 {
+		t.Fatalf("attached usage prompt=%d flow=%d, want 40500 and 7500", usage.PromptTokens(), usage.FlowTokens())
+	}
+}
+
+// TestLoadEventsAttributesStreamedRequestOnceAtMaxUsage guards the fix for the
+// double count: one API response is written across content-block lines that share
+// a message id and request id, and streaming re-logs it with growing output. It
+// must land on a single head event at the highest usage, so a turn totals the
+// request once and in full.
+func TestLoadEventsAttributesStreamedRequestOnceAtMaxUsage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-stream.jsonl")
+	content := strings.Join([]string{
+		`{"type":"user","timestamp":"2026-01-02T03:00:00Z","message":{"content":"Chart the route"}}`,
+		`{"type":"assistant","requestId":"req-a","timestamp":"2026-01-02T03:00:01Z","message":{"id":"msg-a","model":"claude-opus-4-8","content":[{"type":"text","text":"Working on it."}],"usage":{"input_tokens":2,"output_tokens":5,"cache_read_input_tokens":1000}}}`,
+		`{"type":"assistant","requestId":"req-a","timestamp":"2026-01-02T03:00:02Z","message":{"id":"msg-a","model":"claude-opus-4-8","content":[{"type":"tool_use","id":"tool-read","name":"Read","input":{"file_path":"/workspace/map.go"}}],"usage":{"input_tokens":2,"output_tokens":339,"cache_read_input_tokens":1000}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	var withUsage []int
+	for index, event := range session.Events {
+		if event.Usage != nil {
+			withUsage = append(withUsage, index)
+		}
+	}
+	if len(withUsage) != 1 || session.Events[withUsage[0]].Kind != model.EventAssistantText {
+		t.Fatalf("events carrying usage = %v, want the single text head", withUsage)
+	}
+	if got := session.Events[withUsage[0]].Usage.OutputTokens; got != 339 {
+		t.Fatalf("attached output = %d, want the streamed maximum 339", got)
+	}
+}
+
 func TestLoadEventsLinksAndLoadsSubagentAtSpawn(t *testing.T) {
 	dir := t.TempDir()
 	parentPath := filepath.Join(dir, "session-detail.jsonl")

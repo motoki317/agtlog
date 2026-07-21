@@ -42,6 +42,43 @@ func TestUsageAggregationSaturatesInsteadOfOverflowing(t *testing.T) {
 	}
 }
 
+func TestUsagePromptAndFlowTokens(t *testing.T) {
+	tests := []struct {
+		name       string
+		usage      Usage
+		wantPrompt int64
+		wantFlow   int64
+	}{
+		{
+			// Claude keeps cache reads separate: input excludes them, so the prompt
+			// adds them back and the flow leaves them out.
+			name:       "claude separate cache read",
+			usage:      Usage{InputTokens: 3_000, OutputTokens: 4_000, CacheCreation5mTokens: 500, CacheReadTokens: 37_000},
+			wantPrompt: 40_500,
+			wantFlow:   7_500,
+		},
+		{
+			// Codex folds cache reads into input, so the prompt is input as-is and the
+			// flow subtracts the cached portion.
+			name:       "codex inclusive cache read",
+			usage:      Usage{InputTokens: 45_000, OutputTokens: 4_000, CacheReadTokens: 37_000, InputIncludesCacheRead: true},
+			wantPrompt: 45_000,
+			wantFlow:   12_000,
+		},
+		{name: "zero usage"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.usage.PromptTokens(); got != test.wantPrompt {
+				t.Errorf("PromptTokens() = %d, want %d", got, test.wantPrompt)
+			}
+			if got := test.usage.FlowTokens(); got != test.wantFlow {
+				t.Errorf("FlowTokens() = %d, want %d", got, test.wantFlow)
+			}
+		})
+	}
+}
+
 func TestCostBreakdownAddAndTotal(t *testing.T) {
 	left := CostBreakdown{
 		Input:     CostBuckets{{RatePerToken: 1, Tokens: 2}, {RatePerToken: 2, Tokens: 3, AboveThreshold: true}},

@@ -77,6 +77,39 @@ func TestLoadEventsPopulatesBoundedEncryptedElidedRawRecord(t *testing.T) {
 	}
 }
 
+func TestLoadEventsAttachesTokenCountUsageToAssistantTurn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-usage.jsonl")
+	lines := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"user_message","message":"Chart the route"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"agent_message","message":"Route ready"}}`,
+		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":45000,"cached_input_tokens":37000,"output_tokens":4000,"reasoning_output_tokens":1000,"total_tokens":45000}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	var withUsage []int
+	for index, event := range session.Events {
+		if event.Usage != nil {
+			withUsage = append(withUsage, index)
+		}
+	}
+	// The token_count closing the request attaches to the assistant reply, not the
+	// user prompt, so context stays the whole prompt and flow adds reasoning.
+	if len(withUsage) != 1 || session.Events[withUsage[0]].Kind != model.EventAssistantText {
+		t.Fatalf("events carrying usage = %v, want the single assistant reply", withUsage)
+	}
+	usage := session.Events[withUsage[0]].Usage
+	if usage.PromptTokens() != 45_000 || usage.FlowTokens() != 13_000 {
+		t.Fatalf("attached usage prompt=%d flow=%d, want 45000 and 13000", usage.PromptTokens(), usage.FlowTokens())
+	}
+}
+
 func fixture(name string) string {
 	return filepath.Join("testdata", "sessions", "2026", "01", "02", name)
 }

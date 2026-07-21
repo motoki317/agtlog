@@ -53,6 +53,10 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 	calls := make(map[string]pendingCall)
 	dedupTextByEvent := make(map[int]string)
 	currentModel := ""
+	// requestStart marks where the current billed request's events begin, so a
+	// token_count closing that request can attribute its usage to the first
+	// event it produced. Each token_count opens the next request's window.
+	requestStart := 0
 	isSubagent := session.AgentPath != ""
 	active := !isSubagent
 	err = jsonl.ForEachContext(ctx, file, func(line []byte) {
@@ -75,6 +79,9 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				ThreadSource string           `json:"thread_source"`
 				Content      []codexTextBlock `json:"content"`
 				Summary      []codexTextBlock `json:"summary"`
+				Info         struct {
+					Last *tokenUsage `json:"last_token_usage"`
+				} `json:"info"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(line, &record) != nil {
@@ -119,6 +126,21 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				return
 			case "context_compacted":
 				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: "context compacted", Raw: model.BoundedRawRecord(string(line)), Model: currentModel})
+				return
+			case "token_count":
+				if usage := codexDisplayUsage(record.Payload.Info.Last); usage != nil {
+					usage.Model = currentModel
+					for index := requestStart; index < len(session.Events); index++ {
+						if session.Events[index].Kind != model.EventUser {
+							session.Events[index].Usage = usage
+							session.Events[index].Cost = p.calculator.BreakdownCodex(*usage, p.defaultPricingModel)
+							session.Events[index].Priced = p.calculator.HasCodexPricing(*usage, p.defaultPricingModel)
+							session.Events[index].CostEstimated = true
+							break
+						}
+					}
+				}
+				requestStart = len(session.Events)
 				return
 			default:
 				return
