@@ -1322,10 +1322,13 @@ func TestWrappedAssistantProseDoesNotColorLabelTextOnContinuation(t *testing.T) 
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
 	styleSet := newStyles(themes["default"])
+	// Long enough to fold, so the reply text renders as wrapping body rows below the
+	// nowrap head. A run of filler wider than the body pushes the embedded "codex:"
+	// intact onto a wrapped continuation, where it must stay neutral prose.
 	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{{
-		Kind: model.EventAssistantText, Text: "ordinary route notes continue codex: remains ordinary prose",
+		Kind: model.EventAssistantText, Text: strings.Repeat("x", 80) + " codex: still ordinary prose past the preview cap",
 	}}}
-	detail := newDetailState(session, 28, 16, styleSet)
+	detail := newDetailState(session, 80, 16, styleSet)
 	found := false
 	for rowIndex, row := range detail.rendered {
 		if rowIndex == detail.firstRenderedRow(row.detailIndex) || !strings.Contains(row.text, "codex:") {
@@ -1428,6 +1431,100 @@ func timelineLineTexts(lines []detailLine) []string {
 		texts[index] = line.text
 	}
 	return texts
+}
+
+// TestTurnMetricsSplitDirectionally verifies the input side (↑) totals onto the
+// prompt that opened the turn while the output side (↓) and the context reached
+// land on the assistant header. Two events carry usage, standing in for two billed
+// requests in one turn.
+func TestTurnMetricsSplitDirectionally(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/lunar/session.jsonl", Events: []model.Event{
+		{Kind: model.EventUser, Text: "Chart the route"},
+		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/lunar/map.go",
+			Usage: &model.Usage{InputTokens: 5_000, OutputTokens: 1_000, CacheReadTokens: 20_000}},
+		{Kind: model.EventAssistantText, Text: "Route ready",
+			Usage: &model.Usage{InputTokens: 3_000, OutputTokens: 4_000, CacheReadTokens: 37_000}},
+	}}
+	detail := newDetailState(session, 80, 40, newStyles())
+
+	prompt, header := detailLine{}, detailLine{}
+	for _, line := range detail.lines {
+		switch {
+		case strings.Contains(line.text, "you:"):
+			prompt = line
+		case strings.Contains(line.text, glyphAssistant+" claude"):
+			header = line
+		}
+	}
+	if prompt.text == "" || header.text == "" {
+		t.Fatalf("missing prompt or header row:\n%s", strings.Join(timelineLineTexts(detail.lines), "\n"))
+	}
+	// The metrics ride the right-aligned column, not the row text. Input side sums
+	// onto the prompt: cache read 20000+37000=57k, no cache write, input 5000+3000=8000.
+	if want := "↑57k/0/8000"; !strings.Contains(prompt.metrics, want) {
+		t.Fatalf("prompt metrics = %q, want input side %q", prompt.metrics, want)
+	}
+	// Output side and context land on the header: output 1000+4000=5000; context is
+	// the window the last request reached, 3000+37000=40000.
+	for _, want := range []string{"↓5000", "ctx 40k"} {
+		if !strings.Contains(header.metrics, want) {
+			t.Fatalf("assistant header metrics = %q, want %q", header.metrics, want)
+		}
+	}
+}
+
+// TestEventRowsShowTheirOwnRequestMetrics verifies each request's usage renders on
+// the event that carries it — a tool call and an assistant reply here — with the
+// context it reached, so an expanded turn shows per-request tokens, cost, and
+// context, not only the turn aggregate.
+func TestEventRowsShowTheirOwnRequestMetrics(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/lunar/session.jsonl", Events: []model.Event{
+		{Kind: model.EventUser, Text: "Chart the route"},
+		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/lunar/map.go",
+			Usage: &model.Usage{InputTokens: 2, OutputTokens: 400, CacheReadTokens: 60_000}},
+		{Kind: model.EventAssistantText, Text: "Route ready",
+			Usage: &model.Usage{InputTokens: 2, OutputTokens: 3_134, CacheReadTokens: 70_000}},
+	}}
+	detail := newDetailState(session, 120, 40, newStyles())
+
+	var tool, reply detailLine
+	for _, line := range detail.lines {
+		switch {
+		case strings.Contains(line.text, "Read("):
+			tool = line
+		case strings.HasPrefix(strings.TrimSpace(line.text), "claude:"):
+			reply = line
+		}
+	}
+	// Each request's metrics ride its row's right-aligned column. The tool call heads
+	// a request reaching 60k of context; the reply heads one reaching 70k.
+	for _, want := range []string{"↓400", "ctx 60k"} {
+		if !strings.Contains(tool.metrics, want) {
+			t.Fatalf("tool metrics = %q, want %q", tool.metrics, want)
+		}
+	}
+	for _, want := range []string{"↓3134", "ctx 70k"} {
+		if !strings.Contains(reply.metrics, want) {
+			t.Fatalf("reply metrics = %q, want %q", reply.metrics, want)
+		}
+	}
+}
+
+// TestTurnSummaryOmitsTokensWithoutUsage keeps the affordance honest: a turn whose
+// events carry no usage shows neither figure, so the row is unchanged when a log
+// lacks token counts.
+func TestTurnSummaryOmitsTokensWithoutUsage(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Chart the route"},
+		{Kind: model.EventAssistantText, Text: "Route ready"},
+	}}
+	detail := newDetailState(session, 80, 40, newStyles())
+
+	for _, line := range detail.lines {
+		if strings.Contains(line.text, "claude: Route ready") && (strings.Contains(line.text, "ctx ") || strings.Contains(line.text, "+")) {
+			t.Fatalf("turn summary invented token figures without usage: %q", line.text)
+		}
+	}
 }
 
 func TestSystemAndCompactRowsUseTheSystemPromptTint(t *testing.T) {
@@ -2432,7 +2529,7 @@ func TestDetailMouseClickNeverOpensPlainEvent(t *testing.T) {
 	m = updated.(Model)
 	detail := detailStateFromScreen(t, m.detail)
 	target := len(detail.focusables) - 1
-	y := viewLineY(t, m.View(), "Route prepared", 1)
+	y := viewLineY(t, m.View(), "Route prepared", 0)
 	click := tea.MouseMsg{X: 2, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}
 	updated, _ = m.Update(click)
 	m = updated.(Model)
@@ -2616,7 +2713,11 @@ func TestPinnedDetailTimelineStaysPinnedAcrossResize(t *testing.T) {
 		ID: "lunar", Agent: model.AgentCodex, Path: "/workspace/crater/rollout.jsonl",
 		Events: []model.Event{
 			{Kind: model.EventUser, Text: "Survey the crater"},
-			{Kind: model.EventAssistantText, Text: strings.Repeat("Newest wrapped telemetry ", 12)},
+			{Kind: model.EventAssistantText, Text: "Telemetry nominal"},
+			{Kind: model.EventUser, Text: "Continue mapping"},
+			{Kind: model.EventAssistantText, Text: "Ridge mapped cleanly"},
+			{Kind: model.EventUser, Text: "Report status"},
+			{Kind: model.EventAssistantText, Text: "Newest telemetry sample"},
 		},
 	}
 	m := NewModel([]*model.Session{root}, nil)
@@ -2638,7 +2739,9 @@ func TestPinnedDetailTimelineStaysPinnedAcrossResize(t *testing.T) {
 	m = updated.(Model)
 	detail := detailStateFromScreen(t, m.detail)
 	view := ansi.Strip(m.View())
-	if !detail.pinnedToBottom() || !strings.Contains(view, "Final tele") || !strings.Contains(view, "metry sample") {
+	// The newest reply appends to the last turn, whose header previews it at the very
+	// bottom; tail-following holds if that preview stays on screen after the resize.
+	if !detail.pinnedToBottom() || !strings.Contains(view, "Final") {
 		t.Fatalf("post-resize tail-follow bottom=%t:\n%s", detail.pinnedToBottom(), view)
 	}
 }
@@ -3720,49 +3823,76 @@ func TestDetailNavigationMovesTheVisibleSelectionMarker(t *testing.T) {
 	}
 }
 
-func TestWrapToggleUsesFlatRowsAndHighlightsEverySelectedRow(t *testing.T) {
+func TestWrapToggleWrapsBodyRowsAndHighlightsSelectedHead(t *testing.T) {
 	profile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
 
+	// Metrics-bearing heads are nowrap and stay one row, so wrapping happens on the
+	// body. A long single-line reply folds open by default; its full text renders as
+	// body rows that wrap or truncate with the wrap toggle, while the focused head
+	// stays a single highlighted row.
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{{
-		Kind: model.EventUser, Text: strings.Repeat("charted route ", 12),
+		Kind: model.EventAssistantText, Text: strings.Repeat("charted route ", 12),
 	}}}
-	detail := newDetailState(session, 28, 16, newStyles(Theme{Name: "mono"}))
-	if !detail.wrap || len(detail.rendered) < 3 {
-		t.Fatalf("default wrapped state = %v with %d rows, want multiple flat rows", detail.wrap, len(detail.rendered))
-	}
-	selectedRows := 0
-	for _, row := range detail.rendered {
-		if row.detailIndex == detail.selectedLine {
-			selectedRows++
+	detail := newDetailState(session, 28, 40, newStyles(Theme{Name: "mono"}))
+	bodyRows := func() int {
+		for index, line := range detail.lines {
+			if line.key != "" || !strings.Contains(line.text, "charted") {
+				continue
+			}
+			rows := 0
+			for _, row := range detail.rendered {
+				if row.detailIndex == index {
+					rows++
+				}
+			}
+			return rows
 		}
+		return 0
 	}
-	if selectedRows != len(detail.rendered) {
-		t.Fatalf("selected rows = %d/%d, want every wrapped row selected", selectedRows, len(detail.rendered))
+	selectedRows := func() int {
+		rows := 0
+		for _, row := range detail.rendered {
+			if row.detailIndex == detail.selectedLine {
+				rows++
+			}
+		}
+		return rows
 	}
-	visibleSelectedRows := min(selectedRows, detail.viewport.Height)
-	if highlighted := strings.Count(detail.view(), "\x1b[7m"); highlighted != visibleSelectedRows {
-		t.Fatalf("highlighted rows = %d, want %d visible selected rows", highlighted, visibleSelectedRows)
+
+	if selectedRows() != 1 {
+		t.Fatalf("selected head spans %d rows, want a single nowrap row", selectedRows())
+	}
+	if highlighted := strings.Count(detail.view(), "\x1b[7m"); highlighted != 1 {
+		t.Fatalf("highlighted rows = %d, want the single selected head", highlighted)
+	}
+	if !detail.wrap || bodyRows() < 3 {
+		t.Fatalf("default wrapped body = %v with %d rows, want multiple flat rows", detail.wrap, bodyRows())
 	}
 
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
-	if detail.wrap || len(detail.rendered) != 1 {
-		t.Fatalf("first toggle left wrap=%v with %d rows, want truncation", detail.wrap, len(detail.rendered))
+	if detail.wrap || bodyRows() != 1 {
+		t.Fatalf("first toggle left wrap=%v with %d body rows, want truncation", detail.wrap, bodyRows())
 	}
 
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
-	if !detail.wrap || len(detail.rendered) < 3 {
-		t.Fatalf("second toggle left wrap=%v with %d rows, want wrapped rows", detail.wrap, len(detail.rendered))
+	if !detail.wrap || bodyRows() < 3 {
+		t.Fatalf("second toggle left wrap=%v with %d body rows, want wrapped rows", detail.wrap, bodyRows())
+	}
+	if selectedRows() != 1 {
+		t.Fatalf("selected head spans %d rows after toggles, want a single nowrap row", selectedRows())
 	}
 }
 
 func TestWrappedEdgeNavigationUsesFlatRowOffsets(t *testing.T) {
+	// The reply folds open into wrapped body rows; navigation counts rendered rows,
+	// not detail lines. G lands on the reply head at the bottom, g on the prompt top.
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Start the survey"},
-		{Kind: model.EventAssistantText, Text: strings.Repeat("charted southern route ", 10)},
+		{Kind: model.EventAssistantText, Text: strings.Repeat("charted southern route ", 4)},
 	}}
-	detail := newDetailState(session, 28, 10, newStyles())
+	detail := newDetailState(session, 28, 16, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
 
 	selectedVisible := false
