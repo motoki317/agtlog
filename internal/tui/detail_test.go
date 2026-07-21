@@ -1351,7 +1351,7 @@ func TestUserPromptColorsOnlyTheLabelOverTheFullRowTint(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "lunar", Events: []model.Event{{Kind: model.EventUser, Text: "ordinary prose"}}}, 40, 12, styleSet)
 	line := detail.lines[0]
 	plain := detail.rendered[0].text
-	label := glyphCollapsed + " you:"
+	label := "you:"
 	gutterWidth := detail.timelineGutterWidth()
 	body := ansi.Cut(plain, 2+gutterWidth, ansi.StringWidth(plain))
 	start := strings.Index(body, label)
@@ -1362,6 +1362,72 @@ func TestUserPromptColorsOnlyTheLabelOverTheFullRowTint(t *testing.T) {
 	if got := detail.styleLine(plain, line, false, true); got != want {
 		t.Fatalf("user prompt styling = %q, want neutral prose and a full-row tint as %q", got, want)
 	}
+}
+
+func TestUserPromptFoldRevealsTheFullPrompt(t *testing.T) {
+	prompt := "First instruction line\nSecond instruction line\nThird instruction line"
+	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{{Kind: model.EventUser, Text: prompt}}}
+	detail := newDetailState(session, 80, 14, newStyles())
+
+	if !detail.lines[0].expandable {
+		t.Fatalf("multi-line user prompt expandable = false, want true")
+	}
+	joined := func() string { return strings.Join(timelineLineTexts(detail.lines), "\n") }
+	assert := func(marker string, wantFull bool) {
+		t.Helper()
+		if header := strings.TrimLeft(detail.lines[0].text, " "); !strings.HasPrefix(header, marker) {
+			t.Fatalf("prompt header = %q, want leading %q", header, marker)
+		}
+		if strings.Contains(joined(), "Third instruction line") != wantFull {
+			t.Fatalf("full prompt visible = %t, want %t:\n%s", !wantFull, wantFull, joined())
+		}
+	}
+
+	assert(glyphExpanded, true) // rows expand by default, so the whole prompt shows
+
+	detail.update(tea.KeyMsg{Type: tea.KeySpace})
+	assert(glyphCollapsed, false)
+	if !strings.Contains(detail.lines[0].text, "First instruction line") {
+		t.Fatalf("collapsed prompt = %q, want first-line summary", detail.lines[0].text)
+	}
+
+	detail.update(tea.KeyMsg{Type: tea.KeySpace})
+	assert(glyphExpanded, true)
+}
+
+// TestTimelineFoldGlyphMatchesExpandableRows guards the invariant that broke user
+// prompts: a focusable timeline row shows the ▸/▾ affordance if and only if it is
+// actually wired to expand. Any future row that prints the glyph without setting
+// expandable (or the reverse) fails here.
+func TestTimelineFoldGlyphMatchesExpandableRows(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/lunar/session.jsonl", Events: []model.Event{
+		{Kind: model.EventUser, Text: "Single line prompt"},
+		{Kind: model.EventUser, Text: "Multi\nline\nprompt"},
+		{Kind: model.EventThinking, Text: "Consider the route"},
+		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/lunar/map.go", Detail: &model.ToolDetail{Output: "map ready"}},
+		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/lunar/plain.go"},
+		{Kind: model.EventAssistantText, Text: "Route ready"},
+	}}
+	detail := newDetailState(session, 80, 40, newStyles())
+
+	for _, line := range detail.lines {
+		if line.key == "" {
+			continue // passive body/summary rows are not focusable
+		}
+		trimmed := strings.TrimLeft(line.text, " ")
+		hasGlyph := strings.HasPrefix(trimmed, glyphCollapsed) || strings.HasPrefix(trimmed, glyphExpanded)
+		if hasGlyph != line.expandable {
+			t.Errorf("row %q shows fold glyph = %t, but expandable = %t", line.text, hasGlyph, line.expandable)
+		}
+	}
+}
+
+func timelineLineTexts(lines []detailLine) []string {
+	texts := make([]string, len(lines))
+	for index, line := range lines {
+		texts[index] = line.text
+	}
+	return texts
 }
 
 func TestSystemAndCompactRowsUseTheSystemPromptTint(t *testing.T) {

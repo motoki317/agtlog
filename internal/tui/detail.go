@@ -1079,9 +1079,7 @@ func (d *detailState) sessionLines(session *model.Session, indent int, path stri
 	for index := 0; index < len(session.Events); {
 		event := session.Events[index]
 		if event.Kind == model.EventUser {
-			key := fmt.Sprintf("%s/user/%d", path, index)
-			label := glyphCollapsed + " you:"
-			lines = append(lines, detailLine{text: strings.Repeat(" ", indent) + label + " " + firstLine(event.Text), label: label, key: key, role: detailUserPrompt, event: event})
+			lines = append(lines, d.userPromptLines(event, indent, timelineUserKey(path, index))...)
 			index++
 			continue
 		}
@@ -1106,11 +1104,71 @@ func (d *detailState) sessionLines(session *model.Session, indent int, path stri
 	return lines
 }
 
+// foldMarker is the single source of the ▸/▾ fold indicator. Every row obtains
+// its marker here so the glyph can never appear on a row that is not wired to
+// expand — the mismatch that made user prompts look foldable but do nothing.
+func foldMarker(expandable, expanded bool) string {
+	switch {
+	case !expandable:
+		return " "
+	case expanded:
+		return glyphExpanded
+	default:
+		return glyphCollapsed
+	}
+}
+
+func timelineUserKey(path string, index int) string {
+	return fmt.Sprintf("%s/user/%d", path, index)
+}
+
+// promptExpandable reports whether a user prompt carries more than the single
+// line the collapsed row shows, so its fold marker only appears when expanding
+// reveals the rest of the prompt.
+func promptExpandable(text string) bool {
+	seen := false
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if seen {
+			return true
+		}
+		seen = true
+	}
+	return false
+}
+
+// userPromptLines renders a user turn: a summary row showing the first line and,
+// when expanded, the full prompt beneath it so the timeline can show what the
+// model was prompted with without leaving for the item view.
+func (d *detailState) userPromptLines(event model.Event, indent int, key string) []detailLine {
+	expandable := promptExpandable(event.Text)
+	expanded := expandable && d.isExpanded(key)
+	label := "you:"
+	text := strings.Repeat(" ", indent) + foldMarker(expandable, expanded) + " " + label
+	if summary := firstLine(event.Text); summary != "" && !expanded {
+		text += " " + summary
+	}
+	lines := []detailLine{{text: text, label: label, key: key, expandable: expandable, role: detailUserPrompt, event: event}}
+	if !expanded {
+		return lines
+	}
+	childPadding := strings.Repeat(" ", indent+2)
+	for _, line := range boundLines(event.Text, detailPreviewLineCap) {
+		lines = append(lines, detailLine{text: childPadding + detailPlainText(line), role: detailUserPrompt})
+	}
+	return lines
+}
+
 func expandableTimelineKeys(session *model.Session) []string {
 	keys := make([]string, 0, len(session.Events))
 	path := sessionIdentity(session)
 	for index := 0; index < len(session.Events); {
 		if session.Events[index].Kind == model.EventUser {
+			if promptExpandable(session.Events[index].Text) {
+				keys = append(keys, timelineUserKey(path, index))
+			}
 			index++
 			continue
 		}
@@ -1169,13 +1227,7 @@ func (d *detailState) turnSummary(session *model.Session, events []model.Event, 
 			last = lastLine(event.Text)
 		}
 	}
-	marker := " "
-	if turnExpandable(events) {
-		marker = glyphCollapsed
-		if expanded {
-			marker = glyphExpanded
-		}
-	}
+	marker := foldMarker(turnExpandable(events), expanded)
 	parts := []string{glyphAssistant + " " + terminalText(string(session.Agent), 32) + ": " + firstLine(last)}
 	if thinking > 0 {
 		parts = append(parts, fmt.Sprintf("%d thinking", thinking))
@@ -1258,11 +1310,7 @@ func (d *detailState) toolEventLines(event model.Event, indent int, key string) 
 	summary := toolLine(event, d.isExpanded(key))
 	text := padding + summary
 	if expandable {
-		marker := glyphCollapsed
-		if d.isExpanded(key) {
-			marker = glyphExpanded
-		}
-		text = padding + marker + " " + summary
+		text = padding + foldMarker(expandable, d.isExpanded(key)) + " " + summary
 	}
 	lines := []detailLine{{text: text, key: key, nowrap: true, expandable: expandable, role: detailTool, event: event}}
 	if !d.isExpanded(key) || event.Detail == nil {
