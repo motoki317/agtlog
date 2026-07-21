@@ -8,6 +8,19 @@ import (
 	"testing"
 )
 
+// tempRoot returns a temporary directory with symlinks resolved so it matches
+// the canonical form NewSource stores. On macOS t.TempDir lives under a
+// /var → /private/var symlink that Discover resolves, so the raw path would
+// never equal the discovered one.
+func tempRoot(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
 func TestSourceDiscoverReturnsTopLevelSessions(t *testing.T) {
 	root := filepath.Join("testdata")
 	source := NewSource(testParser(), []string{root})
@@ -53,7 +66,7 @@ func TestSourceDiscoverDeduplicatesOverlappingRoots(t *testing.T) {
 }
 
 func TestSourceDiscoverIgnoresSymlinkedSessionFiles(t *testing.T) {
-	root := t.TempDir()
+	root := tempRoot(t)
 	target := filepath.Join(root, "session-target.jsonl")
 	if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -97,7 +110,7 @@ func TestAffectedPathMapsSubagentToParent(t *testing.T) {
 }
 
 func TestSourceLinksLegacyAgentFileToParent(t *testing.T) {
-	root := t.TempDir()
+	root := tempRoot(t)
 	project := filepath.Join(root, "project-legacy")
 	if err := os.MkdirAll(project, 0o700); err != nil {
 		t.Fatal(err)
