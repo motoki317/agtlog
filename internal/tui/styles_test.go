@@ -138,7 +138,7 @@ func TestCycleThemeFollowsBuiltInOrder(t *testing.T) {
 func TestUIGlyphsHaveStableDisplayWidths(t *testing.T) {
 	glyphs := map[string]int{
 		glyphSubagent: 1, glyphWarning: 1, glyphCollapsed: 1, glyphExpanded: 1,
-		glyphAssistant: 1, glyphTool: 1, glyphSecondary: 1,
+		glyphTool: 1, glyphSecondary: 1,
 		"⑂": 1, "↵": 1, "▊": 1, "›": 1, "→": 1, "·": 1,
 		"—": 1, "…": 1, "∞": 1, "↑": 1, "↓": 1,
 	}

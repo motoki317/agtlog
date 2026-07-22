@@ -13,7 +13,6 @@ const (
 	glyphWarning   = "!"
 	glyphCollapsed = "▸"
 	glyphExpanded  = "▾"
-	glyphAssistant = "●"
 	glyphTool      = "⚙"
 	glyphSecondary = "◇"
 )

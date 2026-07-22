@@ -134,17 +134,6 @@ type detailLine struct {
 	role            detailRole
 	agent           model.AgentKind
 	event           model.Event
-	stamp           time.Time
-}
-
-// timestamp is the time the gutter shows. It falls back to the row's event,
-// which is also what enter opens; a grouped row sets stamp because its
-// representative event is not the one that opened the group.
-func (l detailLine) timestamp() time.Time {
-	if !l.stamp.IsZero() {
-		return l.stamp
-	}
-	return l.event.Timestamp
 }
 
 type detailRole int
@@ -492,16 +481,14 @@ func (d *detailState) expandFocused() {
 	d.rebuildKeeping(item.key)
 }
 
-func (d *detailState) rebuildKeeping(keys ...string) {
+func (d *detailState) rebuildKeeping(key string) {
 	d.rebuild()
-	for _, key := range keys {
-		for index, item := range d.focusables {
-			if item.key == key {
-				oldLine := d.selectedLine
-				d.focus = index
-				d.updateSelection(oldLine, item.line)
-				return
-			}
+	for index, item := range d.focusables {
+		if item.key == key {
+			oldLine := d.selectedLine
+			d.focus = index
+			d.updateSelection(oldLine, item.line)
+			return
 		}
 	}
 }
@@ -516,14 +503,7 @@ func (d *detailState) setAllExpanded(expanded bool) {
 	for _, expandableKey := range keys {
 		d.expanded[expandableKey] = expanded
 	}
-	ancestorKey := ""
-	for _, expandableKey := range keys {
-		if strings.HasPrefix(key, expandableKey+"/event/") {
-			ancestorKey = expandableKey
-			break
-		}
-	}
-	d.rebuildKeeping(key, ancestorKey)
+	d.rebuildKeeping(key)
 }
 
 func (d *detailState) rebuild() {
@@ -1078,7 +1058,7 @@ func (d *detailState) rebuildRendered() {
 			if first && detailIndex == d.selectedLine {
 				marker = "› "
 			}
-			plain := fitPlain(marker, markerWidth, false) + d.timelineGutter(line.timestamp(), first, gutterWidth) + fitPlain(row, bodyWidth, false)
+			plain := fitPlain(marker, markerWidth, false) + d.timelineGutter(line.event.Timestamp, first, gutterWidth) + fitPlain(row, bodyWidth, false)
 			d.rendered = append(d.rendered, renderedRow{detailIndex: detailIndex, text: plain, first: first})
 			content = append(content, plain)
 		}
@@ -1179,32 +1159,18 @@ func (d *detailState) firstRenderedRow(detailIndex int) int {
 	return d.renderedStarts[detailIndex]
 }
 
+// sessionLines renders the session as one flat chronological list: a session is
+// one continuous log, so every event is a sibling row carrying its own request's
+// figures. Nesting is reserved for what a row contains — a tool's output, a
+// prompt's full text — and for subagents, which open as their own screen.
 func (d *detailState) sessionLines(session *model.Session, indent int, path string) []detailLine {
 	var lines []detailLine
-	for index := 0; index < len(session.Events); {
-		event := session.Events[index]
+	for index, event := range session.Events {
 		if event.Kind == model.EventUser {
-			metrics := aggregateTurnMetrics(followingTurn(session.Events, index))
-			lines = append(lines, d.userPromptLines(event, indent, timelineUserKey(path, index), metrics)...)
-			index++
+			lines = append(lines, d.userPromptLines(event, indent, timelineUserKey(path, index), nextRequestContext(session.Events, index))...)
 			continue
 		}
-		start := index
-		for index < len(session.Events) && session.Events[index].Kind != model.EventUser {
-			index++
-		}
-		turn := session.Events[start:index]
-		metrics := aggregateTurnMetrics(turn)
-		key := timelineTurnKey(path, start)
-		expandable := turnExpandable(turn)
-		expanded := expandable && d.isExpanded(key)
-		label := glyphAssistant + " " + terminalText(string(session.Agent), 32)
-		lines = append(lines, detailLine{text: turnSummary(session, turn, indent, expanded), label: label, metrics: metricsText(metrics.outputParts()), key: key, nowrap: true, expandable: expandable, role: detailAssistant, agent: session.Agent, event: turnItemEvent(turn), stamp: turnStart(turn)})
-		if expanded {
-			for eventIndex, item := range turn {
-				lines = append(lines, d.eventLines(session, item, indent+2, timelineEventKey(key, eventIndex))...)
-			}
-		}
+		lines = append(lines, d.eventLines(session, event, indent, timelineEventKey(path, index))...)
 	}
 	if len(lines) == 0 {
 		lines = append(lines, detailLine{text: strings.Repeat(" ", indent) + "No timeline events.", role: detailSecondary})
@@ -1212,79 +1178,29 @@ func (d *detailState) sessionLines(session *model.Session, indent int, path stri
 	return lines
 }
 
-// followingTurn is the run of non-user events after a user prompt: the requests
-// that prompt triggered, so their input side can be totalled onto the prompt row.
-func followingTurn(events []model.Event, userIndex int) []model.Event {
-	start := userIndex + 1
-	end := start
-	for end < len(events) && events[end].Kind != model.EventUser {
-		end++
-	}
-	return events[start:end]
-}
-
-// turnMetrics totals a turn's billed requests, split into the input side shown on
-// the prompt that opened the turn and the output side shown on the assistant
-// header. context is the window the last request reached, which drops after a
-// compaction resets it.
-type turnMetrics struct {
-	input     model.Usage
-	output    int64
-	context   int64
-	breakdown model.CostBreakdown
-	priced    bool
-	estimated bool
-	hasUsage  bool
-}
-
-func aggregateTurnMetrics(events []model.Event) turnMetrics {
-	var m turnMetrics
-	for _, event := range events {
-		if event.Usage == nil {
-			continue
+// nextRequestContext is the window the request a prompt triggered was sent with.
+// A user message is not billed and no log counts its tokens, so the prompt row
+// borrows the figure from the request that first carried it, and reports nothing
+// when the prompt triggered none.
+func nextRequestContext(events []model.Event, userIndex int) int64 {
+	for _, event := range events[userIndex+1:] {
+		if event.Kind == model.EventUser {
+			return 0
 		}
-		m.hasUsage = true
-		m.input = m.input.Add(normalizeFlowUsage(*event.Usage))
-		m.output += event.Usage.OutputTokens
-		m.context = event.Usage.PromptTokens()
-		m.breakdown = m.breakdown.Add(event.Cost)
-		m.priced = m.priced || event.Priced
-		m.estimated = m.estimated || event.CostEstimated
-	}
-	return m
-}
-
-// inputParts renders the input side (↑ cache-read/cache-write/input and its cost)
-// for the prompt row. It omits itself when the turn recorded no input.
-func (m turnMetrics) inputParts() []string {
-	if !m.hasUsage {
-		return nil
-	}
-	cacheWrite := m.input.CacheCreation5mTokens + m.input.CacheCreation1hTokens
-	if m.input.CacheReadTokens+cacheWrite+m.input.InputTokens == 0 {
-		return nil
-	}
-	parts := []string{formatTokensUp(m.input)}
-	if part, ok := costPart(m.breakdown.Input.Cost()+m.breakdown.CacheWrite.Cost()+m.breakdown.CacheRead.Cost(), m.priced, m.estimated); ok {
-		parts = append(parts, part)
-	}
-	return parts
-}
-
-// outputParts renders the output side (↓ output and its cost) plus the context
-// reached, for the assistant header.
-func (m turnMetrics) outputParts() []string {
-	var parts []string
-	if m.output > 0 {
-		parts = append(parts, formatTokensDown(m.output))
-		if part, ok := costPart(m.breakdown.Output.Cost(), m.priced, m.estimated); ok {
-			parts = append(parts, part)
+		if event.Usage != nil {
+			return event.Usage.PromptTokens()
 		}
 	}
-	if m.context > 0 {
-		parts = append(parts, "ctx "+humanTokens(m.context))
+	return 0
+}
+
+// contextPart renders the window a request reached, omitted when the log carries
+// no usage for it.
+func contextPart(tokens int64) (string, bool) {
+	if tokens <= 0 {
+		return "", false
 	}
-	return parts
+	return "ctx " + humanTokens(tokens), true
 }
 
 // costPart renders a cost figure only when priced and at least a cent, so sub-cent
@@ -1294,16 +1210,6 @@ func costPart(usd float64, priced, estimated bool) (string, bool) {
 		return "", false
 	}
 	return formatCost(model.Cost{USD: usd, Estimated: estimated}), true
-}
-
-func formatTokensUp(usage model.Usage) string {
-	usage = normalizeFlowUsage(usage)
-	cacheWrite := model.Usage{CacheCreation5mTokens: usage.CacheCreation5mTokens, CacheCreation1hTokens: usage.CacheCreation1hTokens}.TotalTokens()
-	return fmt.Sprintf("↑%s/%s/%s", humanTokens(usage.CacheReadTokens), humanTokens(cacheWrite), humanTokens(usage.InputTokens))
-}
-
-func formatTokensDown(output int64) string {
-	return "↓" + humanTokens(output)
 }
 
 // eventMetricParts renders one billed request's own figures for the event that
@@ -1318,8 +1224,8 @@ func eventMetricParts(event model.Event) []string {
 	if part, ok := costPart(event.Cost.Total(), event.Priced, event.CostEstimated); ok {
 		parts = append(parts, part)
 	}
-	if ctx := usage.PromptTokens(); ctx > 0 {
-		parts = append(parts, "ctx "+humanTokens(ctx))
+	if part, ok := contextPart(usage.PromptTokens()); ok {
+		parts = append(parts, part)
 	}
 	return parts
 }
@@ -1365,11 +1271,12 @@ func textExpandable(text string) bool {
 	return ansi.StringWidth(strings.TrimSpace(text)) > timelinePreviewCap
 }
 
-// userPromptLines renders a user turn: a header row with a truncated preview and
-// the turn's input side (↑), and, when expanded, the full prompt beneath it so the
-// timeline can show what the model was prompted with without leaving for the item
-// view. metrics carries the input the following turn billed.
-func (d *detailState) userPromptLines(event model.Event, indent int, key string, metrics turnMetrics) []detailLine {
+// userPromptLines renders a user prompt: a header row with a truncated preview
+// and, when expanded, the full prompt beneath it, so the timeline can show what
+// the model was prompted with without leaving for the item view. context is the
+// window the request this prompt triggered was sent with; the prompt bills no
+// tokens of its own.
+func (d *detailState) userPromptLines(event model.Event, indent int, key string, context int64) []detailLine {
 	expandable := textExpandable(event.Text)
 	expanded := expandable && d.isExpanded(key)
 	label := "you:"
@@ -1380,7 +1287,11 @@ func (d *detailState) userPromptLines(event model.Event, indent int, key string,
 			text = prefix + " " + summary
 		}
 	}
-	lines := []detailLine{{text: text, label: label, metrics: metricsText(metrics.inputParts()), key: key, nowrap: true, expandable: expandable, role: detailUserPrompt, event: event}}
+	metrics := ""
+	if part, ok := contextPart(context); ok {
+		metrics = part
+	}
+	lines := []detailLine{{text: text, label: label, metrics: metrics, key: key, nowrap: true, expandable: expandable, role: detailUserPrompt, event: event}}
 	if !expanded {
 		return lines
 	}
@@ -1420,108 +1331,21 @@ func composeMetricRow(left, metrics string, width int) string {
 func expandableTimelineKeys(session *model.Session) []string {
 	keys := make([]string, 0, len(session.Events))
 	path := sessionIdentity(session)
-	for index := 0; index < len(session.Events); {
-		if session.Events[index].Kind == model.EventUser {
-			if textExpandable(session.Events[index].Text) {
-				keys = append(keys, timelineUserKey(path, index))
-			}
-			index++
-			continue
-		}
-		start := index
-		for index < len(session.Events) && session.Events[index].Kind != model.EventUser {
-			index++
-		}
-		turn := session.Events[start:index]
-		turnKey := timelineTurnKey(path, start)
-		if turnExpandable(turn) {
-			keys = append(keys, turnKey)
-		}
-		for eventIndex, event := range turn {
-			switch {
-			case event.Kind == model.EventToolCall && detailHasBody(event):
-				keys = append(keys, timelineEventKey(turnKey, eventIndex))
-			case event.Kind == model.EventAssistantText && textExpandable(event.Text):
-				keys = append(keys, timelineEventKey(turnKey, eventIndex))
-			}
+	for index, event := range session.Events {
+		switch {
+		case event.Kind == model.EventUser && textExpandable(event.Text):
+			keys = append(keys, timelineUserKey(path, index))
+		case event.Kind == model.EventToolCall && detailHasBody(event):
+			keys = append(keys, timelineEventKey(path, index))
+		case event.Kind == model.EventAssistantText && textExpandable(event.Text):
+			keys = append(keys, timelineEventKey(path, index))
 		}
 	}
 	return keys
 }
 
-func timelineTurnKey(path string, start int) string {
-	return fmt.Sprintf("%s/turn/%d", path, start)
-}
-
-func timelineEventKey(turnKey string, index int) string {
-	return fmt.Sprintf("%s/event/%d", turnKey, index)
-}
-
-// turnStart is when the turn began. The collapsed row must not jump backwards
-// when it is expanded, and the log records no time for the group itself, so the
-// row borrows the oldest stamp inside it instead of its representative event's.
-func turnStart(events []model.Event) time.Time {
-	for _, event := range events {
-		if !event.Timestamp.IsZero() {
-			return event.Timestamp
-		}
-	}
-	return time.Time{}
-}
-
-func turnItemEvent(events []model.Event) model.Event {
-	for index := len(events) - 1; index >= 0; index-- {
-		if events[index].Kind == model.EventAssistantText {
-			return events[index]
-		}
-	}
-	for _, event := range events {
-		if event.Kind != model.EventSubagent {
-			return event
-		}
-	}
-	return model.Event{}
-}
-
-func turnSummary(session *model.Session, events []model.Event, indent int, expanded bool) string {
-	thinking, tools, subagents := 0, 0, 0
-	lastText := ""
-	for _, event := range events {
-		switch event.Kind {
-		case model.EventThinking:
-			thinking++
-		case model.EventToolCall:
-			tools++
-		case model.EventSubagent:
-			subagents++
-		case model.EventAssistantText:
-			lastText = event.Text
-		}
-	}
-	marker := foldMarker(turnExpandable(events), expanded)
-	text := strings.Repeat(" ", indent) + marker + " " + glyphAssistant + " " + terminalText(string(session.Agent), 32)
-	var counts []string
-	if thinking > 0 {
-		counts = append(counts, fmt.Sprintf("%d thinking", thinking))
-	}
-	if tools > 0 {
-		counts = append(counts, fmt.Sprintf("%d tools", tools))
-	}
-	if subagents > 0 {
-		counts = append(counts, fmt.Sprintf("%d subagents", subagents))
-	}
-	if len(counts) > 0 {
-		text += " · " + strings.Join(counts, " · ")
-	}
-	// Expanded turns show the full reply in the body below, so the header drops the
-	// preview and keeps only the counts. The preview trails the counts so a long
-	// reply truncates before the counts do.
-	if !expanded {
-		if summary := firstLine(lastText); summary != "" {
-			text += " · " + summary
-		}
-	}
-	return text
+func timelineEventKey(path string, index int) string {
+	return fmt.Sprintf("%s/event/%d", path, index)
 }
 
 func (d *detailState) eventLines(session *model.Session, event model.Event, indent int, key string) []detailLine {
@@ -1656,20 +1480,6 @@ func detailPlainText(text string) string {
 func detailHasBody(event model.Event) bool {
 	detail := event.Detail
 	return detail != nil && (detail.Diff != "" || detail.Output != "" || strings.Contains(detail.Input, "\n") && detailInputBody(event) != "")
-}
-
-func turnExpandable(events []model.Event) bool {
-	for _, event := range events {
-		switch event.Kind {
-		case model.EventThinking, model.EventToolCall, model.EventSubagent, model.EventCompact:
-			return true
-		case model.EventAssistantText:
-			if textExpandable(event.Text) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // assistantTextLines renders an assistant reply as one collapsible row: a preview

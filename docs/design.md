@@ -121,7 +121,6 @@ as one column in the supported terminal path.
 | `!` | Session error or missing pricing, depending on the cell |
 | `▸` / `▾` | Collapsed / expanded item |
 | `▸ you:` | User prompt |
-| `●` | Assistant turn summary |
 | `⚙` | Tool call and linked result |
 | `◇` | Thinking, compaction, or secondary system event |
 | `+` / `-` / leading space | Added, removed, or context diff row |
@@ -134,22 +133,29 @@ The header panel uses three lines:
 2. all models, Git branch, and start-to-update time;
 3. recursive tokens and cost, followed by own and subagent splits.
 
-The timeline is chronological and expanded by default:
+The timeline is one flat chronological list, expanded by default. A session is one continuous log,
+so every event — prompt, thinking summary, tool call, compaction, system note, subagent spawn — is
+a sibling row, and each row states its own request's tokens, cost, and the context window it was
+sent with:
 
 ```text
-▸ you: Investigate the failing watcher
-▾ ● claude: The race is fixed · 2 thinking · 4 tools · 1 subagents
-  ▾ ⚙ Edit(watch.go) → updated · 0.4s
-      output: watcher tests passed
-  ⑃ Task(inspect watcher) opus-4.8 · 420k · $1.02
+▸ you: Investigate the failing watcher                                    ctx 62k
+  ◇ thinking: The lock is held across the reload      ↑61k/0/1200 ↓340 · ctx 62k
+▾ ⚙ Edit(watch.go) → updated · 0.4s                  ↑62k/0/900 ↓1100 · ctx 63k
+    output: watcher tests passed
+  claude: The race is fixed                          ↑63k/0/800 ↓2000 · ctx 64k
+  ⑃ Task(inspect watcher) opus-4.8                              420k · $1.02
 ```
 
-Expanding an assistant turn reveals thinking summaries, tool calls and linked results, compaction
-events, and focusable subagent spawns. A tool call with a diff, output, or multiline input has its
-own `▸`/`▾` marker. Expanding that tool reveals a second level at two more spaces of indentation:
-diff rows or a muted `input:` section first, followed by a muted `output:` section. Non-file tools
-and multiline commands show their input. Each section keeps its head and tail when it exceeds the
-preview line cap and inserts one `… N lines hidden …` row.
+A user prompt bills nothing itself, so its row reports only the window the request it triggered was
+sent with. Reading down, the context column therefore only grows until a compaction resets it.
+
+Indentation is reserved for what a row contains. A prompt with more than one line, an assistant
+reply beyond the preview cap, and a tool call with a diff, output, or multiline input each carry
+their own `▸`/`▾` marker and reveal their body two spaces in: diff rows or a muted `input:` section
+first, followed by a muted `output:` section. Non-file tools and multiline commands show their
+input. Each section keeps its head and tail when it exceeds the preview line cap and inserts one
+`… N lines hidden …` row.
 
 A subagent never expands inline. `enter` or `l` on its row pushes the current detail state and opens
 the child on its Timeline tab. The `Session` title carries the project and ancestor session labels
@@ -173,8 +179,8 @@ truncation. Wrapping operates on plain text before color is applied; every visua
 the logical row's role, and selection highlights all wrapped rows belonging to the selected item.
 
 `space` is the only in-place expansion key. `enter` or `l` opens the focused row: a subagent opens
-its session detail, while a turn, tool, thinking row, user message, compaction, or system event
-opens a pushed item view. A tool item shows its full input, diff, and output, bounded only by the
+its session detail, while an assistant reply, tool, thinking row, user message, compaction, or
+system event opens a pushed item view. A tool item shows its full input, diff, and output, bounded only by the
 model's per-field limit rather than the timeline preview cap. Other item views show the event's
 full text. The item title extends the session breadcrumb with a short event label. Its viewport
 supports `j`, `k`, `g`, `G`, and `w`; the normal back keys restore the parent detail.
@@ -197,7 +203,7 @@ The detail key bar states the primary split as `space toggle · enter open`.
 | List | `enter` | Open detail |
 | List | `r` | Rediscover sessions |
 | Detail | `j`/`k`, `↑`/`↓`, `g`/`G` | Move and scroll; `g`/`G` jumps to top or bottom |
-| Detail | `space` | Expand or collapse the selected turn or tool; no-op on subagents |
+| Detail | `space` | Expand or collapse the selected row's body; no-op on subagents |
 | Timeline | `←`/`→` | Collapse or expand the focused row |
 | Subagents | `←`/`→`, `shift+O`, `shift+A`, `shift+N` | Move column focus or cycle the focused, AGE, or TITLE sort |
 | Detail | `enter`, `l` | Open the focused row; subagents open session detail and other rows open an item view |
@@ -214,7 +220,7 @@ The detail key bar states the primary split as `space toggle · enter open`.
 ## Terseness rules
 
 1. Each screen answers one question without opening another view.
-2. Turns and tools start expanded and collapse in place; `enter` opens every focused row as its own screen.
+2. Rows start expanded and collapse in place; `enter` opens every focused row as its own screen.
 3. Lists use human-scale numbers and relative time, not raw counters or timestamps.
 4. Parent rows show recursive totals; detail shows the breakdown.
 5. Hard noise such as permission preambles and synthetic reminders does not enter the timeline.

@@ -187,6 +187,7 @@ func TestLeftCollapsesFocusedTimelineRow(t *testing.T) {
 	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Survey the crater"},
 		{Kind: model.EventThinking, Text: "Choose the safest route"},
+		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/route.go", Detail: &model.ToolDetail{Output: "route clear"}},
 		{Kind: model.EventAssistantText, Text: "The ridge route is clear."},
 	}}
 	m := NewModel([]*model.Session{session}, nil)
@@ -230,6 +231,7 @@ func TestRightExpandsFocusedTimelineRow(t *testing.T) {
 	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Survey the crater"},
 		{Kind: model.EventThinking, Text: "Choose the safest route"},
+		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/route.go", Detail: &model.ToolDetail{Output: "route clear"}},
 		{Kind: model.EventAssistantText, Text: "The ridge route is clear."},
 	}}
 	detail := newDetailState(session, 80, 20, newStyles())
@@ -1608,43 +1610,82 @@ func timelineLineTexts(lines []detailLine) []string {
 	return texts
 }
 
-// TestTurnMetricsSplitDirectionally verifies the input side (↑) totals onto the
-// prompt that opened the turn while the output side (↓) and the context reached
-// land on the assistant header. Two events carry usage, standing in for two billed
-// requests in one turn.
-func TestTurnMetricsSplitDirectionally(t *testing.T) {
-	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/lunar/session.jsonl", Events: []model.Event{
+// TestTimelineIsOneFlatChronologicalList pins the shape of the timeline: one row
+// per event in log order, no aggregate row above them, and every row carrying its
+// own request's figures. The prompt reports only the window the request it
+// triggered was sent with, since a user message bills nothing itself.
+func TestTimelineIsOneFlatChronologicalList(t *testing.T) {
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge", Models: []string{"claude-opus-4-8"},
+		Usage: []model.Usage{{InputTokens: 40_000, OutputTokens: 5_000}}, Cost: model.Cost{USD: 0.32}}
+	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/lunar/session.jsonl", Subagents: []*model.Session{child}, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Chart the route"},
-		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/lunar/map.go",
-			Usage: &model.Usage{InputTokens: 5_000, OutputTokens: 1_000, CacheReadTokens: 20_000}},
+		{Kind: model.EventThinking, Text: "Compare routes"},
+		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/lunar/map.go", Priced: true,
+			Usage: &model.Usage{InputTokens: 5_000, OutputTokens: 1_000, CacheReadTokens: 20_000},
+			Cost:  model.CostBreakdown{Output: model.CostBuckets{{Tokens: 1_000, RatePerToken: 0.00002}}}},
+		{Kind: model.EventSubagent, ToolName: "Task", ToolInput: "Scout ridge", Subagent: child},
 		{Kind: model.EventAssistantText, Text: "Route ready",
 			Usage: &model.Usage{InputTokens: 3_000, OutputTokens: 4_000, CacheReadTokens: 37_000}},
 	}}
-	detail := newDetailState(session, 80, 40, newStyles())
+	detail := newDetailState(session, 110, 40, newStyles())
 
-	prompt, header := detailLine{}, detailLine{}
+	type row struct{ text, metrics string }
+	var got []row
 	for _, line := range detail.lines {
-		switch {
-		case strings.Contains(line.text, "you:"):
-			prompt = line
-		case strings.Contains(line.text, glyphAssistant+" claude"):
-			header = line
+		got = append(got, row{strings.TrimSpace(line.text), line.metrics})
+	}
+	// Every event is a sibling at one indent, and each row states its own request:
+	// the tool reaching 25k of context, the reply reaching 40k. The subagent keeps
+	// its own session totals, which the parent log never bills.
+	want := []row{
+		{"you: Chart the route", "ctx 25k"},
+		{"◇ thinking: Compare routes", ""},
+		{"⚙ Read(/workspace/lunar/map.go)", "↑20k/0/5000 ↓1000 · $0.02 · ctx 25k"},
+		{"⑃ Task(Scout ridge) opus-4.8", "45k · $0.32"},
+		{"claude: Route ready", "↑37k/0/3000 ↓4000 · ctx 40k"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("timeline rows = %d, want %d:\n%s", len(got), len(want), strings.Join(timelineLineTexts(detail.lines), "\n"))
+	}
+	for index, line := range got {
+		if line != want[index] {
+			t.Errorf("row %d = %+v, want %+v", index, line, want[index])
 		}
 	}
-	if prompt.text == "" || header.text == "" {
-		t.Fatalf("missing prompt or header row:\n%s", strings.Join(timelineLineTexts(detail.lines), "\n"))
+}
+
+// TestContextColumnNeverShrinksDownAnExpandedTimeline pins the reading order the
+// context column promises: every row reports the window it was sent with, so an
+// expanded timeline grows top to bottom and a grouped row never overstates where
+// its own children start.
+func TestContextColumnNeverShrinksDownAnExpandedTimeline(t *testing.T) {
+	request := func(kind model.EventKind, context int64) model.Event {
+		return model.Event{Kind: kind, ToolName: "Read", Text: "Route ready",
+			Usage: &model.Usage{InputTokens: 1_000, OutputTokens: 500, CacheReadTokens: context - 1_000}}
 	}
-	// The metrics ride the right-aligned column, not the row text. Input side sums
-	// onto the prompt: cache read 20000+37000=57k, no cache write, input 5000+3000=8000.
-	if want := "↑57k/0/8000"; !strings.Contains(prompt.metrics, want) {
-		t.Fatalf("prompt metrics = %q, want input side %q", prompt.metrics, want)
-	}
-	// Output side and context land on the header: output 1000+4000=5000; context is
-	// the window the last request reached, 3000+37000=40000.
-	for _, want := range []string{"↓5000", "ctx 40k"} {
-		if !strings.Contains(header.metrics, want) {
-			t.Fatalf("assistant header metrics = %q, want %q", header.metrics, want)
+	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/lunar/session.jsonl", Events: []model.Event{
+		{Kind: model.EventUser, Text: "Chart the route"},
+		request(model.EventToolCall, 10_000),
+		request(model.EventAssistantText, 20_000),
+		{Kind: model.EventUser, Text: "Now plot the descent"},
+		request(model.EventToolCall, 30_000),
+		request(model.EventAssistantText, 40_000),
+	}}
+	detail := newDetailState(session, 120, 40, newStyles())
+
+	var got []string
+	for _, line := range detail.lines {
+		_, context, found := strings.Cut(line.metrics, "ctx ")
+		if !found {
+			continue
 		}
+		got = append(got, context)
+	}
+	// Each prompt borrows the window of the request it triggered, then every request
+	// reports its own: 10k and 20k in the first turn, 30k and 40k in the second.
+	want := []string{"10k", "10k", "20k", "30k", "30k", "40k"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("context column = %v, want %v:\n%s", got, want, strings.Join(timelineLineTexts(detail.lines), "\n"))
 	}
 }
 
@@ -2353,8 +2394,10 @@ func TestExpandedToolDetailIsPlainTerminalText(t *testing.T) {
 	}
 	wantRoles := map[string]detailRole{"-old route": detailDiffRemove, "+new  route ": detailDiffAdd}
 	for _, line := range detail.lines {
-		text := strings.TrimPrefix(line.text, "    ")
-		if want, ok := wantRoles[text]; ok {
+		for text, want := range wantRoles {
+			if !strings.HasSuffix(line.text, text) {
+				continue
+			}
 			if line.role != want {
 				t.Errorf("sanitized diff line %q role = %v, want %v", text, line.role, want)
 			}
@@ -2663,7 +2706,7 @@ func TestMouseHotPathAvoidsCloningRenderedTimeline(t *testing.T) {
 	}
 }
 
-func TestDetailMouseClickSelectsTurn(t *testing.T) {
+func TestDetailMouseClickSelectsRow(t *testing.T) {
 	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Survey the crater"},
 		{Kind: model.EventAssistantText, Text: "Route prepared"},
@@ -2674,16 +2717,15 @@ func TestDetailMouseClickSelectsTurn(t *testing.T) {
 	m = updated.(Model)
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
-	detail := detailStateFromScreen(t, m.detail)
 	target := 1
-	y := viewLineY(t, m.View(), "1 tools", 0)
+	y := viewLineY(t, m.View(), "Route prepared", 0)
 
 	updated, _ = m.Update(tea.MouseMsg{X: 2, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft})
 	m = updated.(Model)
 
-	detail = detailStateFromScreen(t, m.detail)
-	if detail.focus != target || !detail.isExpanded(detail.focusables[target].key) {
-		t.Fatalf("turn click focus=%d expanded=%t, want the turn selected and left expanded", detail.focus, detail.isExpanded(detail.focusables[target].key))
+	detail := detailStateFromScreen(t, m.detail)
+	if detail.focus != target {
+		t.Fatalf("click focus = %d, want the clicked reply row %d", detail.focus, target)
 	}
 }
 
@@ -2693,7 +2735,7 @@ func TestDetailMouseClicksNeverFoldTheClickedRow(t *testing.T) {
 		event model.Event
 		label string
 	}{
-		{name: "turn", event: model.Event{Kind: model.EventThinking, Text: "Compare routes"}, label: "1 thinking"},
+		{name: "prompt", event: model.Event{Kind: model.EventUser, Text: strings.Repeat("Compare every route ", 12)}, label: "Compare every route"},
 		{name: "tool", event: model.Event{Kind: model.EventToolCall, ToolName: "Read", Detail: &model.ToolDetail{Output: "map ready"}}, label: "Read"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -2849,8 +2891,8 @@ func TestDetailRowAtYHonorsPanelBoundariesAndOffset(t *testing.T) {
 		ok    bool
 	}{
 		{y: 0}, {y: 4}, {y: 5},
-		{y: 6, index: 3, ok: true},
-		{y: 9, index: 3, ok: true},
+		{y: 6, index: 2, ok: true},
+		{y: 9, index: 2, ok: true},
 		{y: 10}, {y: 11},
 	} {
 		index, ok := detail.rowAtY(test.y)
@@ -2998,30 +3040,30 @@ func TestPinnedDetailTimelineStaysPinnedAcrossResize(t *testing.T) {
 	}
 }
 
-func TestSpaceCollapsesDefaultExpandedTurn(t *testing.T) {
+func TestSpaceCollapsesDefaultExpandedTool(t *testing.T) {
 	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Survey the crater"},
-		{Kind: model.EventThinking, Text: "Choose the safest route"},
+		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/route.go", Detail: &model.ToolDetail{Output: "the ridge route is clear"}},
 		{Kind: model.EventAssistantText, Text: "The ridge route is clear."},
 	}}
 	detail := newDetailState(session, 80, 20, newStyles())
 	for index, item := range detail.focusables {
-		if strings.Contains(item.key, "/turn/") {
+		if item.event.Kind == model.EventToolCall {
 			detail.focus = index
 			detail.selectedLine = item.line
 			break
 		}
 	}
-	turnKey := detail.focusables[detail.focus].key
+	toolKey := detail.focusables[detail.focus].key
 
 	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 
-	if expanded, ok := detail.expanded[turnKey]; !ok || expanded || detail.isExpanded(turnKey) {
-		t.Fatalf("turn override = %v, present %t, effective %t; want explicit collapse", expanded, ok, detail.isExpanded(turnKey))
+	if expanded, ok := detail.expanded[toolKey]; !ok || expanded || detail.isExpanded(toolKey) {
+		t.Fatalf("tool override = %v, present %t, effective %t; want explicit collapse", expanded, ok, detail.isExpanded(toolKey))
 	}
 	for _, line := range detail.lines {
-		if strings.Contains(line.text, "Choose the safest route") {
-			t.Fatalf("collapsed turn retained child row %q", line.text)
+		if strings.Contains(line.text, "the ridge route is clear") {
+			t.Fatalf("collapsed tool retained body row %q", line.text)
 		}
 	}
 }
@@ -3038,39 +3080,6 @@ func TestTimelineGutterShowsRelativeEventTime(t *testing.T) {
 	line := strings.TrimRight(detail.rendered[0].text, " ")
 	if !strings.HasPrefix(line, "›   5m ") {
 		t.Fatalf("relative timeline row = %q, want fixed right-aligned 5m gutter", line)
-	}
-}
-
-func TestTimelineGutterStampsTurnRowWithItsFirstEvent(t *testing.T) {
-	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
-	session := &model.Session{ID: "route", Agent: model.AgentClaude, Events: []model.Event{
-		{Timestamp: now.Add(-9 * time.Minute), Kind: model.EventUser, Text: "Survey the crater"},
-		{Timestamp: now.Add(-8 * time.Minute), Kind: model.EventThinking, Text: "Compare routes"},
-		{Timestamp: now.Add(-2 * time.Minute), Kind: model.EventAssistantText, Text: "Route prepared"},
-	}}
-	detail := newDetailState(session, 80, 20, newStyles())
-	detail.now = now
-
-	// The stamp has to survive folding: a turn row keyed on its last event would
-	// read 2m collapsed and 8m once its own first child appears underneath it.
-	for _, expanded := range []bool{false, true} {
-		detail.defaultExpanded = expanded
-		detail.rebuild()
-		turn := -1
-		for index, line := range detail.lines {
-			if strings.Contains(line.text, "claude") {
-				turn = index
-				break
-			}
-		}
-		if turn < 0 {
-			t.Fatalf("expanded=%t timeline has no turn row: %#v", expanded, detail.lines)
-		}
-		gutterWidth := detail.timelineGutterWidth()
-		row := detail.rendered[detail.firstRenderedRow(turn)].text
-		if got := strings.TrimSpace(ansi.Cut(row, 2, 2+gutterWidth)); got != "8m" {
-			t.Fatalf("expanded=%t turn gutter = %q, want the turn's first event at 8m", expanded, got)
-		}
 	}
 }
 
@@ -3195,9 +3204,13 @@ func TestToolExpansionRevealsDiffLinesWithSemanticRoles(t *testing.T) {
 		{Kind: model.EventAssistantText, Text: "Route updated"},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
-	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
-	detail.moveFocus(1)
-	detail.moveFocus(1)
+	for index, item := range detail.focusables {
+		if item.event.Kind == model.EventToolCall {
+			detail.focus = index
+			detail.selectedLine = item.line
+			break
+		}
+	}
 	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 	toolIndex := detail.focusables[detail.focus].line
 	if line := detail.lines[toolIndex]; !line.expandable || !strings.Contains(line.text, "▸ "+glyphTool+" Edit") {
@@ -3215,8 +3228,10 @@ func TestToolExpansionRevealsDiffLinesWithSemanticRoles(t *testing.T) {
 		"+new route": detailDiffAdd,
 	}
 	for _, line := range detail.lines[toolIndex+1:] {
-		text := strings.TrimPrefix(line.text, "    ")
-		if want, ok := wantRoles[text]; ok {
+		for text, want := range wantRoles {
+			if !strings.HasSuffix(line.text, text) {
+				continue
+			}
 			if line.role != want {
 				t.Errorf("line %q role = %v, want %v", line.text, line.role, want)
 			}
@@ -3289,43 +3304,38 @@ func TestCollapseAllClearsEveryExpandableTimelineRow(t *testing.T) {
 		lines[index] = line.text
 	}
 	visible := strings.Join(lines, "\n")
-	if !strings.Contains(visible, glyphCollapsed+" "+glyphAssistant) || strings.Contains(visible, "route clear") {
+	if !strings.Contains(visible, glyphCollapsed+" "+glyphTool) || strings.Contains(visible, "route clear") {
 		t.Errorf("collapse-all left nested tool body visible:\n%s", visible)
 	}
 }
 
-func TestCollapseAllKeepsFocusOnContainingTurn(t *testing.T) {
+func TestCollapseAllKeepsFocusWhereItWas(t *testing.T) {
 	session := &model.Session{ID: "lunar", Path: "/workspace/event/session.jsonl", Agent: model.AgentCodex, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Check the first route"},
-		{Kind: model.EventThinking, Text: "Inspect the first ridge"},
-		{Kind: model.EventAssistantText, Text: "First route clear"},
+		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/first.go", Detail: &model.ToolDetail{Output: "first route clear"}},
 		{Kind: model.EventUser, Text: "Check the second route"},
-		{Kind: model.EventThinking, Text: "Inspect the second ridge"},
-		{Kind: model.EventAssistantText, Text: "Second route clear"},
+		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/second.go", Detail: &model.ToolDetail{Output: "second route clear"}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
 	wantKey := ""
 	for index, item := range detail.focusables {
-		if strings.Contains(item.key, "/turn/1/event/0") {
+		if strings.HasSuffix(item.key, "/event/1") {
 			detail.focus = index
 			detail.selectedLine = item.line
-			for _, candidate := range detail.focusables {
-				if candidate.expandable && strings.HasPrefix(item.key, candidate.key+"/event/") {
-					wantKey = candidate.key
-					break
-				}
-			}
+			wantKey = item.key
 			break
 		}
 	}
 	if wantKey == "" {
-		t.Fatal("first turn child focus not found")
+		t.Fatalf("first tool row not found: %#v", detail.focusables)
 	}
 
+	// A flat timeline folds only a row's own body, so no focusable can disappear
+	// under the cursor and focus stays put.
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
 
 	if got := detail.focusables[detail.focus].key; got != wantKey {
-		t.Errorf("collapse-all focus = %q, want containing turn %q", got, wantKey)
+		t.Errorf("collapse-all focus = %q, want %q", got, wantKey)
 	}
 }
 
@@ -3605,7 +3615,6 @@ func TestEnterOnToolOpensFullItemView(t *testing.T) {
 	for _, msg := range []tea.Msg{
 		tea.WindowSizeMsg{Width: 80, Height: 140},
 		tea.KeyMsg{Type: tea.KeyEnter},
-		tea.KeyMsg{Type: tea.KeyUp},
 		tea.KeyMsg{Type: tea.KeyEnter},
 	} {
 		updated, _ := m.Update(msg)
@@ -4045,12 +4054,11 @@ func TestDetailScrollVisitsExpandedToolRows(t *testing.T) {
 	detail := newDetailState(session, 80, 8, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	detail.moveFocus(1)
-	detail.moveFocus(1)
-	if !strings.Contains(detail.focusables[detail.focus].key, "/event/0") {
+	if !strings.Contains(detail.focusables[detail.focus].key, "/event/1") {
 		t.Fatalf("first expanded focus = %#v, want thinking row", detail.focusables[detail.focus])
 	}
 	detail.moveFocus(1)
-	if !strings.Contains(detail.focusables[detail.focus].key, "/event/1") {
+	if !strings.Contains(detail.focusables[detail.focus].key, "/event/2") {
 		t.Fatalf("second expanded focus = %#v, want tool row", detail.focusables[detail.focus])
 	}
 }

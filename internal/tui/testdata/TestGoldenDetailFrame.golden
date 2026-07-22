@@ -5,13 +5,13 @@
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ [Timeline]  Subagents (1)  Info ────────────────────────────────────────────╮
 │   14m   you: Delegate the survey                                             │
-│   13m ▾ ● claude · 1 thinking · 1 tools · 1 subagents                        │
-│   13m     ◇ thinking: Select a safe path                                     │
-│   12m   ▾ ⚙ Read(/workspace/starship/map.go) · 400ms                         │
-│           output:                                                            │
-│           map ready                                                          │
-│   11m     claude: Survey delegated                                           │
-│›  10m     ⑃ Task(Scout terrain) opus-4.8                          45k · $0.32│
+│   13m   ◇ thinking: Select a safe path                                       │
+│   12m ▾ ⚙ Read(/workspace/starship/map.go) · 400ms                           │
+│         output:                                                              │
+│         map ready                                                            │
+│   11m   claude: Survey delegated                                             │
+│›  10m   ⑃ Task(Scout terrain) opus-4.8                            45k · $0.32│
+│                                                                              │
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
