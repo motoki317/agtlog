@@ -166,6 +166,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 					return
 				}
 				if event.Kind == model.EventUser {
+					event.Harness = true
 					event.Text = codexTimelineUserMessage(event.Text)
 				}
 				if event.Text == "" {
@@ -276,6 +277,9 @@ func appendCodexMessage(session *model.Session, event model.Event, preferred boo
 			continue
 		}
 		if preferred {
+			if event.Kind == model.EventUser {
+				event.Harness = event.Harness && existing.Harness
+			}
 			session.Events[index] = event
 			if dedupTextByEvent != nil {
 				dedupTextByEvent[index] = dedupText

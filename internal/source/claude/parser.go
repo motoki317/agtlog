@@ -159,6 +159,20 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 		if json.Unmarshal(line, &record) != nil {
 			return
 		}
+		var markers struct {
+			IsMeta           bool            `json:"isMeta"`
+			IsCompactSummary bool            `json:"isCompactSummary"`
+			PromptSource     string          `json:"promptSource"`
+			Origin           json.RawMessage `json:"origin"`
+		}
+		// Advisory: a malformed marker must not drop an otherwise readable record.
+		_ = json.Unmarshal(line, &markers)
+		var origin *struct {
+			Kind string `json:"kind"`
+		}
+		if json.Unmarshal(markers.Origin, &origin) != nil {
+			origin = nil
+		}
 		var raw string
 		rawLoaded := false
 		rawRecord := func() string {
@@ -180,7 +194,13 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 		}
 		if record.Type == "user" {
 			if text := userText(record.Message.Content); text != "" {
-				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventUser, Text: model.BoundedDetailText(text), Raw: rawRecord()})
+				session.Events = append(session.Events, model.Event{
+					Timestamp: timestamp,
+					Kind:      model.EventUser,
+					Text:      model.BoundedDetailText(text),
+					Harness:   claudeUserIsHarness(markers.IsMeta, markers.IsCompactSummary, markers.PromptSource, origin, text),
+					Raw:       rawRecord(),
+				})
 			}
 		}
 		var blocks []struct {
@@ -343,6 +363,31 @@ func claudeResultSummary(toolName, result string, isError bool) string {
 		return "error"
 	}
 	return "exit 0"
+}
+
+func claudeUserIsHarness(isMeta, isCompactSummary bool, promptSource string, origin *struct {
+	Kind string `json:"kind"`
+}, text string) bool {
+	if isMeta || isCompactSummary || promptSource == "system" {
+		return true
+	}
+	if origin != nil && origin.Kind != "human" {
+		return true
+	}
+	for _, prefix := range []string{
+		"<command-name>",
+		"<command-message>",
+		"<local-command-stdout>",
+		"<bash-input>",
+		"<bash-stdout>",
+		"<bash-stderr>",
+		"[Request interrupted by user",
+	} {
+		if strings.HasPrefix(text, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeToolInput(name string, input json.RawMessage) string {

@@ -1544,6 +1544,29 @@ func TestUserPromptColorsOnlyTheLabelOverTheFullRowTint(t *testing.T) {
 	}
 }
 
+func TestUserPromptLabelsHarnessAndHumanTurns(t *testing.T) {
+	detail := &detailState{}
+	for _, test := range []struct {
+		name      string
+		event     model.Event
+		wantLabel string
+		wantRole  detailRole
+	}{
+		{name: "harness", event: model.Event{Kind: model.EventUser, Text: "Injected instructions", Harness: true}, wantLabel: "harness:", wantRole: detailSystemPrompt},
+		{name: "human", event: model.Event{Kind: model.EventUser, Text: "Survey the crater"}, wantLabel: "you:", wantRole: detailUserPrompt},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			lines := detail.userPromptLines(test.event, 0, "prompt", 0)
+			if len(lines) != 1 || lines[0].label != test.wantLabel || lines[0].role != test.wantRole {
+				t.Fatalf("userPromptLines() = %#v, want one %q line with role %v", lines, test.wantLabel, test.wantRole)
+			}
+			if !strings.Contains(lines[0].text, test.wantLabel+" "+test.event.Text) {
+				t.Errorf("prompt text = %q, want labelled preview", lines[0].text)
+			}
+		})
+	}
+}
+
 func TestUserPromptFoldRevealsTheFullPrompt(t *testing.T) {
 	prompt := "First instruction line\nSecond instruction line\nThird instruction line"
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{{Kind: model.EventUser, Text: prompt}}}
@@ -1651,6 +1674,18 @@ func TestTimelineIsOneFlatChronologicalList(t *testing.T) {
 		if line != want[index] {
 			t.Errorf("row %d = %+v, want %+v", index, line, want[index])
 		}
+	}
+}
+
+func TestHarnessPromptKeepsNextRequestContext(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{
+		{Kind: model.EventUser, Text: "Injected instructions", Harness: true},
+		{Kind: model.EventAssistantText, Text: "Ready", Usage: &model.Usage{InputTokens: 2_000, CacheReadTokens: 40_000}},
+	}}
+	detail := newDetailState(session, 80, 20, newStyles())
+
+	if line := detail.lines[0]; line.event.Kind != model.EventUser || line.metrics != "ctx 42k" {
+		t.Fatalf("harness prompt = %#v, want EventUser with next request context", line)
 	}
 }
 
@@ -3832,6 +3867,28 @@ func TestItemTextRolesMatchTimelinePromptSemantics(t *testing.T) {
 		if len(lines) != 1 || lines[0].role != test.want {
 			t.Errorf("item %s roles = %#v, want one role %v", test.kind, lines, test.want)
 		}
+	}
+}
+
+func TestItemLabelsHarnessAndHumanTurns(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		event     model.Event
+		wantLabel string
+		wantRole  detailRole
+	}{
+		{name: "harness", event: model.Event{Kind: model.EventUser, Text: "Injected instructions", Harness: true}, wantLabel: "Harness", wantRole: detailSystemPrompt},
+		{name: "human", event: model.Event{Kind: model.EventUser, Text: "Survey the crater"}, wantLabel: "User", wantRole: detailUserPrompt},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := itemLabel(test.event, model.AgentClaude); got != test.wantLabel {
+				t.Errorf("itemLabel() = %q, want %q", got, test.wantLabel)
+			}
+			lines := itemEventLines(test.event, model.AgentClaude)
+			if len(lines) != 1 || lines[0].role != test.wantRole {
+				t.Errorf("itemEventLines() = %#v, want one line with role %v", lines, test.wantRole)
+			}
+		})
 	}
 }
 

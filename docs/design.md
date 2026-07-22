@@ -60,9 +60,9 @@ Diff rows retain their `+`, `-`, or context-space prefix in every theme. Color t
 additions solid green, removals solid red, and context muted. Mono uses the prefixes, with bold
 added lines, instead of color.
 
-User-entered prompt rows use the user-prompt background; system and compaction rows use the
-system-prompt background. Both tints cover the padded row and are absent in mono. A selected row
-uses the selection foreground and background instead of either prompt tint. Reduced color
+User-entered prompt rows use the user-prompt background; harness, system, and compaction rows use
+the system-prompt background. Both tints cover the padded row and are absent in mono. A selected
+row uses the selection foreground and background instead of either prompt tint. Reduced color
 profiles use explicit palette fallbacks so the base, prompt, and selection backgrounds stay
 distinct after color conversion.
 
@@ -121,6 +121,7 @@ as one column in the supported terminal path.
 | `!` | Session error or missing pricing, depending on the cell |
 | `▸` / `▾` | Collapsed / expanded item |
 | `▸ you:` | User prompt |
+| `▸ harness:` | Agent-harness-injected user turn |
 | `⚙` | Tool call and linked result |
 | `◇` | Thinking, compaction, or secondary system event |
 | `+` / `-` / leading space | Added, removed, or context diff row |

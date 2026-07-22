@@ -225,6 +225,11 @@ type Event struct {
 	Cost          CostBreakdown
 	Priced        bool
 	CostEstimated bool
+	// Harness marks a user-role record the agent harness injected rather than a
+	// human typing: skill bodies, task notifications, compaction summaries, and
+	// slash-command echoes. Both agents log these as user turns, so the timeline
+	// needs the flag to label them apart.
+	Harness bool
 }
 
 type Session struct {

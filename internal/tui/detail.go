@@ -1280,6 +1280,11 @@ func (d *detailState) userPromptLines(event model.Event, indent int, key string,
 	expandable := textExpandable(event.Text)
 	expanded := expandable && d.isExpanded(key)
 	label := "you:"
+	role := detailUserPrompt
+	if event.Harness {
+		label = "harness:"
+		role = detailSystemPrompt
+	}
 	prefix := strings.Repeat(" ", indent) + foldMarker(expandable, expanded) + " " + label
 	text := prefix
 	if !expanded {
@@ -1291,13 +1296,13 @@ func (d *detailState) userPromptLines(event model.Event, indent int, key string,
 	if part, ok := contextPart(context); ok {
 		metrics = part
 	}
-	lines := []detailLine{{text: text, label: label, metrics: metrics, key: key, nowrap: true, expandable: expandable, role: detailUserPrompt, event: event}}
+	lines := []detailLine{{text: text, label: label, metrics: metrics, key: key, nowrap: true, expandable: expandable, role: role, event: event}}
 	if !expanded {
 		return lines
 	}
 	childPadding := strings.Repeat(" ", indent+2)
 	for _, line := range boundLines(event.Text, detailPreviewLineCap) {
-		lines = append(lines, detailLine{text: childPadding + detailPlainText(line), role: detailUserPrompt})
+		lines = append(lines, detailLine{text: childPadding + detailPlainText(line), role: role})
 	}
 	return lines
 }

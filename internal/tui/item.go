@@ -247,7 +247,11 @@ func itemEventLines(event model.Event, agent model.AgentKind) []detailLine {
 	if event.Kind != model.EventToolCall {
 		role := detailSecondary
 		if event.Kind == model.EventUser {
-			role = detailUserPrompt
+			if event.Harness {
+				role = detailSystemPrompt
+			} else {
+				role = detailUserPrompt
+			}
 		} else if event.Kind == model.EventAssistantText {
 			role = detailRow
 		} else if event.Kind == model.EventSystem || event.Kind == model.EventCompact {
@@ -309,6 +313,9 @@ func itemLabel(event model.Event, agent model.AgentKind) string {
 	case model.EventToolCall:
 		return toolDisplayName(event.ToolName)
 	case model.EventUser:
+		if event.Harness {
+			return "Harness"
+		}
 		return "User"
 	case model.EventAssistantText:
 		if agent != "" {

@@ -566,6 +566,84 @@ func TestLoadEventsDropsHardNoise(t *testing.T) {
 	}
 }
 
+func TestLoadEventsDropsLocalCommandCaveat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-caveat.jsonl")
+	record := `{"type":"user","message":{"content":"<local-command-caveat>Caveat: fictional notice.</local-command-caveat>"}}` + "\n"
+	if err := os.WriteFile(path, []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 0 {
+		t.Fatalf("LoadEvents().Events = %#v, want caveat suppressed", session.Events)
+	}
+}
+
+func TestLoadEventsCleansLocalCommandCaveatBeforeProse(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-caveat-prose.jsonl")
+	record := `{"type":"user","message":{"content":"<local-command-caveat>Caveat: fictional notice.</local-command-caveat>\nContinue the survey"}}` + "\n"
+	if err := os.WriteFile(path, []byte(record), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 1 {
+		t.Fatalf("LoadEvents().Events = %#v, want one prose event", session.Events)
+	}
+	event := session.Events[0]
+	if event.Text != "Continue the survey" || event.Harness {
+		t.Fatalf("event = %#v, want cleaned human prose", event)
+	}
+}
+
+func TestLoadEventsClassifiesClaudeUserTurns(t *testing.T) {
+	tests := []struct {
+		name        string
+		record      string
+		wantHarness bool
+	}{
+		{name: "meta", record: `{"type":"user","isMeta":true,"message":{"content":"Injected skill body"}}`, wantHarness: true},
+		{name: "compact summary", record: `{"type":"user","isCompactSummary":true,"message":{"content":"Prior conversation summary"}}`, wantHarness: true},
+		{name: "system prompt source", record: `{"type":"user","promptSource":"system","message":{"content":"Runtime instructions"}}`, wantHarness: true},
+		{name: "non-human origin", record: `{"type":"user","origin":{"kind":"task-notification"},"message":{"content":"Background task completed"}}`, wantHarness: true},
+		{name: "command wrapper", record: `{"type":"user","message":{"content":"<command-name>survey</command-name>"}}`, wantHarness: true},
+		{name: "command wrapper after hard noise", record: `{"type":"user","message":{"content":"<system-reminder>Hidden metadata</system-reminder>\n<command-name>survey</command-name>"}}`, wantHarness: true},
+		{name: "bash output wrapper", record: `{"type":"user","message":{"content":"<bash-stdout>route clear</bash-stdout>"}}`, wantHarness: true},
+		{name: "interruption notice", record: `{"type":"user","message":{"content":"[Request interrupted by user]"}}`, wantHarness: true},
+		{name: "typed prompt", record: `{"type":"user","promptSource":"typed","origin":{"kind":"human"},"message":{"content":"Survey the northern ridge"}}`},
+		{name: "missing origin", record: `{"type":"user","message":{"content":"Survey the southern ridge"}}`},
+		{name: "malformed marker fields", record: `{"type":"user","isMeta":"true","isCompactSummary":[],"promptSource":7,"origin":{"kind":"human"},"message":{"content":"Survey the eastern ridge"}}`},
+		{name: "malformed origin", record: `{"type":"user","origin":"human","message":{"content":"Survey the western ridge"}}`},
+		{name: "marker precedes human origin", record: `{"type":"user","isMeta":true,"origin":{"kind":"human"},"message":{"content":"Base directory for this skill: /workspace/skills/survey"}}`, wantHarness: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			if err := os.WriteFile(path, []byte(test.record+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			session := &model.Session{Path: path, Agent: model.AgentClaude}
+
+			if err := testParser().LoadEvents(context.Background(), session); err != nil {
+				t.Fatalf("LoadEvents() error = %v", err)
+			}
+			if len(session.Events) != 1 || session.Events[0].Kind != model.EventUser {
+				t.Fatalf("LoadEvents().Events = %#v, want one user event", session.Events)
+			}
+			if got := session.Events[0].Harness; got != test.wantHarness {
+				t.Errorf("Event.Harness = %t, want %t", got, test.wantHarness)
+			}
+		})
+	}
+}
+
 func TestClaudeToolInputSummarizesEditDiff(t *testing.T) {
 	input := json.RawMessage(`{"file_path":"/workspace/starship/engine.go","old_string":"old one\nold two","new_string":"new one\nnew two\nnew three"}`)
 	if got := claudeToolInput("Edit", input); got != "/workspace/starship/engine.go · +3 −2" {

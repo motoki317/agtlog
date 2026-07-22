@@ -857,6 +857,9 @@ func TestLoadEventsCoalescesMirroredMessages(t *testing.T) {
 	if len(session.Events) != 2 || session.Events[0].Kind != model.EventUser || session.Events[1].Kind != model.EventAssistantText {
 		t.Fatalf("mirrored events = %#v, want one user and one assistant event", session.Events)
 	}
+	if session.Events[0].Harness {
+		t.Fatalf("mirrored user event = %#v, want human classification to survive deduplication", session.Events[0])
+	}
 	wantTimestamps := []time.Time{
 		time.Date(2026, 1, 2, 3, 0, 0, 5_000_000, time.UTC),
 		time.Date(2026, 1, 2, 3, 0, 1, 7_000_000, time.UTC),
@@ -865,6 +868,22 @@ func TestLoadEventsCoalescesMirroredMessages(t *testing.T) {
 		if !session.Events[index].Timestamp.Equal(want) {
 			t.Fatalf("mirrored event %d timestamp = %v, want preferred response_item timestamp %v", index, session.Events[index].Timestamp, want)
 		}
+	}
+}
+
+func TestLoadEventsClassifiesStandaloneResponseUserAsHarness(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-response-user.jsonl")
+	content := `{"timestamp":"2026-01-02T03:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# Harness instructions"}]}}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 1 || session.Events[0].Kind != model.EventUser || !session.Events[0].Harness {
+		t.Fatalf("LoadEvents().Events = %#v, want one harness-classified user event", session.Events)
 	}
 }
 
@@ -886,6 +905,21 @@ func TestLoadEventsCoalescesLongMirroredUserMessage(t *testing.T) {
 	want := model.BoundedDetailText(model.CleanTimelineText(message))
 	if len(session.Events) != 1 || session.Events[0].Kind != model.EventUser || session.Events[0].Text != want {
 		t.Fatalf("long mirrored events = %#v, want one normalized user event", session.Events)
+	}
+}
+
+func TestAppendCodexMessagePreservesHumanClassification(t *testing.T) {
+	session := &model.Session{Events: []model.Event{{Kind: model.EventUser, Text: "Survey the crater"}}}
+	appendCodexMessage(
+		session,
+		model.Event{Kind: model.EventUser, Text: "Survey the crater", Harness: true},
+		true,
+		"Survey the crater",
+		make(map[int]string),
+	)
+
+	if len(session.Events) != 1 || session.Events[0].Harness {
+		t.Fatalf("deduplicated event = %#v, want one human-classified prompt", session.Events)
 	}
 }
 
