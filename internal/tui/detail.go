@@ -134,6 +134,17 @@ type detailLine struct {
 	role            detailRole
 	agent           model.AgentKind
 	event           model.Event
+	stamp           time.Time
+}
+
+// timestamp is the time the gutter shows. It falls back to the row's event,
+// which is also what enter opens; a grouped row sets stamp because its
+// representative event is not the one that opened the group.
+func (l detailLine) timestamp() time.Time {
+	if !l.stamp.IsZero() {
+		return l.stamp
+	}
+	return l.event.Timestamp
 }
 
 type detailRole int
@@ -1067,7 +1078,7 @@ func (d *detailState) rebuildRendered() {
 			if first && detailIndex == d.selectedLine {
 				marker = "› "
 			}
-			plain := fitPlain(marker, markerWidth, false) + d.timelineGutter(line.event, first, gutterWidth) + fitPlain(row, bodyWidth, false)
+			plain := fitPlain(marker, markerWidth, false) + d.timelineGutter(line.timestamp(), first, gutterWidth) + fitPlain(row, bodyWidth, false)
 			d.rendered = append(d.rendered, renderedRow{detailIndex: detailIndex, text: plain, first: first})
 			content = append(content, plain)
 		}
@@ -1145,16 +1156,16 @@ func (d *detailState) timelineGutterWidth() int {
 	return width + detailTimeGapWidth
 }
 
-func (d *detailState) timelineGutter(event model.Event, first bool, width int) string {
+func (d *detailState) timelineGutter(at time.Time, first bool, width int) string {
 	if width <= 0 {
 		return ""
 	}
 	stamp := ""
-	if first && !event.Timestamp.IsZero() {
+	if first && !at.IsZero() {
 		if d.absoluteTime {
-			stamp = formatDetailTime(event.Timestamp, sessionSpansMultipleDates(d.session))
+			stamp = formatDetailTime(at, sessionSpansMultipleDates(d.session))
 		} else {
-			stamp = formatAge(d.now, event.Timestamp)
+			stamp = formatAge(d.now, at)
 		}
 	}
 	stampWidth := max(0, width-detailTimeGapWidth)
@@ -1188,7 +1199,7 @@ func (d *detailState) sessionLines(session *model.Session, indent int, path stri
 		expandable := turnExpandable(turn)
 		expanded := expandable && d.isExpanded(key)
 		label := glyphAssistant + " " + terminalText(string(session.Agent), 32)
-		lines = append(lines, detailLine{text: turnSummary(session, turn, indent, expanded), label: label, metrics: metricsText(metrics.outputParts()), key: key, nowrap: true, expandable: expandable, role: detailAssistant, agent: session.Agent, event: turnItemEvent(turn)})
+		lines = append(lines, detailLine{text: turnSummary(session, turn, indent, expanded), label: label, metrics: metricsText(metrics.outputParts()), key: key, nowrap: true, expandable: expandable, role: detailAssistant, agent: session.Agent, event: turnItemEvent(turn), stamp: turnStart(turn)})
 		if expanded {
 			for eventIndex, item := range turn {
 				lines = append(lines, d.eventLines(session, item, indent+2, timelineEventKey(key, eventIndex))...)
@@ -1444,6 +1455,18 @@ func timelineTurnKey(path string, start int) string {
 
 func timelineEventKey(turnKey string, index int) string {
 	return fmt.Sprintf("%s/event/%d", turnKey, index)
+}
+
+// turnStart is when the turn began. The collapsed row must not jump backwards
+// when it is expanded, and the log records no time for the group itself, so the
+// row borrows the oldest stamp inside it instead of its representative event's.
+func turnStart(events []model.Event) time.Time {
+	for _, event := range events {
+		if !event.Timestamp.IsZero() {
+			return event.Timestamp
+		}
+	}
+	return time.Time{}
 }
 
 func turnItemEvent(events []model.Event) model.Event {

@@ -5,7 +5,7 @@
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ [Timeline]  Subagents (1)  Info ────────────────────────────────────────────╮
 │   14m   you: Delegate the survey                                             │
-│   11m ▾ ● claude · 1 thinking · 1 tools · 1 subagents                        │
+│   13m ▾ ● claude · 1 thinking · 1 tools · 1 subagents                        │
 │   13m     ◇ thinking: Select a safe path                                     │
 │   12m   ▾ ⚙ Read(/workspace/starship/map.go) · 400ms                         │
 │           output:                                                            │

@@ -3041,6 +3041,39 @@ func TestTimelineGutterShowsRelativeEventTime(t *testing.T) {
 	}
 }
 
+func TestTimelineGutterStampsTurnRowWithItsFirstEvent(t *testing.T) {
+	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	session := &model.Session{ID: "route", Agent: model.AgentClaude, Events: []model.Event{
+		{Timestamp: now.Add(-9 * time.Minute), Kind: model.EventUser, Text: "Survey the crater"},
+		{Timestamp: now.Add(-8 * time.Minute), Kind: model.EventThinking, Text: "Compare routes"},
+		{Timestamp: now.Add(-2 * time.Minute), Kind: model.EventAssistantText, Text: "Route prepared"},
+	}}
+	detail := newDetailState(session, 80, 20, newStyles())
+	detail.now = now
+
+	// The stamp has to survive folding: a turn row keyed on its last event would
+	// read 2m collapsed and 8m once its own first child appears underneath it.
+	for _, expanded := range []bool{false, true} {
+		detail.defaultExpanded = expanded
+		detail.rebuild()
+		turn := -1
+		for index, line := range detail.lines {
+			if strings.Contains(line.text, "claude") {
+				turn = index
+				break
+			}
+		}
+		if turn < 0 {
+			t.Fatalf("expanded=%t timeline has no turn row: %#v", expanded, detail.lines)
+		}
+		gutterWidth := detail.timelineGutterWidth()
+		row := detail.rendered[detail.firstRenderedRow(turn)].text
+		if got := strings.TrimSpace(ansi.Cut(row, 2, 2+gutterWidth)); got != "8m" {
+			t.Fatalf("expanded=%t turn gutter = %q, want the turn's first event at 8m", expanded, got)
+		}
+	}
+}
+
 func TestTimelineGutterKeepsAbsoluteAndContinuationWidthsFixed(t *testing.T) {
 	started := time.Date(2026, time.July, 19, 23, 55, 0, 0, time.UTC)
 	eventTime := time.Date(2026, time.July, 20, 11, 55, 7, 0, time.UTC)
