@@ -50,6 +50,17 @@ type listColumn struct {
 	absoluteTime bool
 }
 
+var sessionListColumnOrder = []listColumnKind{
+	columnAgent,
+	columnProject,
+	columnTitle,
+	columnModel,
+	columnAge,
+	columnMessages,
+	columnSubagents,
+	columnCost,
+}
+
 type sessionPresentation struct {
 	cost          model.Cost
 	subagentCount int
@@ -198,6 +209,10 @@ func listColumnsWidth(columns []listColumn) int {
 		total += column.width
 	}
 	return total
+}
+
+func (m Model) visibleListColumns() []listColumn {
+	return listColumns(max(0, m.width-2-listCursorWidth), m.absoluteTime)
 }
 
 func removeListColumn(columns []listColumn, kind listColumnKind) []listColumn {
@@ -380,12 +395,10 @@ func formatCostWidth(cost model.Cost, width int) string {
 }
 
 func compactDollars(usd float64, maxWidth int) string {
-	if math.IsNaN(usd) || usd < 0 {
-		usd = 0
-	}
 	if math.IsInf(usd, 1) {
 		return "∞"
 	}
+	usd = normalizedUSD(usd)
 	units := []string{"", "k", "M", "B", "T", "P", "E"}
 	divisor := float64(1)
 	unit := 0
@@ -510,7 +523,7 @@ func (m Model) sessionsPanel(height int) string {
 	columns := listColumns(max(0, innerWidth-listCursorWidth), m.absoluteTime)
 	content := make([]panelLine, 0, innerHeight)
 	if innerHeight > 0 {
-		content = append(content, renderListHeaderLine(columns, innerWidth, m.styles))
+		content = append(content, renderListHeaderLine(columns, innerWidth, m.sortState, m.columnFocus, m.styles))
 	}
 	rowCapacity := max(0, innerHeight-1)
 	start := min(max(0, m.listOffset), max(0, len(m.visible)-rowCapacity))
@@ -541,20 +554,16 @@ func (m Model) sessionsPanel(height int) string {
 	return renderPanel(title, hint, content, m.width, height, m.styles)
 }
 
-func renderListHeader(columns []listColumn, width int, styles styles) string {
-	return renderListHeaderLine(columns, width, styles).styled
-}
-
-func renderListHeaderLine(columns []listColumn, width int, styles styles) panelLine {
+func renderListHeaderLine(columns []listColumn, width int, state sortState, focus listColumnKind, styles styles) panelLine {
 	markerWidth := min(listCursorWidth, max(0, width))
 	bodyWidth := max(0, width-markerWidth)
 	marker := strings.Repeat(" ", markerWidth)
 	plainCells := make([]string, len(columns))
 	cells := make([]string, len(columns))
 	for index, column := range columns {
-		plain := fitPlain(column.title, column.width, column.right)
-		plainCells[index] = plain
-		cells[index] = styles.header.Render(plain)
+		cell := renderHeaderCell(column, state, column.kind == focus, styles)
+		plainCells[index] = cell.plain
+		cells[index] = cell.styled
 	}
 	if len(columns) == 0 {
 		plain := strings.Repeat(" ", width)
@@ -563,6 +572,29 @@ func renderListHeaderLine(columns []listColumn, width int, styles styles) panelL
 	plainBody := fitPlain(strings.Join(plainCells, " "), bodyWidth, false)
 	styledBody := strings.Join(cells, styles.header.Render(" "))
 	return panelLine{plain: marker + plainBody, styled: styles.header.Render(marker) + styledBody}
+}
+
+func renderHeaderCell(column listColumn, state sortState, focused bool, styles styles) panelLine {
+	if column.width <= 0 {
+		return panelLine{}
+	}
+	plain := ""
+	if state.active && state.kind == column.kind {
+		titleWidth := column.width - 1
+		title := ansi.Truncate(column.title, titleWidth, "")
+		if column.right {
+			plain = fitPlain(title, titleWidth, true) + sortArrow(state)
+		} else {
+			plain = fitPlain(title+sortArrow(state), column.width, false)
+		}
+	} else {
+		plain = fitPlain(column.title, column.width, column.right)
+	}
+	style := styles.header
+	if focused {
+		style = styles.selected.Bold(true)
+	}
+	return panelLine{plain: plain, styled: style.Render(plain)}
 }
 
 func renderSessionRow(session *model.Session, now time.Time, columns []listColumn, width int, selected bool, styles styles) string {
@@ -620,12 +652,12 @@ func styleSessionCell(cell string, session *model.Session, presentation sessionP
 }
 
 func (m Model) renderKeyBar() string {
-	hints := []string{"↑/↓ move", "/ filter", "s sort", "a agent", timeFormatKey + " time", "↵ open", "r refresh", "mouse scroll/click"}
+	hints := []string{"↑/↓ move", "/ filter", "←/→ column", "⇧" + sortColumnKey + " sort", "a agent", timeFormatKey + " time", "↵ open", "r refresh", "mouse scroll/click"}
 	if !m.styles.mono {
 		hints = append(hints, "t theme")
 	}
 	hints = append(hints, "? help", "q quit")
-	plain := fitKeyHints(m.width, hints, []string{"mouse scroll/click", "t theme", "r refresh", "a agent", "s sort", "? help", "/ filter", "↑/↓ move", timeFormatKey + " time", "q quit", "↵ open"})
+	plain := fitKeyHints(m.width, hints, []string{"mouse scroll/click", "t theme", "r refresh", "a agent", "⇧" + sortColumnKey + " sort", "←/→ column", "? help", "/ filter", "↑/↓ move", timeFormatKey + " time", "q quit", "↵ open"})
 	return m.styles.keyHint.Render(fitPlain(plain, m.width, false))
 }
 
@@ -638,12 +670,8 @@ func (m Model) listSummary() string {
 	if query := terminalText(m.filter.Value(), 24); query != "" && !m.filtering {
 		state += " · /" + query
 	}
-	if m.sort != sortAge {
-		label := "tokens"
-		if m.sort == sortCost {
-			label = "cost"
-		}
-		state += " · sort:" + label
+	if m.sortState.active {
+		state += " · sort:" + sortColumnLabel(m.sortState.kind) + sortArrow(m.sortState)
 	}
 	if m.agent != agentAll {
 		label := "claude"

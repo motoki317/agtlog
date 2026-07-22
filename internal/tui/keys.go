@@ -7,13 +7,20 @@ const (
 	collapseAllKey = "C"
 	timeFormatKey  = "T"
 	rawRecordKey   = "R"
+	sortColumnKey  = "O"
+	sortAgeKey     = "A"
+	sortTitleKey   = "N"
 )
 
 type keyMap struct {
 	MoveDown    key.Binding
 	MoveUp      key.Binding
 	Filter      key.Binding
-	Sort        key.Binding
+	SortColumn  key.Binding
+	SortAge     key.Binding
+	SortTitle   key.Binding
+	ColumnLeft  key.Binding
+	ColumnRight key.Binding
 	Agent       key.Binding
 	Open        key.Binding
 	Refresh     key.Binding
@@ -34,7 +41,11 @@ func defaultKeys() keyMap {
 		MoveDown:    key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/↓", "down")),
 		MoveUp:      key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("k/↑", "up")),
 		Filter:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
-		Sort:        key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "sort")),
+		SortColumn:  key.NewBinding(key.WithKeys(sortColumnKey), key.WithHelp(sortColumnKey, "sort")),
+		SortAge:     key.NewBinding(key.WithKeys(sortAgeKey), key.WithHelp(sortAgeKey, "age")),
+		SortTitle:   key.NewBinding(key.WithKeys(sortTitleKey), key.WithHelp(sortTitleKey, "title")),
+		ColumnLeft:  key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "column")),
+		ColumnRight: key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "column")),
 		Agent:       key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "agent")),
 		Open:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 		Refresh:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
@@ -52,12 +63,12 @@ func defaultKeys() keyMap {
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Filter, k.Sort, k.Open, k.Help, k.Quit}
+	return []key.Binding{k.Filter, k.SortColumn, k.Open, k.Help, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
-		{k.MoveDown, k.MoveUp, k.Filter, k.Sort, k.Agent},
+		{k.MoveDown, k.MoveUp, k.Filter, k.ColumnLeft, k.ColumnRight, k.SortColumn, k.SortAge, k.SortTitle, k.Agent},
 		{k.Open, k.Refresh, k.Theme, k.TimeFormat, k.Toggle, k.Collapse, k.Expand, k.ExpandAll, k.CollapseAll},
 		{k.Back, k.Help, k.Quit},
 	}

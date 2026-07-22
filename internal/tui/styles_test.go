@@ -153,6 +153,40 @@ func TestUIGlyphsHaveStableDisplayWidths(t *testing.T) {
 	}
 }
 
+func TestSortedFocusedHeaderCellUsesArrowAtOneCellWidth(t *testing.T) {
+	styleSet := newStyles(Theme{Name: "mono"})
+	cell := renderHeaderCell(
+		listColumn{kind: columnAgent, title: "AGENT", width: 1},
+		sortState{kind: columnAgent, active: true},
+		true,
+		styleSet,
+	)
+
+	if cell.plain != "↑" || ansi.StringWidth(cell.plain) != 1 {
+		t.Fatalf("one-cell sorted header = %q (width %d), want ↑", cell.plain, ansi.StringWidth(cell.plain))
+	}
+	want := styleSet.selected.Bold(true).Render("↑")
+	if cell.styled != want {
+		t.Fatalf("focused sorted header style = %q, want %q", cell.styled, want)
+	}
+}
+
+func TestSortedLeftAlignedHeaderKeepsArrowBesideTitle(t *testing.T) {
+	cell := renderHeaderCell(
+		listColumn{kind: columnTitle, title: "TITLE", width: 12},
+		sortState{kind: columnTitle, active: true},
+		false,
+		newStyles(Theme{Name: "mono"}),
+	)
+
+	if cell.plain != "TITLE↑      " {
+		t.Fatalf("left-aligned sorted header = %q, want arrow next to title", cell.plain)
+	}
+	if got := ansi.StringWidth(cell.plain); got != 12 {
+		t.Fatalf("left-aligned sorted header width = %d, want 12", got)
+	}
+}
+
 func TestThemeKeyCyclesActivePalette(t *testing.T) {
 	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})

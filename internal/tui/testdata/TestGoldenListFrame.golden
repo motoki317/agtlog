@@ -13,4 +13,4 @@
 │                                                                              │
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-↑/↓ move   / filter   s sort   a agent   T time   ↵ open   ? help   q quit
+↑/↓ move   / filter   ←/→ column   ⇧O sort   T time   ↵ open   ? help   q quit

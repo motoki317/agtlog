@@ -8,13 +8,14 @@ func (m Model) helpView() string {
 	lines := []string{
 		"j/k ↑/↓ move · / filter",
 		"pgup/pgdn page · home/end/g/G edge",
-		"s sort · a agent · " + timeFormatKey + " time",
+		"←/→ column · ⇧" + sortColumnKey + " sort",
+		"⇧" + sortAgeKey + " age · ⇧" + sortTitleKey + " title · a agent · " + timeFormatKey + " time",
 		"enter open · r refresh",
 		listMouseHelp,
 		"? help · q/ctrl-c quit",
 	}
 	if !m.styles.mono {
-		lines[3] += " · t theme"
+		lines[4] += " · t theme"
 	}
 	if m.screen == screenDetail {
 		if _, item := m.detail.(*itemView); item {
@@ -40,6 +41,19 @@ func (m Model) helpView() string {
 				}
 				if !m.styles.mono {
 					lines[2] += " · t theme"
+				}
+			} else if detail != nil && detail.tab == tabSubagents {
+				lines = []string{
+					"j/k scroll · g/G edge",
+					"←/→ column · ⇧" + sortColumnKey + " sort",
+					"⇧" + sortAgeKey + " age · ⇧" + sortTitleKey + " title · enter/l open",
+					"tab tabs · " + timeFormatKey + " time",
+					"esc/h back",
+					"mouse wheel scroll · click select",
+					"? help · q/ctrl-c quit",
+				}
+				if !m.styles.mono {
+					lines[4] += " · t theme"
 				}
 			} else {
 				mouseHelp := "mouse wheel scroll · click select/toggle"
