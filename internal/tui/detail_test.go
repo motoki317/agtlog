@@ -2682,71 +2682,47 @@ func TestDetailMouseClickSelectsTurn(t *testing.T) {
 	m = updated.(Model)
 
 	detail = detailStateFromScreen(t, m.detail)
-	if detail.focus != target || detail.isExpanded(detail.focusables[target].key) {
-		t.Fatalf("turn click focus=%d expanded=%t, want selected collapsed turn", detail.focus, detail.isExpanded(detail.focusables[target].key))
+	if detail.focus != target || !detail.isExpanded(detail.focusables[target].key) {
+		t.Fatalf("turn click focus=%d expanded=%t, want the turn selected and left expanded", detail.focus, detail.isExpanded(detail.focusables[target].key))
 	}
 }
 
-func TestDetailMouseSecondClickTogglesTurn(t *testing.T) {
-	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
-		{Kind: model.EventUser, Text: "Survey the crater"},
-		{Kind: model.EventThinking, Text: "Compare routes"},
-		{Kind: model.EventAssistantText, Text: "Route prepared"},
-	}}
-	m := NewModel([]*model.Session{session}, nil)
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
-	m = updated.(Model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = updated.(Model)
-	detail := detailStateFromScreen(t, m.detail)
-	target := 1
-	y := viewLineY(t, m.View(), "1 thinking", 0)
-	click := tea.MouseMsg{X: 2, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}
-	updated, _ = m.Update(click)
-	m = updated.(Model)
-	detail = detailStateFromScreen(t, m.detail)
-	if detail.focus != target || detail.isExpanded(detail.focusables[target].key) {
-		t.Fatalf("first turn click focus=%d expanded=%t, want selected collapsed turn", detail.focus, detail.isExpanded(detail.focusables[target].key))
-	}
+func TestDetailMouseClicksNeverFoldTheClickedRow(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		event model.Event
+		label string
+	}{
+		{name: "turn", event: model.Event{Kind: model.EventThinking, Text: "Compare routes"}, label: "1 thinking"},
+		{name: "tool", event: model.Event{Kind: model.EventToolCall, ToolName: "Read", Detail: &model.ToolDetail{Output: "map ready"}}, label: "Read"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
+				{Kind: model.EventUser, Text: "Survey the crater"},
+				testCase.event,
+				{Kind: model.EventAssistantText, Text: "Route prepared"},
+			}}
+			m := NewModel([]*model.Session{session}, nil)
+			for _, msg := range []tea.Msg{
+				tea.WindowSizeMsg{Width: 80, Height: 16},
+				tea.KeyMsg{Type: tea.KeyEnter},
+				tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}},
+			} {
+				updated, _ := m.Update(msg)
+				m = updated.(Model)
+			}
+			click := tea.MouseMsg{X: 2, Y: viewLineY(t, m.View(), testCase.label, 0), Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}
+			for range 3 {
+				updated, _ := m.Update(click)
+				m = updated.(Model)
+			}
 
-	updated, _ = m.Update(click)
-	m = updated.(Model)
-
-	detail = detailStateFromScreen(t, m.detail)
-	if !detail.isExpanded(detail.focusables[target].key) || m.screen != screenDetail {
-		t.Fatalf("second turn click expanded=%t screen=%v, want expanded timeline", detail.isExpanded(detail.focusables[target].key), m.screen)
-	}
-}
-
-func TestDetailMouseSecondClickTogglesTool(t *testing.T) {
-	session := &model.Session{ID: "route", Agent: model.AgentCodex, Events: []model.Event{
-		{Kind: model.EventUser, Text: "Survey the crater"},
-		{Kind: model.EventAssistantText, Text: "Route prepared"},
-		{Kind: model.EventToolCall, ToolName: "Read", Detail: &model.ToolDetail{Output: "map ready"}},
-	}}
-	m := NewModel([]*model.Session{session}, nil)
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 16})
-	m = updated.(Model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = updated.(Model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
-	m = updated.(Model)
-	detail := detailStateFromScreen(t, m.detail)
-	target := len(detail.focusables) - 1
-	y := viewLineY(t, m.View(), "Read", 0)
-	click := tea.MouseMsg{X: 2, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}
-	updated, _ = m.Update(click)
-	m = updated.(Model)
-	detail = detailStateFromScreen(t, m.detail)
-	if detail.focus != target || detail.isExpanded(detail.focusables[target].key) {
-		t.Fatalf("first tool click focus=%d expanded=%t, want selected collapsed tool", detail.focus, detail.isExpanded(detail.focusables[target].key))
-	}
-	updated, _ = m.Update(click)
-	m = updated.(Model)
-
-	detail = detailStateFromScreen(t, m.detail)
-	if !detail.isExpanded(detail.focusables[detail.focus].key) || detail.focusables[detail.focus].event.Kind != model.EventToolCall {
-		t.Fatalf("second tool click focus=%#v expanded=%t, want expanded tool", detail.focusables[detail.focus], detail.isExpanded(detail.focusables[detail.focus].key))
+			detail := detailStateFromScreen(t, m.detail)
+			focused := detail.focusables[detail.focus]
+			if !focused.expandable || !detail.isExpanded(focused.key) || m.screen != screenDetail {
+				t.Fatalf("repeated clicks left expandable=%t expanded=%t screen=%v, want the row selected and still expanded", focused.expandable, detail.isExpanded(focused.key), m.screen)
+			}
+		})
 	}
 }
 

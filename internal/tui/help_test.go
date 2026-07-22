@@ -26,7 +26,7 @@ func TestDetailHelpIncludesEveryRequiredBinding(t *testing.T) {
 	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
 	m.screen = screenDetail
 	view := m.helpView()
-	for _, want := range []string{"j/k scroll", "g/G edge", "←/→ fold", "space toggle", "E expand all", "C collapse all", "enter/l open", "tab tabs", "w wrap", "T time", "mouse wheel scroll · click select/toggle", "esc/h back", "? help", "ctrl-c quit"} {
+	for _, want := range []string{"j/k scroll", "g/G edge", "←/→ fold", "space toggle", "E expand all", "C collapse all", "enter/l open", "tab tabs", "w wrap", "T time", "mouse wheel scroll · click select", "esc/h back", "? help", "ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("detail help missing %q:\n%s", want, view)
 		}
@@ -67,7 +67,7 @@ func TestSubagentsHelpIncludesOnlyTableBindings(t *testing.T) {
 			t.Errorf("Subagents help missing %q:\n%s", want, view)
 		}
 	}
-	for _, unwanted := range []string{"←/→ fold", "space toggle", "expand all", "collapse all", "click select/toggle"} {
+	for _, unwanted := range []string{"←/→ fold", "space toggle", "expand all", "collapse all"} {
 		if strings.Contains(view, unwanted) {
 			t.Errorf("Subagents help advertises inapplicable %q:\n%s", unwanted, view)
 		}
@@ -104,7 +104,7 @@ func TestInfoHelpIncludesOnlyApplicableBindings(t *testing.T) {
 			t.Errorf("Info help missing %q:\n%s", want, view)
 		}
 	}
-	for _, unwanted := range []string{"←/→ fold", "space toggle", "expand all", "enter/l open", "click select/toggle"} {
+	for _, unwanted := range []string{"←/→ fold", "space toggle", "expand all", "enter/l open"} {
 		if strings.Contains(view, unwanted) {
 			t.Errorf("Info help advertises inapplicable %q:\n%s", unwanted, view)
 		}

@@ -56,9 +56,9 @@ func (m Model) helpView() string {
 					lines[4] += " · t theme"
 				}
 			} else {
-				mouseHelp := "mouse wheel scroll · click select/toggle"
+				mouseHelp := "mouse wheel scroll · click select"
 				if m.width < 59 {
-					mouseHelp = "wheel · select/toggle"
+					mouseHelp = "wheel · select"
 				}
 				lines = []string{
 					"j/k scroll · g/G edge",

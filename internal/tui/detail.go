@@ -439,19 +439,18 @@ func (d *detailState) moveFocus(direction int) {
 	d.updateSelection(oldLine, d.focusables[d.focus].line)
 }
 
-func (d *detailState) selectRow(index int) bool {
+// selectRow only moves the cursor. A click never folds the row it lands on:
+// folding is reachable from the keyboard, and toggling under the pointer
+// rewrites the screen the reader was aiming at.
+func (d *detailState) selectRow(index int) {
+	oldLine := d.selectedLine
 	if d.tab == tabSubagents {
-		alreadySelected := d.subagentSelection == index
-		oldLine := d.selectedLine
 		d.subagentSelection = index
 		d.updateSelection(oldLine, subagentDetailLine(index))
-		return alreadySelected
+		return
 	}
-	alreadySelected := d.focus == index
-	oldLine := d.selectedLine
 	d.focus = index
 	d.updateSelection(oldLine, d.focusables[index].line)
-	return alreadySelected
 }
 
 func (d *detailState) selectedExpandable() bool {

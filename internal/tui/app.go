@@ -421,9 +421,6 @@ func (m *Model) updateDetailMouse(mouse tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 	detail.selectRow(index)
-	if detail.selectedExpandable() {
-		return detail.update(tea.KeyMsg{Type: tea.KeySpace})
-	}
 	return nil
 }
 
