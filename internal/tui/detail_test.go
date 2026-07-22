@@ -2909,6 +2909,47 @@ func TestPinnedDetailTimelineFollowsLiveUpdate(t *testing.T) {
 	}
 }
 
+func TestCursorMovedOffTheNewestEventStopsTailFollowing(t *testing.T) {
+	events := []model.Event{{Kind: model.EventUser, Text: "Survey the crater"}}
+	for index := range 60 {
+		events = append(events, model.Event{Kind: model.EventThinking, Text: fmt.Sprintf("Observation %02d", index)})
+	}
+	root := &model.Session{ID: "lunar", Agent: model.AgentCodex, Path: "/workspace/crater/rollout.jsonl", Events: events}
+	m := NewModel([]*model.Session{root}, nil)
+	for _, msg := range []tea.Msg{
+		tea.WindowSizeMsg{Width: 120, Height: 40},
+		tea.KeyMsg{Type: tea.KeyEnter},
+		tea.KeyMsg{Type: tea.KeyUp},
+		tea.KeyMsg{Type: tea.KeyUp},
+		tea.KeyMsg{Type: tea.KeyUp},
+	} {
+		updated, _ := m.Update(msg)
+		m = updated.(Model)
+	}
+	// Moving the cursor up inside the last screenful leaves the viewport at the
+	// bottom, so tail-following must key off the cursor rather than the viewport.
+	before := detailStateFromScreen(t, m.detail)
+	offset, focusKey := before.viewport.YOffset, before.focusables[before.focus].key
+	if !before.pinnedToBottom() {
+		t.Fatalf("test setup viewport offset = %d, want a bottom-pinned viewport", offset)
+	}
+	replacement := cloneSession(root)
+	replacement.Events = append(replacement.Events, model.Event{Kind: model.EventAssistantText, Text: "Newest telemetry sample"})
+
+	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+	m = updated.(Model)
+	after := detailStateFromScreen(t, m.detail)
+	if after.viewport.YOffset != offset || after.focusables[after.focus].key != focusKey {
+		t.Fatalf("live update moved from offset %d key %q to offset %d key %q", offset, focusKey, after.viewport.YOffset, after.focusables[after.focus].key)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+	m = updated.(Model)
+	if resumed := detailStateFromScreen(t, m.detail); !resumed.followingTail() {
+		t.Fatalf("G did not resume tail-following: focus %d/%d offset %d", resumed.focus, len(resumed.focusables)-1, resumed.viewport.YOffset)
+	}
+}
+
 func TestScrolledDetailTimelinePreservesPositionOnLiveUpdate(t *testing.T) {
 	events := []model.Event{{Kind: model.EventUser, Text: "Survey the crater"}}
 	for index := range 8 {

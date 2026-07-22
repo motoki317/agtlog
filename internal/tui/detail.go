@@ -233,7 +233,7 @@ func (d *detailState) scrollWheel(button tea.MouseButton) {
 }
 
 func (d *detailState) resize(width, height int) {
-	pinned := d.tab == tabTimeline && len(d.rendered) > 0 && d.pinnedToBottom()
+	pinned := len(d.rendered) > 0 && d.followingTail()
 	anchorDetail, anchorOffset := -1, 0
 	if d.tab == tabInfo {
 		anchorDetail, anchorOffset = d.renderedViewportAnchor()
@@ -374,6 +374,17 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 
 func (d *detailState) pinnedToBottom() bool {
 	return d.viewport.AtBottom() || d.viewport.YOffset == d.bottomAnchorOffset()
+}
+
+// followingTail reports whether the timeline should reveal newly appended events.
+// The viewport alone is not enough: the cursor moves inside the last screenful
+// without scrolling it, so a viewport-only test would drag the cursor to the
+// newest event while the reader is still reading an earlier one. G re-enables it.
+func (d *detailState) followingTail() bool {
+	if d.tab != tabTimeline || !d.pinnedToBottom() {
+		return false
+	}
+	return len(d.focusables) == 0 || d.focus == len(d.focusables)-1
 }
 
 func (d *detailState) bottomAnchorOffset() int {
@@ -1090,7 +1101,7 @@ func wordWrapRows(value string, width int) []string {
 }
 
 func (d *detailState) rebuildPreservingViewport() {
-	pinned := d.tab == tabTimeline && d.pinnedToBottom()
+	pinned := d.followingTail()
 	anchorDetail, anchorOffset := d.renderedViewportAnchor()
 	d.rebuild()
 	if pinned {

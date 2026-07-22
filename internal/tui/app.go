@@ -654,7 +654,7 @@ func sameItemEvent(previous, replacement model.Event) bool {
 
 func (m *Model) replacementDetailState(previous *detailState, session, root *model.Session) *detailState {
 	offset := previous.viewport.YOffset
-	pinned := previous.tab == tabTimeline && previous.pinnedToBottom()
+	pinned := previous.followingTail()
 	focusKey := ""
 	if len(previous.focusables) > 0 {
 		focusKey = previous.focusables[previous.focus].key
