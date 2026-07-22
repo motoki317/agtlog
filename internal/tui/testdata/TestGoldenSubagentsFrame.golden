@@ -15,4 +15,4 @@
 │                                                                                        │
 │                                                                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-j/k scroll   ↵ open   tab switch   T time   esc back   ? help   q quit
+j/k scroll   ←/→ column   ⇧O sort   ↵ open   tab switch   T time   esc back   q quit

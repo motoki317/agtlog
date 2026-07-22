@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"sort"
 	"strings"
 	"time"
 
@@ -31,7 +30,8 @@ type Model struct {
 	visibleCost       model.Cost
 	filter            textinput.Model
 	filtering         bool
-	sort              sortMode
+	sortState         sortState
+	columnFocus       listColumnKind
 	agent             agentFilter
 	screen            screen
 	detail            detailScreen
@@ -63,14 +63,6 @@ const mouseWheelRows = 3
 const (
 	screenList screen = iota
 	screenDetail
-)
-
-type sortMode int
-
-const (
-	sortAge sortMode = iota
-	sortTokens
-	sortCost
 )
 
 type agentFilter int
@@ -213,6 +205,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if size, ok := msg.(tea.WindowSizeMsg); ok {
 		selected := m.selectedIdentity()
 		m.width, m.height = max(1, size.Width), max(3, size.Height)
+		m.columnFocus = snapColumnFocus(m.columnFocus, m.visibleListColumns(), sessionListColumnOrder)
 		m.syncList(selected)
 		if m.detail != nil {
 			m.detail.resize(m.width, m.height)
@@ -283,14 +276,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if keyMsg, ok := msg.(tea.KeyMsg); ok && key.Matches(keyMsg, m.keys.Collapse, m.keys.Expand) {
-			if detail, ok := m.detail.(*detailState); ok {
+			if detail, ok := m.detail.(*detailState); ok && detail.tab == tabTimeline {
 				if key.Matches(keyMsg, m.keys.Collapse) {
 					detail.collapseFocused()
 				} else {
 					detail.expandFocused()
 				}
+				return m, nil
 			}
-			return m, nil
 		}
 		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "enter" || key.String() == "l") {
 			if m.activateDetailSelection() {
@@ -319,8 +312,32 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncList(m.filterSelection)
 		return m, tea.Batch(focusCmd, inputCmd)
 	}
-	if key, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.String() == "s" {
-		m.sort = (m.sort + 1) % 3
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.Matches(keyMsg, m.keys.SortColumn) {
+		m.sortState = m.sortState.press(m.columnFocus)
+		m.rebuildList()
+		return m, nil
+	}
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.Matches(keyMsg, m.keys.ColumnLeft, m.keys.ColumnRight) {
+		delta := -1
+		if key.Matches(keyMsg, m.keys.ColumnRight) {
+			delta = 1
+		}
+		m.columnFocus = moveColumnFocus(m.columnFocus, m.visibleListColumns(), sessionListColumnOrder, delta)
+		return m, nil
+	}
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.Matches(keyMsg, m.keys.SortAge) {
+		if columnVisible(columnAge, m.visibleListColumns()) {
+			m.columnFocus = columnAge
+		}
+		m.sortState = m.sortState.press(columnAge)
+		m.rebuildList()
+		return m, nil
+	}
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.Matches(keyMsg, m.keys.SortTitle) {
+		if columnVisible(columnTitle, m.visibleListColumns()) {
+			m.columnFocus = columnTitle
+		}
+		m.sortState = m.sortState.press(columnTitle)
 		m.rebuildList()
 		return m, nil
 	}
@@ -431,6 +448,8 @@ func (m *Model) activateDetailSelection() bool {
 		child.crumbs = crumbs
 		child.defaultExpanded = detail.defaultExpanded
 		child.wrap = wrap
+		child.subagentSort = detail.subagentSort
+		child.subagentColumnFocus = detail.subagentColumnFocus
 		child.focus = -1
 		child.resize(m.width, m.height)
 		child.anchorBottom()
@@ -653,6 +672,8 @@ func (m *Model) replacementDetailState(previous *detailState, session, root *mod
 	replacement.defaultExpanded = previous.defaultExpanded
 	replacement.crumbs = detailBreadcrumbs(root, session)
 	replacement.tab = previous.tab
+	replacement.subagentSort = previous.subagentSort
+	replacement.subagentColumnFocus = previous.subagentColumnFocus
 	replacement.subagentSelection = previous.subagentSelection
 	replacement.focus = previous.focus
 	if pinned {
@@ -662,6 +683,9 @@ func (m *Model) replacementDetailState(previous *detailState, session, root *mod
 		replacement.expanded[key] = expanded
 	}
 	replacement.resize(m.width, m.height)
+	if replacement.tab == tabSubagents {
+		replacement.viewport.SetYOffset(offset)
+	}
 	if replacement.tab == tabSubagents && selectedSubagent != "" {
 		for index, item := range replacement.subagents {
 			if sessionIdentity(item.s) == selectedSubagent {
@@ -683,7 +707,7 @@ func (m *Model) replacementDetailState(previous *detailState, session, root *mod
 	}
 	if pinned {
 		replacement.anchorBottom()
-	} else {
+	} else if replacement.tab != tabSubagents {
 		replacement.viewport.SetYOffset(offset)
 	}
 	return replacement
@@ -703,6 +727,7 @@ func (m *Model) cycleTheme() {
 
 func (m *Model) toggleTimeFormat() {
 	m.absoluteTime = !m.absoluteTime
+	m.columnFocus = snapColumnFocus(m.columnFocus, m.visibleListColumns(), sessionListColumnOrder)
 	m.refreshDetailTimes()
 }
 
@@ -831,17 +856,11 @@ func cloneSessionGraph(session *model.Session, cloned map[*model.Session]*model.
 
 func (m *Model) rebuildList() {
 	selected := m.selectedIdentity()
-	sort.SliceStable(m.sessions, func(i, j int) bool {
-		left, right := m.sessions[i], m.sessions[j]
-		switch m.sort {
-		case sortTokens:
-			return left.TotalUsage().TotalTokens() > right.TotalUsage().TotalTokens()
-		case sortCost:
-			return left.TotalCost().USD > right.TotalCost().USD
-		default:
-			return left.UpdatedAt.After(right.UpdatedAt)
-		}
-	})
+	state := m.sortState
+	if !state.active {
+		state = sortState{kind: columnAge, desc: true, active: true}
+	}
+	sortSessions(m.sessions, state)
 	m.applyFilter()
 	m.syncList(selected)
 }

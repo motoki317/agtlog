@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -213,6 +214,20 @@ func TestListFooterKeepsMovementHintUnderPressure(t *testing.T) {
 	}
 }
 
+func TestListKeyBarAdvertisesColumnSorting(t *testing.T) {
+	m := NewModel(nil, nil)
+	m.width = 160
+	keyBar := ansi.Strip(m.renderKeyBar())
+	for _, want := range []string{"←/→ column", "⇧O sort"} {
+		if !strings.Contains(keyBar, want) {
+			t.Errorf("list key bar missing %q: %q", want, keyBar)
+		}
+	}
+	if strings.Contains(keyBar, "s sort") {
+		t.Fatalf("list key bar retained deleted sort key: %q", keyBar)
+	}
+}
+
 func TestSubagentColumnUsesAccentStyle(t *testing.T) {
 	unsetEnv(t, "NO_COLOR")
 	profile := lipgloss.ColorProfile()
@@ -321,6 +336,12 @@ func TestNumericCellsFitStandardColumns(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFormatCostPreservesPositiveInfinity(t *testing.T) {
+	if got := formatCost(model.Cost{USD: math.Inf(1)}); got != "$∞" {
+		t.Fatalf("formatCost(+Inf) = %q, want $∞", got)
 	}
 }
 
@@ -626,20 +647,96 @@ func TestFilterAcceptsCoalescedRapidInput(t *testing.T) {
 	}
 }
 
-func TestSortCyclesFromRecentToTokens(t *testing.T) {
+func TestColumnSortKeysCycleBackToClearedOrder(t *testing.T) {
 	sessions := []*model.Session{
-		{ID: "large", UpdatedAt: time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC), Usage: []model.Usage{{InputTokens: 900}}},
-		{ID: "recent", UpdatedAt: time.Date(2026, 1, 2, 4, 0, 0, 0, time.UTC), Usage: []model.Usage{{InputTokens: 100}}},
+		{ID: "older", Agent: model.AgentClaude, UpdatedAt: time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)},
+		{ID: "recent", Agent: model.AgentCodex, UpdatedAt: time.Date(2026, 1, 2, 4, 0, 0, 0, time.UTC)},
 	}
 	m := NewModel(sessions, nil)
 	if m.visible[0].ID != "recent" {
 		t.Fatalf("default first session = %q, want recent", m.visible[0].ID)
 	}
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	for step, want := range []string{"older", "recent", "recent"} {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortColumnKey)})
+		m = updated.(Model)
+		if got := m.visible[0].ID; got != want {
+			t.Fatalf("focused sort step %d first session = %q, want %q", step+1, got, want)
+		}
+	}
+	if m.sortState.active {
+		t.Fatalf("focused sort after third press = %#v, want cleared", m.sortState)
+	}
+
+	for step, want := range []string{"older", "recent", "recent"} {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortAgeKey)})
+		m = updated.(Model)
+		if got := m.visible[0].ID; got != want {
+			t.Fatalf("age sort step %d first session = %q, want %q", step+1, got, want)
+		}
+	}
+	if m.sortState.active || m.columnFocus != columnAge {
+		t.Fatalf("age shortcut final state = sort %#v focus %v, want cleared sort with age focus", m.sortState, m.columnFocus)
+	}
+}
+
+func TestTitleShortcutSortsAndOpensTheSelectedIdentity(t *testing.T) {
+	now := time.Date(2026, time.July, 22, 12, 0, 0, 0, time.UTC)
+	target := &model.Session{ID: "target", Path: "/workspace/target.jsonl", Title: "Zulu", UpdatedAt: now}
+	alpha := &model.Session{ID: "alpha", Path: "/workspace/alpha.jsonl", Title: "Alpha", UpdatedAt: now.Add(-time.Hour)}
+	m := NewModel([]*model.Session{target, alpha}, nil)
+	wantIdentity := sessionIdentity(target)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortTitleKey)})
 	m = updated.(Model)
-	if m.visible[0].ID != "large" {
-		t.Fatalf("token-sorted first session = %q, want large", m.visible[0].ID)
+	if !m.sortState.active || m.sortState.kind != columnTitle || m.sortState.desc || m.columnFocus != columnTitle {
+		t.Fatalf("title shortcut state = sort %#v focus %v, want active ascending title", m.sortState, m.columnFocus)
+	}
+	gotIdentity := m.selectedIdentity()
+	if m.visible[0] != alpha || gotIdentity != wantIdentity {
+		t.Fatalf("title-sorted list = %#v with selection %q, want alpha first and %q selected", m.visible, gotIdentity, wantIdentity)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if got := detailStateFromScreen(t, m.detail).session; got != target {
+		t.Fatalf("opened session = %#v, want selected target %#v", got, target)
+	}
+}
+
+func TestListSortingDoesNotMutateCallerOwnedSlice(t *testing.T) {
+	first := &model.Session{ID: "zulu", Title: "Zulu", UpdatedAt: time.Date(2026, time.July, 22, 11, 0, 0, 0, time.UTC)}
+	second := &model.Session{ID: "alpha", Title: "Alpha", UpdatedAt: first.UpdatedAt.Add(time.Hour)}
+	sessions := []*model.Session{first, second}
+	m := NewModel(sessions, nil)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortTitleKey)})
+	m = updated.(Model)
+	if m.visible[0] != second {
+		t.Fatalf("title-sorted first session = %q, want alpha", m.visible[0].ID)
+	}
+	if sessions[0] != first || sessions[1] != second {
+		t.Fatalf("caller-owned session order mutated to %q, %q", sessions[0].ID, sessions[1].ID)
+	}
+}
+
+func TestListHeaderAndSummaryTrackSortCycle(t *testing.T) {
+	m := NewModel([]*model.Session{{ID: "route", Agent: model.AgentClaude}}, nil)
+	for step, wantHeader := range []string{"AGENT↑", "AGENT↓", "AGENT "} {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortColumnKey)})
+		m = updated.(Model)
+		view := ansi.Strip(m.View())
+		if !strings.Contains(view, wantHeader) {
+			t.Fatalf("sort step %d view missing header %q:\n%s", step+1, wantHeader, view)
+		}
+		if step < 2 {
+			wantSummary := "sort:agent" + []string{"↑", "↓"}[step]
+			if !strings.Contains(m.listSummary(), wantSummary) {
+				t.Fatalf("sort step %d summary = %q, want %q", step+1, m.listSummary(), wantSummary)
+			}
+		} else if strings.Contains(m.listSummary(), "sort:") {
+			t.Fatalf("cleared sort summary retained state: %q", m.listSummary())
+		}
 	}
 }
 
@@ -656,7 +753,7 @@ func TestSelectionIdentitySurvivesSortFilterAndResize(t *testing.T) {
 	want := sessionIdentity(sessions[1])
 
 	for _, key := range []tea.KeyMsg{
-		{Type: tea.KeyRunes, Runes: []rune{'s'}},
+		{Type: tea.KeyRunes, Runes: []rune(sortColumnKey)},
 		{Type: tea.KeyRunes, Runes: []rune{'/'}},
 		{Type: tea.KeyRunes, Runes: []rune("lunar")},
 	} {
@@ -673,6 +770,39 @@ func TestSelectionIdentitySurvivesSortFilterAndResize(t *testing.T) {
 	}
 	if capacity := m.listRowCapacity(); capacity > 0 && (m.cursor < m.listOffset || m.cursor >= m.listOffset+capacity) {
 		t.Fatalf("selected row is outside window: cursor=%d offset=%d capacity=%d", m.cursor, m.listOffset, capacity)
+	}
+}
+
+func TestListColumnFocusTracksVisibleColumnsAcrossResize(t *testing.T) {
+	m := NewModel([]*model.Session{{ID: "route", Models: []string{"claude-sonnet-4-7"}}}, nil)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	m = updated.(Model)
+	if m.columnFocus != columnAgent {
+		t.Fatalf("focus after left boundary = %v, want agent", m.columnFocus)
+	}
+	for range 3 {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+		m = updated.(Model)
+	}
+	if m.columnFocus != columnModel {
+		t.Fatalf("focus after three right presses = %v, want model", m.columnFocus)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortColumnKey)})
+	m = updated.(Model)
+
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 58, Height: 12})
+	m = updated.(Model)
+	if m.columnFocus != columnTitle {
+		t.Fatalf("focus after model column dropped = %v, want nearest title", m.columnFocus)
+	}
+	if !m.sortState.active || m.sortState.kind != columnModel {
+		t.Fatalf("sort after model column dropped = %#v, want retained model sort", m.sortState)
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(Model)
+	if m.columnFocus != columnAge {
+		t.Fatalf("focus after narrow right press = %v, want next visible age", m.columnFocus)
 	}
 }
 

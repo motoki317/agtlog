@@ -9,9 +9,10 @@ appears rolled up first and expands in place on demand.
 The list fills the terminal with three stacked regions:
 
 1. A rounded context panel titled `agtlog`. Its one-line summary contains visible session and
-   project counts, visible rolled-up cost, existing watch-root count, and active filter, sort,
-   agent, or refresh state. During filter editing, a second inner line shows the live `/query▊`
-   input and scrolls horizontally to keep the editing cursor visible.
+   project counts, visible rolled-up cost, existing watch-root count, and active filter, agent,
+   or refresh state. An active sort appears as its column and direction, such as `sort:cost↓`;
+   cleared sorting has no summary label. During filter editing, a second inner line shows the live
+   `/query▊` input and scrolls horizontally to keep the editing cursor visible.
 2. A rounded `Sessions` panel. It contains the column header and the scrollable row window and
    consumes all height left between the context panel and key bar. The title becomes
    `Sessions · filtered` when a text or agent filter is active. The bottom border shows the
@@ -19,7 +20,7 @@ The list fills the terminal with three stacked regions:
 3. An unbordered one-line key bar:
 
    ```text
-   / filter   s sort   a agent   ↵ open   r refresh   t theme   ? help   q quit
+   ↑/↓ move   / filter   ←/→ column   ⇧O sort   T time   ↵ open   ? help   q quit
    ```
 
 The detail screen uses the same structure. A rounded `Session` panel contains three metadata
@@ -74,25 +75,30 @@ estimated style for `~$`.
 The list interleaves all agents and shows one row per top-level session. Subagents do not become
 separate rows; their tokens and cost are included recursively in the parent.
 
-| Column | Width and alignment | Content |
-| --- | --- | --- |
-| `AGENT` | 6, left | `claude` or `codex`, with `!` replacing the last cell when the session has an error |
-| `PROJECT` | 8–18, left | Basename of the working directory |
-| `TITLE` | 20 minimum, left | Agent title or first useful user prompt; absorbs remaining width |
-| `MODEL` | 13, left | Costliest model, plus `+N` and missing-pricing `!` markers |
-| `AGE` | 4, right | Relative time such as `5m`, `2h`, `4d`, or `1.2y` |
-| `MSGS` | 5, right | Own message count |
-| `SUBS` | 4, right | Count of subagents folded recursively into the row; blank when none |
-| `TOKENS` | 9, right | Recursive total, human-scale (e.g. `1.0B`) |
-| `$` | 7, right | Recursive cost; Codex estimates use `~$` and partial totals use `!` |
+| Column | Width and alignment | Content | First sort |
+| --- | --- | --- | --- |
+| `AGENT` | 6, left | `claude` or `codex`, with `!` replacing the last cell when the session has an error | A→Z |
+| `PROJECT` | 8–18, left | Basename of the working directory | A→Z |
+| `TITLE` | 20 minimum, left | Agent title or first useful user prompt; absorbs remaining width | A→Z |
+| `MODEL` | 13, left | Costliest model, plus `+N` and missing-pricing `!` markers | A→Z |
+| `AGE` | 4, right | Relative time such as `5m`, `2h`, `4d`, or `1.2y` | Oldest first |
+| `MSGS` | 5, right | Own message count | Largest first |
+| `SUBS` | 4, right | Count of subagents folded recursively into the row; blank when none | Largest first |
+| `$` | 7, right | Recursive cost; Codex estimates use `~$` and partial totals use `!` | Largest first |
 
 Columns have one space between them. Header and data rows use identical widths and alignment.
 Slack grows `TITLE` first, then `PROJECT` up to 18 columns, then returns to `TITLE`. When the
 minimum set does not fit, columns disappear in this order: `MODEL`, `MSGS`, `SUBS`, `PROJECT`,
 then `AGE`.
-At ordinary narrow widths the retained core is `AGENT TITLE TOKENS $`; at smaller physical widths
-the title shrinks and the lowest-value numeric fields eventually disappear. Rows never wrap or
-cross the panel border.
+At ordinary narrow widths the retained core is `AGENT TITLE $`; at smaller physical widths the
+title shrinks and the lowest-value numeric field eventually disappears. Rows never wrap or cross
+the panel border.
+
+The focused header cell uses the selected style and starts at `AGENT`. `←` and `→` move it only
+among visible columns. An active sort replaces the final cell of its header with `↑` or `↓`; the
+column never widens for the arrow. A resize that removes the focused column moves focus to the
+nearest survivor but retains the active sort, so its arrow returns when the column reappears.
+`AGE` direction follows the raw update timestamp in both relative and absolute time modes.
 
 ## Width and glyph safety
 
@@ -145,29 +151,33 @@ diff rows or a muted `input:` section first, followed by a muted `output:` secti
 and multiline commands show their input. Each section keeps its head and tail when it exceeds the
 preview line cap and inserts one `… N lines hidden …` row.
 
-A subagent never expands inline. `enter`, `→`, or `l` on its row pushes the current detail state and
-opens the child on its Timeline tab. The `Session` title carries the project and ancestor session
-labels as a `›`-separated breadcrumb. `esc`, `←`, or `h` restores the nearest stored parent; the
-same key at the root returns to the session list. Each child inherits its parent's wrap setting,
-while later wrap changes affect only the active screen.
+A subagent never expands inline. `enter` or `l` on its row pushes the current detail state and opens
+the child on its Timeline tab. The `Session` title carries the project and ancestor session labels
+as a `›`-separated breadcrumb. `esc` or `h` restores the nearest stored parent; the same key at the
+root returns to the session list. Each child inherits its parent's wrap setting, while later wrap
+changes affect only the active screen.
 
-The Subagents tab lists every descendant in pre-order. Nested descendants are indented by depth;
-each row shows the agent, title, costliest model, recursive tokens, recursive cost, and relative
-age. Age is omitted first under width pressure so token and cost cells remain intact. Agent, token,
-and estimated-cost cells receive their semantic styles only after the plain row is fitted.
-The tab has its own selection, supports step and edge movement, and drills into the selected
-session on Timeline. A session without descendants shows `No subagents`.
+The Subagents tab lists every descendant in pre-order. Its cleared order sorts siblings within
+each parent by `StartedAt`, oldest first, so descendants remain beneath their parent and active
+siblings do not move as their `UpdatedAt` changes. Column sorts also reorder siblings rather than
+the flattened list. The `AGE` column is the exception to the cleared key: it sorts the displayed
+`UpdatedAt` value. Nested descendants are indented by depth; each row shows the agent, title,
+costliest model, recursive tokens, recursive cost, and relative age. Age is omitted first under
+width pressure so token and cost cells remain intact. Agent, token, and estimated-cost cells
+receive their semantic styles only after the plain row is fitted. The tab has its own selection,
+column focus, and sort state, supports step and edge movement, and drills into the selected session
+on Timeline. A session without descendants shows `No subagents`.
 
 Timeline rows wrap by default. `w` switches the current detail screen between hard wrapping and
 truncation. Wrapping operates on plain text before color is applied; every visual row retains
 the logical row's role, and selection highlights all wrapped rows belonging to the selected item.
 
-`space` is the only in-place expansion key. `enter`, `→`, or `l` opens the focused row: a
-subagent opens its session detail, while a turn, tool, thinking row, user message, compaction, or
-system event opens a pushed item view. A tool item shows its full input, diff, and output, bounded
-only by the model's per-field limit rather than the timeline preview cap. Other item views show the
-event's full text. The item title extends the session breadcrumb with a short event label. Its
-viewport supports `j`, `k`, `g`, `G`, and `w`; the normal back keys restore the parent detail.
+`space` is the only in-place expansion key. `enter` or `l` opens the focused row: a subagent opens
+its session detail, while a turn, tool, thinking row, user message, compaction, or system event
+opens a pushed item view. A tool item shows its full input, diff, and output, bounded only by the
+model's per-field limit rather than the timeline preview cap. Other item views show the event's
+full text. The item title extends the session breadcrumb with a short event label. Its viewport
+supports `j`, `k`, `g`, `G`, and `w`; the normal back keys restore the parent detail.
 
 ## Key budget
 
@@ -180,20 +190,23 @@ The detail key bar states the primary split as `space toggle · enter open`.
 | List | `pgup`/`pgdn`, `home`/`end` | Move by a page or jump to an edge |
 | List | `g`/`G` | Jump to top or bottom |
 | List | `/` | Fuzzy-filter agent, project, and title |
-| List | `s` | Cycle age, tokens, and cost sort |
+| List | `←`/`→` | Move focus among visible columns |
+| List | `shift+O` | Sort the focused column, reverse it, then clear the sort |
+| List | `shift+A` / `shift+N` | Sort AGE or TITLE directly with the same three-state cycle |
 | List | `a` | Cycle all, Claude, and Codex |
 | List | `enter` | Open detail |
 | List | `r` | Rediscover sessions |
 | Detail | `j`/`k`, `↑`/`↓`, `g`/`G` | Move and scroll; `g`/`G` jumps to top or bottom |
 | Detail | `space` | Expand or collapse the selected turn or tool; no-op on subagents |
-| Detail | `enter`, `→`, `l` | Open the focused row; subagents open session detail and other rows open an item view |
-| Detail | `tab`/`shift+tab` | Cycle Timeline and Subagents |
+| Timeline | `←`/`→` | Collapse or expand the focused row |
+| Subagents | `←`/`→`, `shift+O`, `shift+A`, `shift+N` | Move column focus or cycle the focused, AGE, or TITLE sort |
+| Detail | `enter`, `l` | Open the focused row; subagents open session detail and other rows open an item view |
+| Detail | `tab`/`shift+tab` | Cycle Timeline, Subagents, and Info |
 | Detail | `w` | Toggle timeline wrapping; wrapping is the default |
-| Detail | `J`/`K` | Next or previous subagent |
-| Detail | `esc`/`←`/`h` | Pop the current detail screen; return to the list at the root |
+| Detail | `esc`/`h` | Pop the current detail screen; return to the list at the root |
 | Item | `j`/`k`, `↑`/`↓`, `g`/`G` | Scroll by a row or jump to an edge |
 | Item | `w` | Toggle wrapping; wrapping is the default |
-| Item | `esc`/`←`/`h` | Restore the parent detail screen |
+| Item | `esc`/`h` | Restore the parent detail screen |
 | Both | `t` | Cycle color themes; no-op in mono |
 | Both | `?` | Toggle full help |
 | Both | `q`/`ctrl-c` | Quit |

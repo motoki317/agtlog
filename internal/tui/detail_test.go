@@ -1002,6 +1002,181 @@ func TestSubagentsTabListsAllDescendantsInPreOrder(t *testing.T) {
 	}
 }
 
+func TestSubagentsDefaultSortsSiblingsOldestFirstWithinTree(t *testing.T) {
+	start := time.Date(2026, time.July, 22, 8, 0, 0, 0, time.UTC)
+	earlyChild := &model.Session{ID: "early-child", StartedAt: start.Add(time.Hour)}
+	early := &model.Session{ID: "early", StartedAt: start, Subagents: []*model.Session{earlyChild}}
+	lateChild := &model.Session{ID: "late-child", StartedAt: start.Add(3 * time.Hour)}
+	laterChild := &model.Session{ID: "later-child", StartedAt: start.Add(4 * time.Hour)}
+	late := &model.Session{ID: "late", StartedAt: start.Add(2 * time.Hour), Subagents: []*model.Session{laterChild, lateChild}}
+	root := &model.Session{ID: "root", Subagents: []*model.Session{late, early}}
+
+	flattened := flattenSubagents(root, sortState{})
+	want := []struct {
+		id    string
+		depth int
+	}{
+		{id: "early", depth: 0},
+		{id: "early-child", depth: 1},
+		{id: "late", depth: 0},
+		{id: "late-child", depth: 1},
+		{id: "later-child", depth: 1},
+	}
+	for index, expected := range want {
+		if got := flattened[index]; got.s.ID != expected.id || got.depth != expected.depth {
+			t.Fatalf("flattened[%d] = %s at depth %d, want %s at depth %d", index, got.s.ID, got.depth, expected.id, expected.depth)
+		}
+	}
+}
+
+func TestSubagentActiveSortPreservesParentChildPreorder(t *testing.T) {
+	child := &model.Session{ID: "child", Title: "Aardvark"}
+	alpha := &model.Session{ID: "alpha", Title: "Alpha"}
+	zulu := &model.Session{ID: "zulu", Title: "Zulu", Subagents: []*model.Session{child}}
+	root := &model.Session{ID: "root", Subagents: []*model.Session{zulu, alpha}}
+
+	for _, test := range []struct {
+		name string
+		desc bool
+		want []string
+	}{
+		{name: "ascending", want: []string{"alpha", "zulu", "child"}},
+		{name: "descending", desc: true, want: []string{"zulu", "child", "alpha"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			flattened := flattenSubagents(root, sortState{kind: columnTitle, desc: test.desc, active: true})
+			for index, want := range test.want {
+				if flattened[index].s.ID != want {
+					t.Fatalf("flattened[%d] = %q, want %q", index, flattened[index].s.ID, want)
+				}
+			}
+			for index, item := range flattened {
+				if item.s == child && (index == 0 || flattened[index-1].s != zulu || item.depth != 1) {
+					t.Fatalf("child at index %d depth %d is not directly under zulu", index, item.depth)
+				}
+			}
+		})
+	}
+}
+
+func TestSubagentSortingDoesNotMutateSessionGraph(t *testing.T) {
+	firstChild := &model.Session{ID: "first-child", Title: "Zulu"}
+	secondChild := &model.Session{ID: "second-child", Title: "Alpha"}
+	first := &model.Session{ID: "first", Title: "Zulu", Subagents: []*model.Session{firstChild, secondChild}}
+	second := &model.Session{ID: "second", Title: "Alpha"}
+	root := &model.Session{ID: "root", Subagents: []*model.Session{first, second}}
+	rootBefore := append([]*model.Session(nil), root.Subagents...)
+	childBefore := append([]*model.Session(nil), first.Subagents...)
+
+	flattenSubagents(root, sortState{kind: columnTitle, active: true})
+
+	if !slices.Equal(root.Subagents, rootBefore) {
+		t.Fatalf("root children mutated from %#v to %#v", rootBefore, root.Subagents)
+	}
+	if !slices.Equal(first.Subagents, childBefore) {
+		t.Fatalf("nested children mutated from %#v to %#v", childBefore, first.Subagents)
+	}
+}
+
+func TestSubagentSelectionSurvivesResortByIdentity(t *testing.T) {
+	first := &model.Session{ID: "first", Title: "Zulu"}
+	selected := &model.Session{ID: "selected", Title: "Alpha"}
+	detail := newDetailState(&model.Session{ID: "root", Subagents: []*model.Session{first, selected}}, 80, 12, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	detail.update(tea.KeyMsg{Type: tea.KeyDown})
+
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortTitleKey)})
+
+	if detail.subagents[0].s != selected {
+		t.Fatalf("title-sorted first subagent = %q, want selected", detail.subagents[0].s.ID)
+	}
+	if got := detail.focusedSubagent(); got != selected {
+		t.Fatalf("focused subagent after sort = %#v, want selected identity", got)
+	}
+}
+
+func TestSubagentAgeShortcutCyclesBackToStartedOrder(t *testing.T) {
+	start := time.Date(2026, time.July, 22, 8, 0, 0, 0, time.UTC)
+	oldUpdate := &model.Session{ID: "old-update", StartedAt: start.Add(time.Hour), UpdatedAt: start}
+	newUpdate := &model.Session{ID: "new-update", StartedAt: start, UpdatedAt: start.Add(time.Hour)}
+	detail := newDetailState(&model.Session{ID: "root", Subagents: []*model.Session{oldUpdate, newUpdate}}, 100, 12, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+
+	for step, want := range []string{"old-update", "new-update", "new-update"} {
+		detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortAgeKey)})
+		if got := detail.subagents[0].s.ID; got != want {
+			t.Fatalf("age shortcut step %d first = %q, want %q", step+1, got, want)
+		}
+	}
+	if detail.subagentSort.active || detail.subagentColumnFocus != columnAge {
+		t.Fatalf("age shortcut final state = sort %#v focus %v", detail.subagentSort, detail.subagentColumnFocus)
+	}
+}
+
+func TestSubagentColumnFocusTracksVisibleColumnsAcrossResize(t *testing.T) {
+	detail := newDetailState(&model.Session{ID: "root", Subagents: []*model.Session{{ID: "worker"}}}, 100, 12, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	detail.update(tea.KeyMsg{Type: tea.KeyLeft})
+	if detail.subagentColumnFocus != columnAgent {
+		t.Fatalf("focus after left boundary = %v, want agent", detail.subagentColumnFocus)
+	}
+	for range 2 {
+		detail.update(tea.KeyMsg{Type: tea.KeyRight})
+	}
+	if detail.subagentColumnFocus != columnModel {
+		t.Fatalf("focus after two right presses = %v, want model", detail.subagentColumnFocus)
+	}
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortColumnKey)})
+
+	detail.resize(35, 12)
+	if detail.subagentColumnFocus != columnTitle {
+		t.Fatalf("focus after model column dropped = %v, want nearest title", detail.subagentColumnFocus)
+	}
+	if !detail.subagentSort.active || detail.subagentSort.kind != columnModel {
+		t.Fatalf("sort after model column dropped = %#v, want retained model sort", detail.subagentSort)
+	}
+	detail.update(tea.KeyMsg{Type: tea.KeyRight})
+	if detail.subagentColumnFocus != columnTokens {
+		t.Fatalf("focus after narrow right press = %v, want next visible tokens", detail.subagentColumnFocus)
+	}
+}
+
+func TestSubagentSortStateSurvivesLiveUpdateAndDrill(t *testing.T) {
+	child := &model.Session{ID: "worker", Agent: model.AgentCodex, Path: "/workspace/worker.jsonl", Title: "Before"}
+	root := &model.Session{ID: "root", Agent: model.AgentClaude, Path: "/workspace/root.jsonl", Subagents: []*model.Session{child}}
+	m := NewModel([]*model.Session{root}, nil)
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyEnter},
+		{Type: tea.KeyTab},
+		{Type: tea.KeyRight},
+		{Type: tea.KeyRunes, Runes: []rune(sortColumnKey)},
+	} {
+		updated, _ := m.Update(key)
+		m = updated.(Model)
+	}
+	wantSort := detailStateFromScreen(t, m.detail).subagentSort
+	wantFocus := detailStateFromScreen(t, m.detail).subagentColumnFocus
+	if wantFocus != columnTitle || !wantSort.active || wantSort.kind != columnTitle {
+		t.Fatalf("Model-level right/sort state = sort %#v focus %v, want active title", wantSort, wantFocus)
+	}
+
+	replacement := cloneSession(root)
+	replacement.Subagents[0].Title = "After"
+	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+	m = updated.(Model)
+	refreshed := detailStateFromScreen(t, m.detail)
+	if refreshed.subagentSort != wantSort || refreshed.subagentColumnFocus != wantFocus {
+		t.Fatalf("live-update state = sort %#v focus %v, want sort %#v focus %v", refreshed.subagentSort, refreshed.subagentColumnFocus, wantSort, wantFocus)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	drilled := detailStateFromScreen(t, m.detail)
+	if drilled.subagentSort != wantSort || drilled.subagentColumnFocus != wantFocus {
+		t.Fatalf("drilled state = sort %#v focus %v, want inherited sort %#v focus %v", drilled.subagentSort, drilled.subagentColumnFocus, wantSort, wantFocus)
+	}
+}
+
 func TestMaximumSupportedSubagentDepthDrillsDirectly(t *testing.T) {
 	deepest := &model.Session{ID: "node-64", Agent: model.AgentCodex, Title: "Node 64"}
 	child := deepest
@@ -1665,8 +1840,15 @@ func TestDetailKeyBarsAdvertiseOnlyLiveContextualBindings(t *testing.T) {
 					t.Errorf("Timeline key bar missing %q: %q", want, keyBar)
 				}
 			}
-		} else if strings.Contains(keyBar, "E/C all") || strings.Contains(keyBar, "←/→ fold") {
-			t.Errorf("Subagents key bar advertised Timeline-only bulk action: %q", keyBar)
+		} else {
+			for _, want := range []string{"←/→ column", "⇧O sort"} {
+				if !strings.Contains(keyBar, want) {
+					t.Errorf("Subagents key bar missing %q: %q", want, keyBar)
+				}
+			}
+			if strings.Contains(keyBar, "E/C all") || strings.Contains(keyBar, "←/→ fold") {
+				t.Errorf("Subagents key bar advertised Timeline-only bulk action: %q", keyBar)
+			}
 		}
 	}
 }
@@ -1751,21 +1933,37 @@ func TestEnterLoadsDetailLazily(t *testing.T) {
 	}
 }
 
-func TestDetailLoadPreservesSubagentsTab(t *testing.T) {
+func TestDetailLoadPreservesSubagentSortInput(t *testing.T) {
 	current := &model.Session{ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl"}
 	m := NewModel([]*model.Session{current}, nil)
 	m.screen = screenDetail
 	m.detail = newDetailState(current, m.width, m.height, m.styles)
-	detailStateFromScreen(t, m.detail).update(tea.KeyMsg{Type: tea.KeyTab})
+	detail := detailStateFromScreen(t, m.detail)
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	detail.update(tea.KeyMsg{Type: tea.KeyRight})
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortColumnKey)})
 	m.detailGeneration = 1
-	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge"}
 	loaded := cloneSession(current)
-	loaded.Subagents = []*model.Session{child}
+	loaded.Subagents = []*model.Session{
+		{ID: "zulu", Agent: model.AgentClaude, Title: "Zulu"},
+		{ID: "alpha", Agent: model.AgentClaude, Title: "Alpha"},
+		{ID: "mike", Agent: model.AgentClaude, Title: "Mike"},
+	}
 
 	updated, _ := m.Update(detailLoadedMsg{generation: 1, identity: sessionIdentity(current), session: loaded})
 	m = updated.(Model)
-	if detailStateFromScreen(t, m.detail).tab != tabSubagents || !strings.Contains(ansi.Strip(m.View()), "Scout ridge") {
-		t.Fatalf("detail load did not preserve and rebuild Subagents tab:\n%s", ansi.Strip(m.View()))
+	detail = detailStateFromScreen(t, m.detail)
+	if detail.tab != tabSubagents || detail.subagentColumnFocus != columnTitle || detail.subagentSort != (sortState{kind: columnTitle, active: true}) {
+		t.Fatalf("detail load state = tab %v sort %#v focus %v, want Subagents with active title sort", detail.tab, detail.subagentSort, detail.subagentColumnFocus)
+	}
+	if got := []string{detail.subagents[0].s.ID, detail.subagents[1].s.ID, detail.subagents[2].s.ID}; !slices.Equal(got, []string{"alpha", "mike", "zulu"}) {
+		t.Fatalf("loaded subagent order = %v, want alpha, mike, zulu", got)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if got := detailStateFromScreen(t, m.detail).session.ID; got != "alpha" {
+		t.Fatalf("immediate drill opened %q, want first sorted subagent alpha", got)
 	}
 }
 
@@ -1904,6 +2102,43 @@ func TestSubagentSelectionFollowsIdentityAcrossLiveReorder(t *testing.T) {
 	m = updated.(Model)
 	if detailStateFromScreen(t, m.detail).session != replacement.Subagents[2] {
 		t.Fatalf("drill after live reorder opened %q, want mapper", detailStateFromScreen(t, m.detail).session.ID)
+	}
+}
+
+func TestSubagentSelectionRemainsVisibleAcrossSortedLiveMove(t *testing.T) {
+	target := &model.Session{ID: "target", Agent: model.AgentClaude, Path: "/workspace/target.jsonl", Title: "A target"}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl",
+		Subagents: []*model.Session{target},
+	}
+	for index := 1; index < 12; index++ {
+		root.Subagents = append(root.Subagents, &model.Session{
+			ID: fmt.Sprintf("worker-%02d", index), Agent: model.AgentClaude,
+			Path: fmt.Sprintf("/workspace/worker-%02d.jsonl", index), Title: fmt.Sprintf("Worker %02d", index),
+		})
+	}
+	m := NewModel([]*model.Session{root}, nil)
+	for _, msg := range []tea.Msg{
+		tea.WindowSizeMsg{Width: 80, Height: 12},
+		tea.KeyMsg{Type: tea.KeyEnter},
+		tea.KeyMsg{Type: tea.KeyTab},
+		tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortTitleKey)},
+	} {
+		updated, _ := m.Update(msg)
+		m = updated.(Model)
+	}
+
+	replacement := cloneSession(root)
+	replacement.Subagents[0].Title = "Zulu target"
+	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	if got := detail.focusedSubagent(); sessionIdentity(got) != sessionIdentity(target) {
+		t.Fatalf("selected identity after live move = %#v, want target", got)
+	}
+	selectedRow := detail.firstRenderedRow(detail.selectedLine)
+	if selectedRow < detail.viewport.YOffset || selectedRow >= detail.viewport.YOffset+detail.viewport.Height {
+		t.Fatalf("selected row %d outside viewport offset=%d height=%d", selectedRow, detail.viewport.YOffset, detail.viewport.Height)
 	}
 }
 

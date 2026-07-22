@@ -12,10 +12,13 @@ import (
 func TestListHelpIncludesEveryRequiredBinding(t *testing.T) {
 	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
 	view := m.helpView()
-	for _, want := range []string{"j/k ↑/↓", "pgup/pgdn page", "home/end/g/G edge", "/ filter", "s sort", "a agent", "T time", "enter open", "r refresh", "mouse wheel scroll · click select · click again open", "shift+drag terminal copy", "t theme", "? help", "q/ctrl-c quit"} {
+	for _, want := range []string{"j/k ↑/↓", "pgup/pgdn page", "home/end/g/G edge", "/ filter", "←/→ column", "⇧O sort", "⇧A age", "⇧N title", "a agent", "T time", "enter open", "r refresh", "mouse wheel scroll · click select · click again open", "shift+drag terminal copy", "t theme", "? help", "q/ctrl-c quit"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("list help missing %q:\n%s", want, view)
 		}
+	}
+	if strings.Contains(view, "s sort") {
+		t.Fatalf("list help retained deleted sort key:\n%s", view)
 	}
 }
 
@@ -47,6 +50,27 @@ func TestDetailHelpKeepsBindingsVisibleAtFortyColumns(t *testing.T) {
 	}
 	if strings.Contains(view, "…") {
 		t.Fatalf("40-column detail help truncated a binding:\n%s", view)
+	}
+}
+
+func TestSubagentsHelpIncludesOnlyTableBindings(t *testing.T) {
+	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
+	m.screen = screenDetail
+	detail := newDetailState(&model.Session{ID: "route"}, m.width, m.height, m.styles)
+	detail.tab = tabSubagents
+	detail.rebuild()
+	m.detail = detail
+	view := m.helpView()
+
+	for _, want := range []string{"j/k scroll", "g/G edge", "←/→ column", "⇧O sort", "⇧A age", "⇧N title", "enter/l open", "tab tabs", "T time", "mouse wheel scroll · click select", "esc/h back"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("Subagents help missing %q:\n%s", want, view)
+		}
+	}
+	for _, unwanted := range []string{"←/→ fold", "space toggle", "expand all", "collapse all", "click select/toggle"} {
+		if strings.Contains(view, unwanted) {
+			t.Errorf("Subagents help advertises inapplicable %q:\n%s", unwanted, view)
+		}
 	}
 }
 

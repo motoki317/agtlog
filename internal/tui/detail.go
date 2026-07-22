@@ -16,29 +16,31 @@ import (
 )
 
 type detailState struct {
-	session           *model.Session
-	crumbs            []string
-	viewport          viewport.Model
-	expanded          map[string]bool
-	defaultExpanded   bool
-	focus             int
-	focusables        []detailFocus
-	width             int
-	height            int
-	now               time.Time
-	absoluteTime      bool
-	loading           bool
-	err               error
-	styles            styles
-	wrap              bool
-	tab               detailTab
-	subagentTotal     int
-	subagentSelection int
-	subagents         []flattenedSubagent
-	lines             []detailLine
-	rendered          []renderedRow
-	renderedStarts    []int
-	selectedLine      int
+	session             *model.Session
+	crumbs              []string
+	viewport            viewport.Model
+	expanded            map[string]bool
+	defaultExpanded     bool
+	focus               int
+	focusables          []detailFocus
+	width               int
+	height              int
+	now                 time.Time
+	absoluteTime        bool
+	loading             bool
+	err                 error
+	styles              styles
+	wrap                bool
+	tab                 detailTab
+	subagentTotal       int
+	subagentSort        sortState
+	subagentColumnFocus listColumnKind
+	subagentSelection   int
+	subagents           []flattenedSubagent
+	lines               []detailLine
+	rendered            []renderedRow
+	renderedStarts      []int
+	selectedLine        int
 }
 
 type renderedRow struct {
@@ -240,6 +242,7 @@ func (d *detailState) resize(width, height int) {
 	layout := newDetailLayout(d.height)
 	d.viewport.Width = max(1, d.width-2)
 	d.viewport.Height = max(1, layout.contentHeight)
+	d.subagentColumnFocus = snapColumnFocus(d.subagentColumnFocus, d.visibleSubagentColumns(), subagentColumnOrder)
 	d.rebuild()
 	if pinned {
 		d.anchorBottom()
@@ -268,6 +271,30 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		return cmd
 	}
 	switch key.String() {
+	case sortColumnKey:
+		if d.tab == tabSubagents {
+			d.sortSubagents(d.subagentColumnFocus)
+		}
+	case sortAgeKey:
+		if d.tab == tabSubagents {
+			d.sortSubagents(columnAge)
+		}
+	case sortTitleKey:
+		if d.tab == tabSubagents {
+			d.sortSubagents(columnTitle)
+		}
+	case "left", "right":
+		if d.tab == tabSubagents {
+			delta := -1
+			if key.String() == "right" {
+				delta = 1
+			}
+			d.subagentColumnFocus = moveColumnFocus(d.subagentColumnFocus, d.visibleSubagentColumns(), subagentColumnOrder, delta)
+			break
+		}
+		var cmd tea.Cmd
+		d.viewport, cmd = d.viewport.Update(msg)
+		return cmd
 	case "tab":
 		d.tab = (d.tab + 1) % 3
 		d.viewport.SetYOffset(0)
@@ -782,10 +809,21 @@ func formatTokenFlow(usage model.Usage) string {
 }
 
 func (d *detailState) rebuildSubagents() {
-	d.subagents = flattenSubagents(d.session)
+	d.rebuildSubagentsKeeping("")
+}
+
+func (d *detailState) rebuildSubagentsKeeping(selected string) {
+	d.focusables = nil
+	d.subagents = flattenSubagents(d.session, d.subagentSort)
+	for index, item := range d.subagents {
+		if sessionIdentity(item.s) == selected {
+			d.subagentSelection = index
+			break
+		}
+	}
 	available := max(0, d.viewport.Width-2)
 	columns := subagentColumns(available)
-	header := detailLine{text: subagentHeader(columns), nowrap: true, role: detailHeader}
+	header := detailLine{text: subagentHeader(columns, d.subagentSort, d.subagentColumnFocus, d.styles).plain, nowrap: true, role: detailHeader}
 	if len(d.subagents) == 0 {
 		d.lines = []detailLine{header, {text: "No subagents", role: detailSecondary}}
 		d.selectedLine = -1
@@ -808,6 +846,18 @@ func (d *detailState) rebuildSubagents() {
 		d.selectedLine = subagentDetailLine(d.subagentSelection)
 	}
 	d.rebuildRendered()
+}
+
+func (d *detailState) sortSubagents(kind listColumnKind) {
+	selected := ""
+	if session := d.focusedSubagent(); session != nil {
+		selected = sessionIdentity(session)
+	}
+	if columnVisible(kind, d.visibleSubagentColumns()) {
+		d.subagentColumnFocus = kind
+	}
+	d.subagentSort = d.subagentSort.press(kind)
+	d.rebuildSubagentsKeeping(selected)
 }
 
 func subagentDetailLine(selection int) int {
@@ -864,12 +914,31 @@ func subagentColumns(width int) []listColumn {
 	return columns
 }
 
-func subagentHeader(columns []listColumn) string {
-	cells := make([]string, len(columns))
+var subagentColumnOrder = []listColumnKind{
+	columnAgent,
+	columnTitle,
+	columnModel,
+	columnTokens,
+	columnCost,
+	columnAge,
+}
+
+func (d *detailState) visibleSubagentColumns() []listColumn {
+	return subagentColumns(max(0, d.viewport.Width-2))
+}
+
+func subagentHeader(columns []listColumn, state sortState, focus listColumnKind, styles styles) panelLine {
+	plainCells := make([]string, len(columns))
+	styledCells := make([]string, len(columns))
 	for index, column := range columns {
-		cells[index] = fitPlain(column.title, column.width, column.right)
+		cell := renderHeaderCell(column, state, column.kind == focus, styles)
+		plainCells[index] = cell.plain
+		styledCells[index] = cell.styled
 	}
-	return strings.Join(cells, " ")
+	return panelLine{
+		plain:  strings.Join(plainCells, " "),
+		styled: strings.Join(styledCells, styles.header.Render(" ")),
+	}
 }
 
 func subagentRow(item flattenedSubagent, now time.Time, columns []listColumn, modelName, tokens, cost string) string {
@@ -908,11 +977,23 @@ func subagentAgentCell(depth int, agent model.AgentKind, width int) string {
 	return indent + label
 }
 
-func flattenSubagents(session *model.Session) []flattenedSubagent {
+func flattenSubagents(session *model.Session, state sortState) []flattenedSubagent {
 	var flattened []flattenedSubagent
 	var appendChildren func(*model.Session, int)
 	appendChildren = func(parent *model.Session, depth int) {
-		for _, child := range parent.Subagents {
+		children := append([]*model.Session(nil), parent.Subagents...)
+		if state.active {
+			sortSessions(children, state)
+		} else {
+			sort.SliceStable(children, func(i, j int) bool {
+				left, right := children[i], children[j]
+				if left.StartedAt.IsZero() != right.StartedAt.IsZero() {
+					return !left.StartedAt.IsZero()
+				}
+				return left.StartedAt.Before(right.StartedAt)
+			})
+		}
+		for _, child := range children {
 			flattened = append(flattened, flattenedSubagent{depth: depth, s: child})
 			appendChildren(child, depth+1)
 		}
@@ -1802,7 +1883,7 @@ func detailKeyText(width int, mono bool, tab detailTab, wrap bool) string {
 	if tab == tabTimeline {
 		hints = append(hints, "←/→ fold", "space toggle", bulkHint, enterHint, "tab switch", wrapHint)
 	} else if tab == tabSubagents {
-		hints = append(hints, enterHint, "tab switch")
+		hints = append(hints, "←/→ column", "⇧"+sortColumnKey+" sort", enterHint, "tab switch")
 	} else {
 		hints = append(hints, "tab switch", wrapHint)
 	}
@@ -1817,7 +1898,7 @@ func detailKeyText(width int, mono bool, tab detailTab, wrap bool) string {
 	}
 	hints = append(hints, "? help", "q quit")
 	return fitKeyHints(width, hints, []string{
-		mouseHint, "t theme", "? help", "j/k scroll", "tab switch", wrapHint, bulkHint, "q quit", "space toggle", "←/→ fold", timeFormatKey + " time", enterHint,
+		mouseHint, "t theme", "? help", "j/k scroll", "tab switch", wrapHint, bulkHint, "⇧" + sortColumnKey + " sort", "←/→ column", "q quit", "space toggle", "←/→ fold", timeFormatKey + " time", enterHint,
 	})
 }
 
@@ -1969,6 +2050,12 @@ func (d *detailState) styleLine(line string, detail detailLine, selected, first 
 func (d *detailState) styleLineBody(line string, detail detailLine, first bool) string {
 	if detail.role == detailRow && detail.subagentSession != nil {
 		return d.styleSubagentLine(line, detail)
+	}
+	if detail.role == detailHeader && d.tab == tabSubagents {
+		markerWidth := min(2, ansi.StringWidth(line))
+		marker := ansi.Cut(line, 0, markerWidth)
+		header := subagentHeader(d.visibleSubagentColumns(), d.subagentSort, d.subagentColumnFocus, d.styles)
+		return d.styles.header.Render(marker) + header.styled
 	}
 	base := d.roleBaseStyle(detail.role)
 	if !first {
