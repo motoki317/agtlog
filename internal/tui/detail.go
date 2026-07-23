@@ -493,16 +493,16 @@ func (d *detailState) rebuildKeeping(key string) {
 	}
 }
 
+// setAllExpanded moves the default rather than stamping every row present now.
+// A live session keeps appending rows, and a row the reader has never seen must
+// follow the last bulk choice instead of reverting to the opening default.
 func (d *detailState) setAllExpanded(expanded bool) {
 	key := ""
 	if len(d.focusables) > 0 {
 		key = d.focusables[d.focus].key
 	}
-	keys := expandableTimelineKeys(d.session)
-	d.expanded = make(map[string]bool, len(keys))
-	for _, expandableKey := range keys {
-		d.expanded[expandableKey] = expanded
-	}
+	d.expanded = make(map[string]bool)
+	d.defaultExpanded = expanded
 	d.rebuildKeeping(key)
 }
 
@@ -1331,22 +1331,6 @@ func composeMetricRow(left, metrics string, width int) string {
 	left = ansi.Truncate(left, width-metricWidth-1, "…")
 	pad := width - ansi.StringWidth(left) - metricWidth
 	return left + strings.Repeat(" ", pad) + metrics
-}
-
-func expandableTimelineKeys(session *model.Session) []string {
-	keys := make([]string, 0, len(session.Events))
-	path := sessionIdentity(session)
-	for index, event := range session.Events {
-		switch {
-		case event.Kind == model.EventUser && textExpandable(event.Text):
-			keys = append(keys, timelineUserKey(path, index))
-		case event.Kind == model.EventToolCall && detailHasBody(event):
-			keys = append(keys, timelineEventKey(path, index))
-		case event.Kind == model.EventAssistantText && textExpandable(event.Text):
-			keys = append(keys, timelineEventKey(path, index))
-		}
-	}
-	return keys
 }
 
 func timelineEventKey(path string, index int) string {

@@ -158,6 +158,10 @@ first, followed by a muted `output:` section. Non-file tools and multiline comma
 input. Each section keeps its head and tail when it exceeds the preview line cap and inserts one
 `… N lines hidden …` row.
 
+`E` and `C` set the fold state every row takes unless the reader has folded that row itself. A
+followed session keeps appending rows, so the choice governs what arrives next as well as what is
+already on screen, and a drilled subagent opens under the same state.
+
 A subagent never expands inline. `enter` or `l` on its row pushes the current detail state and opens
 the child on its Timeline tab. The `Session` title carries the project and ancestor session labels
 as a `›`-separated breadcrumb. `esc` or `h` restores the nearest stored parent; the same key at the
@@ -206,6 +210,7 @@ The detail key bar states the primary split as `space toggle · enter open`.
 | Detail | `j`/`k`, `↑`/`↓`, `g`/`G` | Move and scroll; `g`/`G` jumps to top or bottom |
 | Detail | `space` | Expand or collapse the selected row's body; no-op on subagents |
 | Timeline | `←`/`→` | Collapse or expand the focused row |
+| Timeline | `E` / `C` | Expand or collapse every row, including the rows that arrive later |
 | Subagents | `←`/`→`, `shift+O`, `shift+A`, `shift+N` | Move column focus or cycle the focused, AGE, or TITLE sort |
 | Detail | `enter`, `l` | Open the focused row; subagents open session detail and other rows open an item view |
 | Detail | `tab`/`shift+tab` | Cycle Timeline, Subagents, and Info |

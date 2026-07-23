@@ -3297,8 +3297,8 @@ func TestExpandAllMarksEveryExpandableTimelineRow(t *testing.T) {
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 
 	for _, key := range expandableKeys {
-		if expanded, ok := detail.expanded[key]; !ok || !expanded {
-			t.Errorf("expandable key %q expanded = %t, present = %t; want true", key, expanded, ok)
+		if !detail.isExpanded(key) {
+			t.Errorf("expandable key %q stayed collapsed after expand-all", key)
 		}
 	}
 	lines := make([]string, len(detail.lines))
@@ -3330,8 +3330,8 @@ func TestCollapseAllClearsEveryExpandableTimelineRow(t *testing.T) {
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
 
 	for _, key := range expandableKeys {
-		if expanded, ok := detail.expanded[key]; !ok || expanded {
-			t.Errorf("expandable key %q expanded = %t, present = %t; want false", key, expanded, ok)
+		if detail.isExpanded(key) {
+			t.Errorf("expandable key %q stayed expanded after collapse-all", key)
 		}
 	}
 	lines := make([]string, len(detail.lines))
@@ -3341,6 +3341,35 @@ func TestCollapseAllClearsEveryExpandableTimelineRow(t *testing.T) {
 	visible := strings.Join(lines, "\n")
 	if !strings.Contains(visible, glyphCollapsed+" "+glyphTool) || strings.Contains(visible, "route clear") {
 		t.Errorf("collapse-all left nested tool body visible:\n%s", visible)
+	}
+}
+
+func TestRowArrivingAfterCollapseAllStaysCollapsed(t *testing.T) {
+	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Path: "/workspace/lunar.jsonl", Events: []model.Event{
+		{Kind: model.EventUser, Text: "Check the route"},
+	}}
+	m := NewModel([]*model.Session{session}, nil)
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'C'}}} {
+		updated, _ := m.Update(key)
+		m = updated.(Model)
+	}
+
+	grown := cloneSession(session)
+	grown.Events = append(grown.Events, model.Event{
+		Kind: model.EventToolCall, ToolName: "exec_command", ToolInput: "check-ridge",
+		Detail: &model.ToolDetail{Input: "check-ridge", Output: "ridge clear"},
+	})
+	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{grown}})
+	m = updated.(Model)
+
+	detail := detailStateFromScreen(t, m.detail)
+	lines := make([]string, len(detail.lines))
+	for index, line := range detail.lines {
+		lines[index] = line.text
+	}
+	visible := strings.Join(lines, "\n")
+	if !strings.Contains(visible, glyphCollapsed+" "+glyphTool) || strings.Contains(visible, "ridge clear") {
+		t.Errorf("row appended after collapse-all arrived expanded:\n%s", visible)
 	}
 }
 
