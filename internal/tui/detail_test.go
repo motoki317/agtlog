@@ -556,6 +556,111 @@ func TestThirdDetailTabExplainsCostAndRecursiveTree(t *testing.T) {
 	}
 }
 
+func TestInfoTabDisclosesOwnedGrossAndReplayOwners(t *testing.T) {
+	session := &model.Session{
+		ID: "replay", Agent: model.AgentClaude,
+		Usage:               []model.Usage{{Model: "model-a", InputTokens: 100}},
+		ModelCosts:          map[string]float64{"model-a": 0.10},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"model-a": {Input: testCostBuckets(100, 0.10)}},
+		Cost:                model.Cost{USD: 0.10},
+		DuplicatedUSD:       0.04,
+		DuplicatedUsage:     model.Usage{InputTokens: 40},
+		DuplicatedCount:     2,
+		DuplicatedByModel:   map[string]float64{"model-a": 0.04},
+		DuplicatedOwners: []model.DuplicateOwner{
+			{SessionID: "session-origin", Title: "Original route", USD: 0.03, Count: 1},
+			{SessionID: "session-parent", Title: "Parent branch", USD: 0.01, Count: 1},
+		},
+	}
+
+	text := ""
+	for _, line := range sessionInfoLines(session) {
+		text += line.text + "\n"
+	}
+	for _, want := range []string{
+		"owned: $0.06",
+		"gross: $0.10",
+		"replayed total: −$0.04, 2 requests",
+		"replayed −$0.03, 1 request, from Original route (session-origin)",
+		"replayed −$0.01, 1 request, from Parent branch (session-parent)",
+		"Owned model costs · $0.06",
+		"gross tokens:",
+		"Gross cost tree",
+		"gross total = gross own + Σ gross subs",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("duplicate Info tab missing %q:\n%s", want, text)
+		}
+	}
+	modelText := strings.Join(ownModelCostLines(session), "\n")
+	if !strings.Contains(modelText, "replayed") || !strings.Contains(modelText, "−$0.04") ||
+		!strings.Contains(modelText, "subtotal") || !strings.Contains(modelText, "$0.06") {
+		t.Fatalf("owned model breakdown did not subtract replayed cost:\n%s", modelText)
+	}
+}
+
+func TestInfoModelSubtotalUsesAuthoritativeLoggedCost(t *testing.T) {
+	recorded := 0.10
+	session := &model.Session{
+		Usage:               []model.Usage{{Model: "model-a", InputTokens: 100, CostUSD: &recorded}},
+		ModelCosts:          map[string]float64{"model-a": 0.10},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"model-a": {Input: testCostBuckets(100, 0.08)}},
+		Cost:                model.Cost{USD: 0.10},
+		DuplicatedUSD:       0.04,
+		DuplicatedCount:     1,
+		DuplicatedByModel:   map[string]float64{"model-a": 0.04},
+	}
+
+	text := strings.Join(ownModelCostLines(session), "\n")
+	for _, want := range []string{"logged cost", "$0.10", "replayed", "−$0.04", "subtotal", "$0.06"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("logged-cost model breakdown missing %q:\n%s", want, text)
+		}
+	}
+}
+
+func TestInfoTabWithoutDuplicatesOmitsOwnershipRows(t *testing.T) {
+	session := &model.Session{
+		Usage:      []model.Usage{{Model: "model-a", InputTokens: 10}},
+		ModelCosts: map[string]float64{"model-a": 0.10},
+		Cost:       model.Cost{USD: 0.10},
+	}
+	text := ""
+	for _, line := range sessionInfoLines(session) {
+		text += line.text + "\n"
+	}
+
+	if !strings.Contains(text, "total: $0.10") || !strings.Contains(text, "Own model costs · $0.10") ||
+		strings.Contains(text, "owned:") || strings.Contains(text, "gross:") ||
+		strings.Contains(text, "replayed") || strings.Contains(text, "Owned model costs") {
+		t.Fatalf("non-duplicate Info tab changed ownership disclosure:\n%s", text)
+	}
+}
+
+func TestDuplicateInfoRowsWrapWithinNarrowWidth(t *testing.T) {
+	session := &model.Session{
+		ID: "replay", Agent: model.AgentClaude, Cost: model.Cost{USD: 1},
+		DuplicatedUSD: 0.25, DuplicatedCount: 1,
+		DuplicatedOwners: []model.DuplicateOwner{{
+			SessionID: "session-origin", Title: "Earlier origin route", USD: 0.25, Count: 1,
+		}},
+	}
+	detail := newDetailState(session, 40, 30, newStyles())
+	detail.tab = tabInfo
+	detail.rebuild()
+	view := ansi.Strip(detail.view())
+
+	if !strings.Contains(view, "replayed total") || !strings.Contains(view, "replayed −$0.25") ||
+		!strings.Contains(view, "Earlier origin route") {
+		t.Fatalf("narrow duplicate Info omitted replay disclosure:\n%s", view)
+	}
+	for lineNumber, line := range strings.Split(view, "\n") {
+		if got := ansi.StringWidth(line); got > 40 {
+			t.Errorf("narrow duplicate Info line %d width = %d: %q", lineNumber+1, got, line)
+		}
+	}
+}
+
 func TestInfoTokenFlowNormalizesInclusiveInputBeforeSessionAggregation(t *testing.T) {
 	child := &model.Session{Usage: []model.Usage{{
 		InputTokens: 80, OutputTokens: 3, CacheReadTokens: 50, InputIncludesCacheRead: true,
@@ -1677,6 +1782,27 @@ func TestTimelineIsOneFlatChronologicalList(t *testing.T) {
 	}
 }
 
+func TestTimelineKeepsGrossEventCostWhenHeadlineIsOwned(t *testing.T) {
+	session := &model.Session{
+		ID: "replay", Agent: model.AgentClaude,
+		Cost: model.Cost{USD: 0.10}, DuplicatedUSD: 0.04,
+		Events: []model.Event{{
+			Kind: model.EventAssistantText, Text: "Route ready", Priced: true,
+			Usage: &model.Usage{OutputTokens: 10},
+			Cost:  model.CostBreakdown{Output: model.CostBuckets{{Tokens: 10, RatePerToken: 0.01}}},
+		}},
+	}
+
+	detail := newDetailState(session, 100, 20, newStyles())
+
+	if len(detail.lines) != 1 || !strings.Contains(detail.lines[0].metrics, "$0.10") {
+		t.Fatalf("timeline metrics = %#v, want gross event cost", detail.lines)
+	}
+	if headline := detail.headerPanelLines()[2].plain; !strings.Contains(headline, "total $0.06") {
+		t.Fatalf("detail headline = %q, want owned cost", headline)
+	}
+}
+
 func TestHarnessPromptKeepsNextRequestContext(t *testing.T) {
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Injected instructions", Harness: true},
@@ -2513,6 +2639,20 @@ func TestDetailHeaderShowsOnlyPerNodeCosts(t *testing.T) {
 	line := strings.TrimSpace(newDetailState(session, 120, 12, newStyles()).headerPanelLines()[2].plain)
 	if !strings.Contains(line, "total $3.00 │ own $1.00 │ subagents $2.00") || strings.Contains(line, "tokens") || strings.Contains(line, "1000") || strings.Contains(line, "3000") {
 		t.Fatalf("detail header accounting = %q, want cost-only nodes", line)
+	}
+}
+
+func TestDetailHeaderUsesOwnedCost(t *testing.T) {
+	child := &model.Session{Cost: model.Cost{USD: 2}}
+	session := &model.Session{
+		ID: "mission", Agent: model.AgentClaude,
+		Cost: model.Cost{USD: 10}, DuplicatedUSD: 4, Subagents: []*model.Session{child},
+	}
+
+	line := strings.TrimSpace(newDetailState(session, 120, 12, newStyles()).headerPanelLines()[2].plain)
+	if !strings.Contains(line, "total $8.00 │ own $6.00 │ subagents $2.00") ||
+		strings.Contains(line, "total $12") || strings.Contains(line, "own $10") {
+		t.Fatalf("detail header accounting = %q, want owned cost nodes", line)
 	}
 }
 

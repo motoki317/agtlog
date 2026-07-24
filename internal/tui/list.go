@@ -68,7 +68,7 @@ type sessionPresentation struct {
 }
 
 func newSessionPresentation(session *model.Session) sessionPresentation {
-	cost := session.TotalCost()
+	cost := session.OwnedCost()
 	return sessionPresentation{
 		cost: cost, subagentCount: subagentCount(session),
 		model: shortModelsWithCost(session, cost),
@@ -270,7 +270,7 @@ func subagentCount(session *model.Session) int {
 }
 
 func shortModels(session *model.Session) string {
-	return shortModelsWithCost(session, session.TotalCost())
+	return shortModelsWithCost(session, session.OwnedCost())
 }
 
 func shortModelsWithCost(session *model.Session, cost model.Cost) string {

@@ -149,9 +149,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "refresh: " + terminalText(refreshed.err.Error(), 160)
 			return m, nil
 		}
+		openIdentity := ""
+		var openOwnership ownershipAttribution
+		if root := m.detailRoot(); root != nil {
+			openIdentity = sessionIdentity(root.session)
+			openOwnership = snapshotOwnershipAttribution(root.session)
+		}
 		m.sessions = refreshed.sessions
 		m.status = "refreshed"
 		m.rebuildList()
+		if openIdentity != "" {
+			m.refreshOpenOwnership(openIdentity, openOwnership)
+		}
 		return m, nil
 	}
 	if loaded, ok := msg.(detailLoadedMsg); ok {
@@ -165,6 +174,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				root.rebuild()
 				return m, nil
 			}
+			for _, current := range m.sessions {
+				if sessionIdentity(current) == loaded.identity {
+					copyOwnershipAttribution(loaded.session, current)
+					break
+				}
+			}
 			m.replaceDetailTree(loaded.session)
 		}
 		return m, nil
@@ -174,9 +189,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		openIdentity := ""
 		openPath := ""
 		openChanged := false
+		var openOwnership ownershipAttribution
 		if root := m.detailRoot(); root != nil {
 			openIdentity = sessionIdentity(root.session)
 			openPath = root.session.Path
+			openOwnership = snapshotOwnershipAttribution(root.session)
 			for _, path := range update.RemovedPaths {
 				openChanged = openChanged || path == openPath
 			}
@@ -185,6 +202,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.applySessionUpdate(update)
+		if openIdentity != "" && !openChanged {
+			m.refreshOpenOwnership(openIdentity, openOwnership)
+		}
 		if openIdentity != "" && openChanged {
 			for _, session := range m.sessions {
 				if sessionIdentity(session) != openIdentity {
@@ -798,7 +818,99 @@ func (m *Model) applySessionUpdate(update source.SessionUpdate) {
 			m.sessions = append(m.sessions, session)
 		}
 	}
+	source.AttributeOwnership(m.sessions)
 	m.rebuildList()
+}
+
+type ownershipAttribution struct {
+	usd     float64
+	usage   model.Usage
+	count   int
+	byModel map[string]float64
+	owners  []model.DuplicateOwner
+}
+
+func snapshotOwnershipAttribution(session *model.Session) ownershipAttribution {
+	attribution := ownershipAttribution{
+		usd:     session.DuplicatedUSD,
+		usage:   session.DuplicatedUsage,
+		count:   session.DuplicatedCount,
+		byModel: make(map[string]float64, len(session.DuplicatedByModel)),
+		owners:  append([]model.DuplicateOwner(nil), session.DuplicatedOwners...),
+	}
+	for name, usd := range session.DuplicatedByModel {
+		attribution.byModel[name] = usd
+	}
+	return attribution
+}
+
+func (a ownershipAttribution) equalSession(session *model.Session) bool {
+	if a.usd != session.DuplicatedUSD || a.usage != session.DuplicatedUsage ||
+		a.count != session.DuplicatedCount || len(a.byModel) != len(session.DuplicatedByModel) ||
+		len(a.owners) != len(session.DuplicatedOwners) {
+		return false
+	}
+	for name, usd := range a.byModel {
+		if session.DuplicatedByModel[name] != usd {
+			return false
+		}
+	}
+	for index, owner := range a.owners {
+		if session.DuplicatedOwners[index] != owner {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *Model) refreshOpenOwnership(identity string, previous ownershipAttribution) {
+	var summary *model.Session
+	for _, session := range m.sessions {
+		if sessionIdentity(session) == identity {
+			summary = session
+			break
+		}
+	}
+	if summary == nil {
+		return
+	}
+	if previous.equalSession(summary) {
+		return
+	}
+	var root *detailState
+	if len(m.detailStack) == 0 {
+		root, _ = m.detail.(*detailState)
+	} else {
+		for index, screen := range m.detailStack {
+			if _, ok := screen.(*detailState); !ok {
+				continue
+			}
+			m.detailStack[index] = cloneDetailScreen(screen)
+			root, _ = m.detailStack[index].(*detailState)
+			break
+		}
+	}
+	if root == nil || sessionIdentity(root.session) != identity {
+		return
+	}
+	copyOwnershipAttribution(root.session, summary)
+	if root.tab == tabInfo {
+		root.rebuildPreservingViewport()
+	}
+}
+
+func copyOwnershipAttribution(target, source *model.Session) {
+	if target == source {
+		return
+	}
+	target.DuplicatedUSD = source.DuplicatedUSD
+	target.DuplicatedUsage = source.DuplicatedUsage
+	target.DuplicatedCount = source.DuplicatedCount
+	target.DuplicatedByModel = make(map[string]float64, len(source.DuplicatedByModel))
+	for name, usd := range source.DuplicatedByModel {
+		target.DuplicatedByModel[name] = usd
+	}
+	target.DuplicatedOwners = append([]model.DuplicateOwner(nil), source.DuplicatedOwners...)
 }
 
 type detailLoadedMsg struct {
@@ -949,7 +1061,7 @@ func (m *Model) updateVisibleSummary() {
 	total := model.Cost{}
 	for _, session := range m.visible {
 		projects[session.Project] = true
-		cost := session.TotalCost()
+		cost := session.OwnedCost()
 		total.USD += cost.USD
 		total.Estimated = total.Estimated || cost.Estimated
 		for _, name := range cost.MissingPricingModels {

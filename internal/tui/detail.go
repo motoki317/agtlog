@@ -554,23 +554,36 @@ func (d *detailState) rebuildInfo() {
 }
 
 func sessionInfoLines(session *model.Session) []detailLine {
-	totalCost := session.TotalCost()
-	totalLine := "total: " + formatCost(totalCost)
-	if len(totalCost.MissingPricingModels) > 0 {
-		missing := append([]string(nil), totalCost.MissingPricingModels...)
-		sort.Strings(missing)
-		for index := range missing {
-			missing[index] = displayModelName(missing[index])
+	grossCost := session.TotalCost()
+	lines := []detailLine{infoDetailLine("Cost", detailHeader)}
+	if session.DuplicatedUSD > 0 {
+		lines = append(lines,
+			infoDetailLine(infoCostLine("owned", session.OwnedCost()), detailRow),
+			infoDetailLine(infoCostLine("gross", grossCost), detailRow),
+			infoDetailLine(fmt.Sprintf("replayed total: %s, %s", formatReplayedCost(session.DuplicatedUSD, session.Cost.Estimated), requestCount(session.DuplicatedCount)), detailRow),
+		)
+		for _, owner := range session.DuplicatedOwners {
+			lines = append(lines, infoDetailLine(fmt.Sprintf("  replayed %s, %s, from %s",
+				formatReplayedCost(owner.USD, session.Cost.Estimated), requestCount(owner.Count), duplicateOwnerLabel(owner)), detailRow))
 		}
-		totalLine += " · missing pricing: " + strings.Join(missing, ", ")
+	} else {
+		lines = append(lines, infoDetailLine(infoCostLine("total", grossCost), detailRow))
 	}
-	lines := []detailLine{
-		infoDetailLine("Cost", detailHeader),
-		infoDetailLine(totalLine, detailRow),
-		infoDetailLine("tokens: "+formatTokenFlow(sessionFlowUsage(session)), detailRow),
+	tokenLabel := "tokens: "
+	if session.DuplicatedUSD > 0 {
+		tokenLabel = "gross tokens: "
+	}
+	lines = append(lines,
+		infoDetailLine(tokenLabel+formatTokenFlow(sessionFlowUsage(session)), detailRow),
 		infoDetailLine("", detailRow),
-		infoDetailLine("Own model costs · "+formatCost(session.Cost), detailHeader),
+	)
+	ownCost := session.Cost
+	ownCost.USD -= session.DuplicatedUSD
+	modelHeading := "Own model costs · "
+	if session.DuplicatedUSD > 0 {
+		modelHeading = "Owned model costs · "
 	}
+	lines = append(lines, infoDetailLine(modelHeading+formatCost(ownCost), detailHeader))
 	for _, line := range ownModelCostLines(session) {
 		lines = append(lines, infoDetailLine(line, detailRow))
 	}
@@ -581,12 +594,57 @@ func sessionInfoLines(session *model.Session) []detailLine {
 		infoDetailLine("own: this session's own turns", detailRow),
 		infoDetailLine("subagents: delegated child sessions; their totals include nested descendants", detailRow),
 		infoDetailLine("", detailRow),
-		infoDetailLine("Cost tree", detailHeader),
 	)
-	for _, line := range sessionCostTree(session) {
+	costTreeHeading := "Cost tree"
+	costTree := sessionCostTree(session)
+	if session.DuplicatedUSD > 0 {
+		costTreeHeading = "Gross cost tree"
+		costTree = grossSessionCostTree(session)
+	}
+	lines = append(lines, infoDetailLine(costTreeHeading, detailHeader))
+	for _, line := range costTree {
 		lines = append(lines, infoDetailLine(line, detailRow))
 	}
 	return lines
+}
+
+func infoCostLine(label string, cost model.Cost) string {
+	line := label + ": " + formatCost(cost)
+	if len(cost.MissingPricingModels) == 0 {
+		return line
+	}
+	missing := append([]string(nil), cost.MissingPricingModels...)
+	sort.Strings(missing)
+	for index := range missing {
+		missing[index] = displayModelName(missing[index])
+	}
+	return line + " · missing pricing: " + strings.Join(missing, ", ")
+}
+
+func formatReplayedCost(usd float64, estimated bool) string {
+	return "−" + formatCost(model.Cost{USD: usd, Estimated: estimated})
+}
+
+func requestCount(count int) string {
+	if count == 1 {
+		return "1 request"
+	}
+	return fmt.Sprintf("%d requests", count)
+}
+
+func duplicateOwnerLabel(owner model.DuplicateOwner) string {
+	title := firstLine(terminalText(owner.Title, 160))
+	id := terminalText(owner.SessionID, 96)
+	if title == "" {
+		if id != "" {
+			return id
+		}
+		return "unknown session"
+	}
+	if id == "" || id == title {
+		return title
+	}
+	return title + " (" + id + ")"
 }
 
 func infoDetailLine(text string, role detailRole) detailLine {
@@ -622,6 +680,11 @@ func ownModelCostLines(session *model.Session) []string {
 		}
 	}
 	for name := range session.ModelCostBreakdowns {
+		if !seen[name] {
+			extraModels[name] = true
+		}
+	}
+	for name := range session.DuplicatedByModel {
 		if !seen[name] {
 			extraModels[name] = true
 		}
@@ -699,8 +762,30 @@ func ownModelCostLines(session *model.Session) []string {
 			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s",
 				group.label, termsWidth, group.terms, formatCost(groupCost)))
 		}
+		duplicatedUSD := session.DuplicatedByModel[name]
+		modelUSD, hasModelCost := session.ModelCosts[name]
+		if !hasModelCost {
+			modelUSD = breakdown.Total()
+		}
+		if priced && math.Abs(modelUSD-breakdown.Total()) > 1e-9 {
+			label := "model cost"
+			for _, record := range session.Usage {
+				if record.Model == name && record.CostUSD != nil {
+					label = "logged cost"
+					break
+				}
+			}
+			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s", label, termsWidth, "", formatCost(model.Cost{USD: modelUSD, Estimated: session.Cost.Estimated})))
+		}
+		if duplicatedUSD > 0 {
+			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s", "replayed", termsWidth, "", formatReplayedCost(duplicatedUSD, session.Cost.Estimated)))
+		}
 		if priced {
-			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s", "subtotal", termsWidth, "", formatCost(model.Cost{USD: breakdown.Total(), Estimated: session.Cost.Estimated})))
+			ownedUSD := max(0, modelUSD-duplicatedUSD)
+			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s", "subtotal", termsWidth, "", formatCost(model.Cost{USD: ownedUSD, Estimated: session.Cost.Estimated})))
+		} else if duplicatedUSD > 0 {
+			ownedUSD := max(0, modelUSD-duplicatedUSD)
+			lines = append(lines, fmt.Sprintf("  %-12s = %s", "subtotal", formatCost(model.Cost{USD: ownedUSD, Estimated: session.Cost.Estimated})))
 		}
 	}
 	return lines
@@ -744,12 +829,24 @@ func formatRateTerms(buckets model.CostBuckets, tokenWidth int) string {
 }
 
 func sessionCostTree(session *model.Session) []string {
-	total := session.TotalCost()
-	lines := []string{fmt.Sprintf("total = own + Σ subs · %s / %s", formatTokenFlow(sessionFlowUsage(session)), formatCost(total))}
-	return appendSessionCostChildren(lines, session, "")
+	return sessionCostTreeWithLabels(session, false)
 }
 
-func appendSessionCostChildren(lines []string, session *model.Session, prefix string) []string {
+func grossSessionCostTree(session *model.Session) []string {
+	return sessionCostTreeWithLabels(session, true)
+}
+
+func sessionCostTreeWithLabels(session *model.Session, gross bool) []string {
+	total := session.TotalCost()
+	formula := "total = own + Σ subs"
+	if gross {
+		formula = "gross total = gross own + Σ gross subs"
+	}
+	lines := []string{fmt.Sprintf("%s · %s / %s", formula, formatTokenFlow(sessionFlowUsage(session)), formatCost(total))}
+	return appendSessionCostChildren(lines, session, "", gross)
+}
+
+func appendSessionCostChildren(lines []string, session *model.Session, prefix string, gross bool) []string {
 	children := len(session.Subagents) + 1
 	for index := 0; index < children; index++ {
 		last := index == children-1
@@ -758,7 +855,11 @@ func appendSessionCostChildren(lines []string, session *model.Session, prefix st
 			connector, childPrefix = "└─ ", prefix+"   "
 		}
 		if index == 0 {
-			lines = append(lines, fmt.Sprintf("%s%sown · %s / %s", prefix, connector, formatTokenFlow(ownSessionFlowUsage(session)), formatCost(session.Cost)))
+			label := "own"
+			if gross {
+				label = "gross own"
+			}
+			lines = append(lines, fmt.Sprintf("%s%s%s · %s / %s", prefix, connector, label, formatTokenFlow(ownSessionFlowUsage(session)), formatCost(session.Cost)))
 			continue
 		}
 		child := session.Subagents[index-1]
@@ -769,8 +870,12 @@ func appendSessionCostChildren(lines []string, session *model.Session, prefix st
 		if label == "" {
 			label = string(child.Agent)
 		}
-		lines = append(lines, fmt.Sprintf("%s%ssubagent %s · %s / %s", prefix, connector, label, formatTokenFlow(sessionFlowUsage(child)), formatCost(child.TotalCost())))
-		lines = appendSessionCostChildren(lines, child, childPrefix)
+		kind := "subagent"
+		if gross {
+			kind = "gross subagent"
+		}
+		lines = append(lines, fmt.Sprintf("%s%s%s %s · %s / %s", prefix, connector, kind, label, formatTokenFlow(sessionFlowUsage(child)), formatCost(child.TotalCost())))
+		lines = appendSessionCostChildren(lines, child, childPrefix, gross)
 	}
 	return lines
 }
@@ -1797,11 +1902,13 @@ const headerFieldSep = " │ "
 
 func (d *detailState) headerPanelLines() []panelLine {
 	session := d.session
-	totalCost := session.TotalCost()
+	totalCost := session.OwnedCost()
+	ownCost := session.Cost
+	ownCost.USD -= session.DuplicatedUSD
 	subagentCost := model.Cost{}
 	missing := make(map[string]bool)
 	for _, subagent := range session.Subagents {
-		cost := subagent.TotalCost()
+		cost := subagent.OwnedCost()
 		subagentCost.USD += cost.USD
 		subagentCost.Estimated = subagentCost.Estimated || cost.Estimated
 		for _, name := range cost.MissingPricingModels {
@@ -1850,7 +1957,7 @@ func (d *detailState) headerPanelLines() []panelLine {
 	}
 	detailedUsage := strings.Join([]string{
 		"total " + formatCost(totalCost),
-		"own " + formatCost(session.Cost),
+		"own " + formatCost(ownCost),
 		"subagents " + formatCost(subagentCost),
 	}, headerFieldSep)
 	compactUsage := "total " + formatCost(totalCost)

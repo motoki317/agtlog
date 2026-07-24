@@ -45,7 +45,7 @@ func compareSessionColumnValue(kind listColumnKind, left, right *model.Session) 
 	case columnTitle:
 		result = strings.Compare(strings.ToLower(firstLine(left.Title)), strings.ToLower(firstLine(right.Title)))
 	case columnModel:
-		result = strings.Compare(shortModelsWithCost(left, left.TotalCost()), shortModelsWithCost(right, right.TotalCost()))
+		result = strings.Compare(shortModelsWithCost(left, left.OwnedCost()), shortModelsWithCost(right, right.OwnedCost()))
 	case columnAge:
 		result = left.UpdatedAt.Compare(right.UpdatedAt)
 	case columnMessages:
@@ -53,9 +53,9 @@ func compareSessionColumnValue(kind listColumnKind, left, right *model.Session) 
 	case columnSubagents:
 		result = cmp.Compare(subagentCount(left), subagentCount(right))
 	case columnTokens:
-		result = cmp.Compare(left.TotalUsage().TotalTokens(), right.TotalUsage().TotalTokens())
+		result = cmp.Compare(left.OwnedUsage().TotalTokens(), right.OwnedUsage().TotalTokens())
 	case columnCost:
-		result = cmp.Compare(normalizedUSD(left.TotalCost().USD), normalizedUSD(right.TotalCost().USD))
+		result = cmp.Compare(normalizedUSD(left.OwnedCost().USD), normalizedUSD(right.OwnedCost().USD))
 	}
 	return result
 }

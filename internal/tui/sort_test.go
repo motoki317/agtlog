@@ -81,6 +81,25 @@ func TestSortSessionsUsesDisplayedColumnValues(t *testing.T) {
 	}
 }
 
+func TestSortSessionsUsesOwnedAccountingValues(t *testing.T) {
+	ownedLower := &model.Session{
+		ID: "owned-lower", Usage: []model.Usage{{InputTokens: 100}}, DuplicatedUsage: model.Usage{InputTokens: 90},
+		Cost: model.Cost{USD: 10}, DuplicatedUSD: 9,
+	}
+	ownedHigher := &model.Session{
+		ID: "owned-higher", Usage: []model.Usage{{InputTokens: 20}},
+		Cost: model.Cost{USD: 5},
+	}
+
+	for _, kind := range []listColumnKind{columnTokens, columnCost} {
+		sessions := []*model.Session{ownedHigher, ownedLower}
+		sortSessions(sessions, sortState{kind: kind, active: true})
+		if sessions[0] != ownedLower {
+			t.Fatalf("owned %s sort first = %q, want lower displayed value", sortColumnLabel(kind), sessions[0].ID)
+		}
+	}
+}
+
 func TestSortSessionsKeepsZeroTimestampsLastInBothDirections(t *testing.T) {
 	earlier := &model.Session{ID: "earlier", UpdatedAt: time.Date(2026, time.July, 22, 8, 0, 0, 0, time.UTC)}
 	later := &model.Session{ID: "later", UpdatedAt: earlier.UpdatedAt.Add(time.Hour)}

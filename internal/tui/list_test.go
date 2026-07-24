@@ -166,6 +166,24 @@ func TestColoredWideListRowsAlignWithHeader(t *testing.T) {
 	}
 }
 
+func TestListRowsAndSummaryUseOwnedCost(t *testing.T) {
+	replay := &model.Session{
+		ID: "replay", Agent: model.AgentClaude, Cost: model.Cost{USD: 10},
+		DuplicatedUSD: 4,
+	}
+	other := &model.Session{ID: "other", Agent: model.AgentClaude, Cost: model.Cost{USD: 5}}
+	m := NewModel([]*model.Session{replay, other}, nil)
+
+	row := ansi.Strip(renderSessionRow(replay, time.Time{}, []listColumn{{kind: columnCost, width: listCostWidth, right: true}}, listCostWidth+listCursorWidth, false, newStyles()))
+	if !strings.Contains(row, formatCost(model.Cost{USD: 6})) ||
+		strings.Contains(row, formatCost(model.Cost{USD: 10})) {
+		t.Fatalf("replay row = %q, want owned cost only", row)
+	}
+	if want := formatCost(model.Cost{USD: 11}) + " total"; !strings.Contains(m.listSummary(), want) {
+		t.Fatalf("list summary = %q, want %q", m.listSummary(), want)
+	}
+}
+
 func TestSelectedRowUsesOneFullWidthStyle(t *testing.T) {
 	unsetEnv(t, "NO_COLOR")
 	profile := lipgloss.ColorProfile()
@@ -1105,6 +1123,221 @@ func TestSessionUpdateUpsertsRowAndKeepsSelection(t *testing.T) {
 	}
 }
 
+func TestSessionUpdateReattributesOwnershipAcrossFullSet(t *testing.T) {
+	started := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)
+	request := model.RequestUsage{MessageID: "message-shared", RequestID: "request-shared", USD: 0.25}
+	currentOwner := &model.Session{
+		ID: "session-current", Agent: model.AgentClaude, Path: "/workspace/current.jsonl",
+		StartedAt: started.Add(time.Minute), Requests: []model.RequestUsage{request},
+	}
+	replay := &model.Session{
+		ID: "session-replay", Agent: model.AgentClaude, Path: "/workspace/replay.jsonl",
+		StartedAt: started.Add(2 * time.Minute), Requests: []model.RequestUsage{request},
+	}
+	source.AttributeOwnership([]*model.Session{currentOwner, replay})
+	m := NewModel([]*model.Session{currentOwner, replay}, nil)
+
+	earlier := &model.Session{
+		ID: "session-earlier", Agent: model.AgentClaude, Path: "/workspace/earlier.jsonl",
+		StartedAt: started, Requests: []model.RequestUsage{request},
+	}
+	_, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{earlier}})
+
+	if earlier.DuplicatedCount != 0 || currentOwner.DuplicatedCount != 1 || replay.DuplicatedCount != 1 ||
+		len(currentOwner.DuplicatedOwners) != 1 || len(replay.DuplicatedOwners) != 1 ||
+		currentOwner.DuplicatedOwners[0].SessionID != earlier.ID ||
+		replay.DuplicatedOwners[0].SessionID != earlier.ID {
+		t.Fatalf("live attribution = earlier %#v, current %#v, replay %#v", earlier, currentOwner, replay)
+	}
+}
+
+func TestSessionUpdateReattributesOwnershipAfterRemoval(t *testing.T) {
+	started := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)
+	request := model.RequestUsage{MessageID: "message-shared", RequestID: "request-shared", USD: 0.25}
+	origin := &model.Session{
+		ID: "session-origin", Agent: model.AgentClaude, Path: "/workspace/origin.jsonl",
+		StartedAt: started, Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	replay := &model.Session{
+		ID: "session-replay", Agent: model.AgentClaude, Path: "/workspace/replay.jsonl",
+		StartedAt: started.Add(time.Minute), Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	source.AttributeOwnership([]*model.Session{origin, replay})
+	m := NewModel([]*model.Session{origin, replay}, nil)
+
+	updated, _ := m.Update(source.SessionUpdate{RemovedPaths: []string{origin.Path}})
+	m = updated.(Model)
+
+	if len(m.sessions) != 1 || m.sessions[0] != replay || replay.DuplicatedCount != 0 ||
+		len(replay.DuplicatedOwners) != 0 {
+		t.Fatalf("removal attribution = sessions %#v, replay %#v; want remaining replay to own request", m.sessions, replay)
+	}
+	if want := "$0.25 total"; !strings.Contains(m.listSummary(), want) {
+		t.Fatalf("removal footer = %q, want %q", m.listSummary(), want)
+	}
+}
+
+func TestSessionUpdateReattributesOwnershipAfterOriginMutation(t *testing.T) {
+	started := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)
+	request := model.RequestUsage{MessageID: "message-shared", RequestID: "request-shared", USD: 0.25}
+	origin := &model.Session{
+		ID: "session-origin", Agent: model.AgentClaude, Path: "/workspace/origin.jsonl",
+		StartedAt: started, Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	replay := &model.Session{
+		ID: "session-replay", Agent: model.AgentClaude, Path: "/workspace/replay.jsonl",
+		StartedAt: started.Add(time.Minute), Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	source.AttributeOwnership([]*model.Session{origin, replay})
+	m := NewModel([]*model.Session{origin, replay}, nil)
+	replacement := cloneSession(origin)
+	replacement.StartedAt = started.Add(2 * time.Minute)
+
+	_, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+
+	if replay.DuplicatedCount != 0 || replacement.DuplicatedCount != 1 ||
+		len(replacement.DuplicatedOwners) != 1 ||
+		replacement.DuplicatedOwners[0].SessionID != replay.ID {
+		t.Fatalf("mutated-origin attribution = replacement %#v, replay %#v; want replay to become owner", replacement, replay)
+	}
+}
+
+func TestUnrelatedLiveUpdateRefreshesOpenInfoOwnership(t *testing.T) {
+	started := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)
+	request := model.RequestUsage{MessageID: "message-shared", RequestID: "request-shared", USD: 0.25}
+	currentOwner := &model.Session{
+		ID: "session-current", Agent: model.AgentClaude, Path: "/workspace/current.jsonl",
+		StartedAt: started.Add(time.Minute), Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	replay := &model.Session{
+		ID: "session-replay", Agent: model.AgentClaude, Path: "/workspace/replay.jsonl",
+		StartedAt: started.Add(2 * time.Minute), Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	source.AttributeOwnership([]*model.Session{currentOwner, replay})
+	m := NewModel([]*model.Session{currentOwner, replay}, nil)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+
+	earlier := &model.Session{
+		ID: "session-earlier", Agent: model.AgentClaude, Path: "/workspace/earlier.jsonl", Title: "Earlier origin",
+		StartedAt: started, Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{earlier}})
+	m = updated.(Model)
+
+	view := ansi.Strip(m.detail.view())
+	if !strings.Contains(view, "owned: $0.00") ||
+		!strings.Contains(view, "replayed −$0.25, 1 request, from Earlier origin (session-earlier)") {
+		t.Fatalf("open Info tab did not refresh indirect ownership:\n%s", view)
+	}
+}
+
+func TestUnrelatedLiveUpdateRefreshesOwnershipInBuriedRootDetail(t *testing.T) {
+	started := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)
+	request := model.RequestUsage{MessageID: "message-shared", RequestID: "request-shared", USD: 0.25}
+	child := &model.Session{ID: "session-child", Agent: model.AgentClaude}
+	currentOwner := &model.Session{
+		ID: "session-current", Agent: model.AgentClaude, Path: "/workspace/current.jsonl",
+		StartedAt: started.Add(time.Minute), Cost: model.Cost{USD: 0.25},
+		Requests: []model.RequestUsage{request}, Subagents: []*model.Session{child},
+	}
+	replay := &model.Session{
+		ID: "session-replay", Agent: model.AgentClaude, Path: "/workspace/replay.jsonl",
+		StartedAt: started.Add(2 * time.Minute), Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	source.AttributeOwnership([]*model.Session{currentOwner, replay})
+	m := NewModel([]*model.Session{currentOwner, replay}, nil)
+	root := newDetailState(currentOwner, 100, 30, m.styles)
+	root.tab = tabInfo
+	root.rebuild()
+	m.screen = screenDetail
+	m.detailStack = []detailScreen{root}
+	m.detail = newDetailState(child, 100, 30, m.styles)
+
+	earlier := &model.Session{
+		ID: "session-earlier", Agent: model.AgentClaude, Path: "/workspace/earlier.jsonl", Title: "Earlier origin",
+		StartedAt: started, Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{earlier}})
+	m = updated.(Model)
+
+	buried := detailStateFromScreen(t, m.detailStack[0])
+	view := ansi.Strip(buried.view())
+	if !strings.Contains(view, "owned: $0.00") ||
+		!strings.Contains(view, "replayed −$0.25, 1 request, from Earlier origin (session-earlier)") {
+		t.Fatalf("buried Info tab did not refresh indirect ownership:\n%s", view)
+	}
+	if detailStateFromScreen(t, m.detail).session != child {
+		t.Fatalf("buried-root refresh replaced active child detail: %#v", m.detail)
+	}
+}
+
+func TestPendingDetailLoadCannotRestoreStaleOwnership(t *testing.T) {
+	started := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)
+	request := model.RequestUsage{MessageID: "message-shared", RequestID: "request-shared", USD: 0.25}
+	currentOwner := &model.Session{
+		ID: "session-current", Agent: model.AgentClaude, Path: "/workspace/current.jsonl",
+		StartedAt: started.Add(time.Minute), Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	replay := &model.Session{
+		ID: "session-replay", Agent: model.AgentClaude, Path: "/workspace/replay.jsonl",
+		StartedAt: started.Add(2 * time.Minute), Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	source.AttributeOwnership([]*model.Session{currentOwner, replay})
+	m := NewModel([]*model.Session{currentOwner, replay}, nil)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	staleLoad := cloneSession(currentOwner)
+	staleLoad.Events = []model.Event{{Kind: model.EventAssistantText, Text: "Loaded timeline"}}
+
+	earlier := &model.Session{
+		ID: "session-earlier", Agent: model.AgentClaude, Path: "/workspace/earlier.jsonl", Title: "Earlier origin",
+		StartedAt: started, Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{earlier}})
+	m = updated.(Model)
+	updated, _ = m.Update(detailLoadedMsg{
+		generation: m.detailGeneration,
+		identity:   sessionIdentity(currentOwner),
+		session:    staleLoad,
+	})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+
+	view := ansi.Strip(m.detail.view())
+	if !strings.Contains(view, "owned: $0.00") ||
+		!strings.Contains(view, "replayed −$0.25, 1 request, from Earlier origin (session-earlier)") {
+		t.Fatalf("pending detail load restored stale ownership:\n%s", view)
+	}
+}
+
+func TestUnrelatedLiveUpdateDoesNotRebuildUnchangedOpenTimeline(t *testing.T) {
+	open := &model.Session{
+		ID: "open", Agent: model.AgentClaude, Path: "/workspace/open.jsonl",
+		Events: []model.Event{{Kind: model.EventUser, Text: "Open timeline"}},
+	}
+	m := NewModel([]*model.Session{open}, nil)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	detail.lines[0].text = "cached timeline row"
+
+	other := &model.Session{ID: "other", Agent: model.AgentClaude, Path: "/workspace/other.jsonl"}
+	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{other}})
+	m = updated.(Model)
+
+	if got := detailStateFromScreen(t, m.detail).lines[0].text; got != "cached timeline row" {
+		t.Fatalf("unrelated update rebuilt unchanged timeline row as %q", got)
+	}
+}
+
 func TestUnrelatedLiveUpdateKeepsOpenDetailState(t *testing.T) {
 	open := &model.Session{ID: "open", Agent: model.AgentClaude, Path: "/workspace/open.jsonl", Events: []model.Event{{Kind: model.EventUser, Text: "Open"}}}
 	other := &model.Session{ID: "other", Agent: model.AgentCodex, Path: "/workspace/other.jsonl"}
@@ -1174,6 +1407,39 @@ func TestManualRefreshRediscoversSessions(t *testing.T) {
 
 	if len(m.sessions) != 1 || m.sessions[0].Title != "Fresh title" {
 		t.Fatalf("sessions after refresh = %#v", m.sessions)
+	}
+}
+
+func TestManualRefreshUpdatesOwnershipInOpenDetail(t *testing.T) {
+	started := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)
+	request := model.RequestUsage{MessageID: "message-shared", RequestID: "request-shared", USD: 0.25}
+	current := &model.Session{
+		ID: "session-current", Agent: model.AgentClaude, Path: "/workspace/current.jsonl",
+		StartedAt: started.Add(time.Minute), Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	m := NewModel([]*model.Session{current}, nil)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	m.refreshGeneration = 1
+
+	refreshedCurrent := cloneSession(current)
+	earlier := &model.Session{
+		ID: "session-earlier", Agent: model.AgentClaude, Path: "/workspace/earlier.jsonl", Title: "Earlier origin",
+		StartedAt: started, Cost: model.Cost{USD: 0.25}, Requests: []model.RequestUsage{request},
+	}
+	refreshed := []*model.Session{refreshedCurrent, earlier}
+	source.AttributeOwnership(refreshed)
+	updated, _ = m.Update(refreshedMsg{generation: 1, sessions: refreshed})
+	m = updated.(Model)
+
+	view := ansi.Strip(m.detail.view())
+	if !strings.Contains(view, "owned: $0.00") ||
+		!strings.Contains(view, "replayed −$0.25, 1 request, from Earlier origin (session-earlier)") {
+		t.Fatalf("manual refresh left open Info ownership stale:\n%s", view)
 	}
 }
 
