@@ -53,6 +53,35 @@ type claudeUsageJSON struct {
 		Ephemeral1hInputTokens int64 `json:"ephemeral_1h_input_tokens"`
 		Ephemeral5mInputTokens int64 `json:"ephemeral_5m_input_tokens"`
 	} `json:"cache_creation"`
+	// Iterations reports the per-step usage when one Messages request runs
+	// sub-inferences server-side. The Advisor tool emits an "advisor_message"
+	// step on its own model; the top-level fields deliberately exclude it because
+	// it bills at that model's rates, so it must be counted separately.
+	Iterations []claudeIterationJSON `json:"iterations"`
+}
+
+type claudeIterationJSON struct {
+	Type  string `json:"type"`
+	Model string `json:"model"`
+	claudeUsageJSON
+}
+
+// claudeAdvisorUsages returns the billed usage of each Advisor sub-inference in a
+// request. Anthropic excludes these tokens from the top-level usage because they
+// bill at the advisor model's rates, so ignoring them undercounts every advisor
+// turn. See docs/ADR/20260724-advisor-tool-cost.md.
+func claudeAdvisorUsages(tokens claudeUsageJSON) []model.Usage {
+	var advisor []model.Usage
+	for _, iteration := range tokens.Iterations {
+		if iteration.Type != "advisor_message" || iteration.Model == "" {
+			continue
+		}
+		usage := claudeUsage(iteration.Model, iteration.claudeUsageJSON)
+		if validUsage(usage) && usage.TotalTokens() > 0 {
+			advisor = append(advisor, usage)
+		}
+	}
+	return advisor
 }
 
 // claudeUsage maps a logged usage block to model.Usage. Callers that price the
@@ -105,7 +134,7 @@ func NewParser(calculator cost.Calculator) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v12:" + p.calculator.Fingerprint()
+	return "claude-parser-v13:" + p.calculator.Fingerprint()
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
@@ -141,6 +170,19 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 	// growing counts. Attribute each request to a single head event, keeping the
 	// highest-token report, so a turn totals each billed request once and in full.
 	headOf := make(map[string]int)
+	// advisorCount tracks how many Advisor calls a message has already yielded a
+	// row for, so the Nth advisor block maps to the Nth advisor_message iteration.
+	// Advisor usage completes on a later line than the server_tool_use block that
+	// opened the call, so collect the fullest set per message and attach it to the
+	// rows once the pass finishes.
+	advisorCount := make(map[string]int)
+	advisorUsagesByMsg := make(map[string][]model.Usage)
+	type advisorRef struct {
+		eventIndex   int
+		advisorIndex int
+		messageID    string
+	}
+	var advisorRefs []advisorRef
 	err = jsonl.ForEachContext(ctx, file, func(line []byte) {
 		var record struct {
 			Type      string `json:"type"`
@@ -282,16 +324,36 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 						call.Duration = timestamp.Sub(call.Timestamp)
 					}
 				}
+			case "server_tool_use":
+				// The Advisor tool is the only server tool agtlog surfaces; it runs a
+				// separate model whose usage rides in usage.iterations, so it earns its
+				// own row and its own cost. Unlike reasoning blocks it is not re-logged,
+				// but the guard keeps a stray re-log from doubling the row. Advisor
+				// blocks follow the turn's reasoning, so the head-usage attribution
+				// below never lands the executor usage on this event.
+				if record.Type != "assistant" || block.Name != "advisor" {
+					continue
+				}
+				if _, seen := calls[block.ID]; seen {
+					continue
+				}
+				event.Kind, event.CallID, event.ToolName = model.EventAdvisor, block.ID, block.Name
+				advisorRefs = append(advisorRefs, advisorRef{eventIndex: len(session.Events), advisorIndex: advisorCount[record.Message.ID], messageID: record.Message.ID})
+				advisorCount[record.Message.ID]++
+				calls[block.ID] = len(session.Events)
 			default:
 				continue
 			}
 			event.Text = model.BoundedDetailText(event.Text)
-			if event.Text != "" || event.Kind == model.EventToolCall || event.Kind == model.EventToolResult || event.Kind == model.EventSubagent {
+			if event.Text != "" || event.Kind == model.EventToolCall || event.Kind == model.EventToolResult || event.Kind == model.EventSubagent || event.Kind == model.EventAdvisor {
 				event.Raw = rawRecord()
 				session.Events = append(session.Events, event)
 			}
 		}
 		if record.Type == "assistant" {
+			if advisors := claudeAdvisorUsages(record.Message.Usage); len(advisors) > len(advisorUsagesByMsg[record.Message.ID]) {
+				advisorUsagesByMsg[record.Message.ID] = advisors
+			}
 			if usage, ok := claudeRequestUsage(record.Message.Model, record.Message.Usage); ok {
 				key := record.Message.ID + "\x00" + record.RequestID
 				dedupe := record.Message.ID != ""
@@ -310,6 +372,14 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 	})
 	if err != nil {
 		return err
+	}
+	for _, ref := range advisorRefs {
+		usages := advisorUsagesByMsg[ref.messageID]
+		if ref.advisorIndex < len(usages) {
+			usage := usages[ref.advisorIndex]
+			session.Events[ref.eventIndex].Model = usage.Model
+			p.setEventUsage(&session.Events[ref.eventIndex], usage)
+		}
 	}
 	for _, subagent := range session.Subagents {
 		if err := p.loadEvents(ctx, subagent, depth+1, visited); err != nil {
@@ -838,6 +908,14 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 				IsSidechain: record.IsSidechain,
 				Usage:       usage,
 			})
+			for index, advisor := range claudeAdvisorUsages(record.Message.Usage) {
+				usageRecords = append(usageRecords, usageRecord{
+					MessageID:   fmt.Sprintf("%s\x00advisor\x00%d", record.Message.ID, index),
+					RequestID:   record.RequestID,
+					IsSidechain: record.IsSidechain,
+					Usage:       advisor,
+				})
+			}
 		}
 	})
 	if err != nil {

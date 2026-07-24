@@ -187,6 +187,7 @@ const (
 	EventToolCall      EventKind = "tool-call"
 	EventToolResult    EventKind = "tool-result"
 	EventSubagent      EventKind = "subagent"
+	EventAdvisor       EventKind = "advisor"
 	EventSystem        EventKind = "system"
 	EventCompact       EventKind = "compact"
 )

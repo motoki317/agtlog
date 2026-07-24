@@ -1365,6 +1365,13 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 		}
 		metrics := humanTokens(event.Subagent.TotalUsage().TotalTokens()) + " · " + formatCost(event.Subagent.TotalCost())
 		return []detailLine{{text: text, label: typeLabel, metrics: metrics, key: childKey, nowrap: true, subagent: true, subagentSession: event.Subagent, role: detailAccent, event: event}}
+	case model.EventAdvisor:
+		label := "advisor"
+		if event.Model != "" {
+			label = "advisor(" + shortModelName(event.Model) + ")"
+		}
+		text := padding + foldMarker(false, false) + " " + glyphSubagent + " " + label
+		return []detailLine{{text: text, metrics: metricsText(eventMetricParts(event)), key: key, nowrap: true, role: detailAccent, event: event}}
 	case model.EventCompact:
 		text := padding + foldMarker(false, false) + " " + glyphSecondary + " " + compactTitle(event.CompactTrigger)
 		if event.CompactPostTokens > 0 {

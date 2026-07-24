@@ -324,6 +324,8 @@ func itemLabel(event model.Event, agent model.AgentKind) string {
 		return "Assistant"
 	case model.EventThinking:
 		return "Thinking"
+	case model.EventAdvisor:
+		return "Advisor"
 	case model.EventCompact:
 		return "Compact"
 	case model.EventSystem:

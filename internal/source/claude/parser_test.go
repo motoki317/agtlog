@@ -29,8 +29,8 @@ func mainFixture() string {
 }
 
 func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v12:") {
-		t.Fatalf("CacheFingerprint() = %q, want v12 bucket schema", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v13:") {
+		t.Fatalf("CacheFingerprint() = %q, want v13 bucket schema", got)
 	}
 }
 
@@ -879,5 +879,68 @@ func TestLoadEventsKeepsCompactionBoundary(t *testing.T) {
 	}
 	if got := session.Events[0]; got.CompactTrigger != "manual" || got.CompactPostTokens != 8389 {
 		t.Fatalf("compact metadata = %q/%d, want manual/8389", got.CompactTrigger, got.CompactPostTokens)
+	}
+}
+
+// The Advisor tool runs a separate model server-side; its tokens ride in
+// usage.iterations[type=advisor_message], excluded from the top-level usage
+// because they bill at the advisor model's rates. The advisor block is logged
+// when the call opens but its usage completes on a later line, so the row must
+// pick the cost up across lines, count it once despite re-logs, and price it at
+// the advisor's own model.
+func TestLoadEventsCostsAdvisorSubInference(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-advisor.jsonl")
+	const exec = `"input_tokens":100,"output_tokens":50`
+	msgLine := func(content, iterations string) string {
+		return `{"type":"assistant","requestId":"req1","message":{"id":"msg1","model":"claude-opus-4-8","content":[` +
+			content + `],"usage":{` + exec + `,"iterations":[` + iterations + `]}}}`
+	}
+	execIter := `{"type":"message","input_tokens":100,"output_tokens":50}`
+	advIter := `{"type":"advisor_message","model":"claude-fable-5","input_tokens":1000,"output_tokens":500}`
+	lines := strings.Join([]string{
+		msgLine(`{"type":"thinking","thinking":"weigh it"}`, execIter),                          // opens the turn
+		msgLine(`{"type":"server_tool_use","id":"srv1","name":"advisor","input":{}}`, execIter), // advisor call, usage not yet complete
+		msgLine(`{"type":"text","text":"done"}`, execIter+","+advIter),                          // advisor usage completes here
+		msgLine(`{"type":"text","text":"done"}`, execIter+","+advIter),                          // re-log must not double count
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	p := testParser()
+	session, err := p.Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Executor opus (100*1 + 50*2 = 200) plus advisor fable (1000*2 + 500*3 = 3500),
+	// each counted exactly once across the four lines.
+	if got := session.TotalCost().USD; got != 3700 {
+		t.Fatalf("TotalCost = %v, want 3700 (executor 200 + advisor 3500)", got)
+	}
+	if got := session.ModelCosts["claude-fable-5"]; got != 3500 {
+		t.Fatalf("advisor model cost = %v, want 3500 priced at the advisor model", got)
+	}
+	if got := session.TotalUsage(); got.InputTokens != 1100 || got.OutputTokens != 550 {
+		t.Fatalf("TotalUsage = %d/%d, want 1100/550", got.InputTokens, got.OutputTokens)
+	}
+
+	if err := p.LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	var advisors []model.Event
+	for _, event := range session.Events {
+		if event.Kind == model.EventAdvisor {
+			advisors = append(advisors, event)
+		}
+	}
+	if len(advisors) != 1 {
+		t.Fatalf("advisor events = %d, want 1", len(advisors))
+	}
+	got := advisors[0]
+	if got.Model != "claude-fable-5" || got.Usage == nil || got.Usage.InputTokens != 1000 || got.Usage.OutputTokens != 500 {
+		t.Fatalf("advisor row = model %q usage %+v, want fable-5 1000/500", got.Model, got.Usage)
+	}
+	if !got.Priced || got.Cost.Total() != 3500 {
+		t.Fatalf("advisor row cost = %v (priced=%v), want 3500", got.Cost.Total(), got.Priced)
 	}
 }

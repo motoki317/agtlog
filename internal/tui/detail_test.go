@@ -1817,6 +1817,19 @@ func TestCompactRowShowsTriggerAndContext(t *testing.T) {
 	}
 }
 
+func TestAdvisorRowShowsModelAndMetrics(t *testing.T) {
+	detail := &detailState{}
+	usage := model.Usage{Model: "claude-fable-5", InputTokens: 1000, OutputTokens: 500}
+	event := model.Event{Kind: model.EventAdvisor, Model: "claude-fable-5", Usage: &usage}
+	line := detail.eventLines(&model.Session{}, event, 0, "event")[0]
+	if got := ansi.Strip(line.text); !strings.Contains(got, "advisor(") || !strings.Contains(got, shortModelName("claude-fable-5")) {
+		t.Errorf("advisor row = %q, want advisor(model) label", got)
+	}
+	if line.metrics == "" {
+		t.Errorf("advisor row metrics empty, want token flow from usage")
+	}
+}
+
 func TestSelectionOverridesPromptTints(t *testing.T) {
 	profile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
