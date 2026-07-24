@@ -134,6 +134,7 @@ func (r *Registry) Discover(ctx context.Context) ([]*model.Session, error) {
 		}
 		return sessions[i].ID < sessions[j].ID
 	})
+	AttributeOwnership(sessions)
 	return sessions, nil
 }
 
