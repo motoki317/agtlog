@@ -846,23 +846,24 @@ func sessionCostTreeWithLabels(session *model.Session, gross bool) []string {
 	return appendSessionCostChildren(lines, session, "", gross)
 }
 
+// appendSessionCostChildren renders the own-versus-subagents split under a node.
+// The own row appears only when subagents share the total; without subagents own
+// equals the node's total, so a lone own row would just repeat its parent line.
 func appendSessionCostChildren(lines []string, session *model.Session, prefix string, gross bool) []string {
-	children := len(session.Subagents) + 1
-	for index := 0; index < children; index++ {
-		last := index == children-1
+	if len(session.Subagents) == 0 {
+		return lines
+	}
+	ownLabel := "own"
+	if gross {
+		ownLabel = "gross own"
+	}
+	// Subagents always follow the own row, so it is never the last child.
+	lines = append(lines, fmt.Sprintf("%s├─ %s · %s / %s", prefix, ownLabel, formatTokenFlow(ownSessionFlowUsage(session)), formatCost(session.Cost)))
+	for index, child := range session.Subagents {
 		connector, childPrefix := "├─ ", prefix+"│  "
-		if last {
+		if index == len(session.Subagents)-1 {
 			connector, childPrefix = "└─ ", prefix+"   "
 		}
-		if index == 0 {
-			label := "own"
-			if gross {
-				label = "gross own"
-			}
-			lines = append(lines, fmt.Sprintf("%s%s%s · %s / %s", prefix, connector, label, formatTokenFlow(ownSessionFlowUsage(session)), formatCost(session.Cost)))
-			continue
-		}
-		child := session.Subagents[index-1]
 		label := firstLine(child.Title)
 		if label == "" {
 			label = terminalText(child.ID, 96)

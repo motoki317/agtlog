@@ -542,11 +542,14 @@ func TestThirdDetailTabExplainsCostAndRecursiveTree(t *testing.T) {
 		"total = own + Σ subs · ↑10/0/140 ↓30 / $0.18",
 		"├─ own · ↑10/0/100 ↓20 / $0.13",
 		"└─ subagent Scout ridge · ↑0/0/40 ↓10 / $0.05",
-		"└─ own · ↑0/0/40 ↓10 / $0.05",
 	} {
 		if !strings.Contains(view, want) {
 			t.Errorf("Info tab missing %q:\n%s", want, view)
 		}
+	}
+	// Scout ridge spawns nothing, so it carries no redundant own row of its own.
+	if strings.Contains(view, "└─ own") {
+		t.Errorf("leaf subagent kept a redundant own row:\n%s", view)
 	}
 	if strings.Contains(view, "effective") || strings.Contains(view, "/token") {
 		t.Fatalf("Info model math retained a blended per-token rate:\n%s", view)
@@ -684,17 +687,21 @@ func TestInfoTokenFlowNormalizesInclusiveInputBeforeSessionAggregation(t *testin
 	}
 }
 
-func TestInfoTabWithoutSubagentsDegradesToTotalAndOwn(t *testing.T) {
+func TestInfoTabWithoutSubagentsShowsTotalWithoutOwnRow(t *testing.T) {
 	session := &model.Session{ID: "route", Agent: model.AgentCodex, Usage: []model.Usage{{Model: "gpt-5", InputTokens: 80, OutputTokens: 20}}, ModelCosts: map[string]float64{"gpt-5": 0.2}, ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5": {Input: testCostBuckets(80, 0.1), Output: testCostBuckets(20, 0.1)}}, Cost: model.Cost{USD: 0.2, Estimated: true}}
 	detail := newDetailState(session, 80, 28, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 
 	view := ansi.Strip(detail.view())
-	for _, want := range []string{"[Info]", "total = own + Σ subs · ↑0/0/80 ↓20 / ~$0.20", "└─ own · ↑0/0/80 ↓20 / ~$0.20"} {
+	for _, want := range []string{"[Info]", "total = own + Σ subs · ↑0/0/80 ↓20 / ~$0.20"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("leaf Info tab missing %q:\n%s", want, view)
 		}
+	}
+	// Without subagents own equals the total, so the tree stops at the total line.
+	if strings.Contains(view, "─ own · ") {
+		t.Fatalf("leaf Info tree kept a redundant own row:\n%s", view)
 	}
 	if strings.Contains(view, "subagent ") {
 		t.Fatalf("leaf Info tree invented a subagent:\n%s", view)
