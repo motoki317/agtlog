@@ -49,8 +49,8 @@ func parseTieredSession(t *testing.T, events ...string) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v19:") {
-		t.Fatalf("CacheFingerprint() = %q, want v19 distinct-request costs", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v20:") {
+		t.Fatalf("CacheFingerprint() = %q, want v20 apply_patch filename summaries", got)
 	}
 }
 
@@ -1110,6 +1110,45 @@ func TestLoadEventsPreservesCodexPatchDetail(t *testing.T) {
 	want := "*** Begin Patch\n*** Update File: /workspace/lunar-lab/route.txt\n@@\n-ridge\n+valley\n*** End Patch"
 	if call.Detail == nil || call.Detail.Diff != want {
 		t.Fatalf("Detail = %#v, want unchanged patch body", call.Detail)
+	}
+}
+
+func TestCodexPatchFilesNamesTouchedFiles(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		patch string
+		want  []string
+	}{
+		{name: "update", patch: "*** Begin Patch\n*** Update File: /workspace/orbit/route.go\n@@\n-a\n+b\n*** End Patch", want: []string{"route.go"}},
+		{name: "add and delete", patch: "*** Begin Patch\n*** Add File: /workspace/a/new.txt\n+created\n*** Delete File: /workspace/b/old.txt\n*** End Patch", want: []string{"new.txt", "old.txt"}},
+		{name: "rename ignores move target", patch: "*** Begin Patch\n*** Update File: /workspace/old/name.go\n*** Move to: /workspace/new/name.go\n@@\n-a\n+b\n*** End Patch", want: []string{"name.go"}},
+		{name: "no headers", patch: "*** Begin Patch\n-a\n+b\n*** End Patch", want: nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := codexPatchFiles(test.patch); !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("codexPatchFiles() = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestLoadEventsSummarizesApplyPatchByFilename(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-patch.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:00:01Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-edit","name":"apply_patch","input":"*** Begin Patch\n*** Update File: /workspace/orbit/route.go\n@@\n-ridge\n+valley\n*** End Patch"}}`,
+		`{"timestamp":"2026-01-02T03:00:02Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call-edit","output":"Exit code: 0\nWall time: 0 seconds\nOutput:\nSuccess. Updated the following files:\nM /workspace/orbit/route.go\n"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	call := session.Events[0]
+	if call.ResultSummary != "route.go" {
+		t.Fatalf("apply_patch ResultSummary = %q, want the touched filename instead of exit-code noise", call.ResultSummary)
 	}
 }
 

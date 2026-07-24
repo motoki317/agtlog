@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +50,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 	type pendingCall struct {
 		eventIndex          int
 		normalizeExecOutput bool
+		applyPatch          bool
 	}
 	calls := make(map[string]pendingCall)
 	dedupTextByEvent := make(map[int]string)
@@ -190,6 +192,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				calls[event.CallID] = pendingCall{
 					eventIndex:          len(session.Events),
 					normalizeExecOutput: record.Payload.Name == "exec" || record.Payload.Name == "wait",
+					applyPatch:          event.ToolName == "apply_patch",
 				}
 			case "function_call_output", "custom_tool_call_output":
 				event.Kind, event.CallID = model.EventToolResult, record.Payload.CallID
@@ -207,6 +210,15 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				}
 				if summary == "" {
 					summary = codexResultSummary(output)
+				}
+				// An apply_patch result is exit-code and wall-time boilerplate that never
+				// names what changed. Summarize it by the files the patch touches instead.
+				if linked && pending.applyPatch {
+					if call := &session.Events[pending.eventIndex]; call.Detail != nil {
+						if files := codexPatchFiles(call.Detail.Diff); len(files) > 0 {
+							summary = strings.Join(files, ", ")
+						}
+					}
 				}
 				event.Text = model.BoundedDetailText(summary)
 				if linked {
@@ -481,6 +493,33 @@ func codexExecToolPresentation(input string) (string, *model.ToolDetail) {
 		return strings.Join(strings.Fields(input), " "), &model.ToolDetail{Input: model.BoundedDetailText(codexPrettyInput(input))}
 	}
 	return strings.SplitN(command, "\n", 2)[0], &model.ToolDetail{Input: model.BoundedDetailText(command)}
+}
+
+// codexPatchFiles returns the basenames of the files a Codex apply_patch envelope
+// touches, in first-seen order. Each file section begins with an "*** Update File:",
+// "*** Add File:", or "*** Delete File:" header; a rename adds a "*** Move to:" line
+// that names the same file again, so only the section headers are collected. The
+// names summarize the edit for the timeline in place of the tool's exit-code and
+// wall-time output.
+func codexPatchFiles(patch string) []string {
+	prefixes := []string{"*** Update File: ", "*** Add File: ", "*** Delete File: "}
+	var files []string
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(patch, "\n") {
+		line = strings.TrimSpace(line)
+		for _, prefix := range prefixes {
+			raw, ok := strings.CutPrefix(line, prefix)
+			if !ok {
+				continue
+			}
+			if name := path.Base(strings.TrimSpace(raw)); name != "" && name != "." && name != "/" && !seen[name] {
+				seen[name] = true
+				files = append(files, name)
+			}
+			break
+		}
+	}
+	return files
 }
 
 // codexApplyPatchBegin marks the start of an apply_patch envelope.
