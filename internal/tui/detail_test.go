@@ -256,6 +256,52 @@ func TestRightExpandsFocusedTimelineRow(t *testing.T) {
 	}
 }
 
+func TestRowCounterTracksTimelineCursorNotScroll(t *testing.T) {
+	var events []model.Event
+	for i := 0; i < 40; i++ {
+		events = append(events, model.Event{Kind: model.EventAssistantText, Text: fmt.Sprintf("reply %d", i)})
+	}
+	detail := newDetailState(&model.Session{ID: "route", Agent: model.AgentClaude, Events: events}, 80, 20, newStyles())
+
+	rows := len(detail.focusables)
+	if rows < 5 {
+		t.Fatalf("expected several focusable rows, got %d", rows)
+	}
+
+	// Opening a session lands the cursor on the last row, so the counter reads
+	// last/last — not the scroll-top line a viewport-based counter would show.
+	detail.gotoBottom()
+	if c, total := detail.rowCounter(); c != rows || total != rows {
+		t.Fatalf("last-row counter = %d/%d, want %d/%d", c, total, rows, rows)
+	}
+	if view := ansi.Strip(detail.view()); !strings.Contains(view, fmt.Sprintf("%d/%d", rows, rows)) {
+		t.Fatalf("last-row border missing %d/%d counter:\n%s", rows, rows, view)
+	}
+
+	// Each cursor step walks the counter by exactly one row.
+	detail.update(tea.KeyMsg{Type: tea.KeyUp})
+	if c, total := detail.rowCounter(); c != rows-1 || total != rows {
+		t.Fatalf("after one up counter = %d/%d, want %d/%d", c, total, rows-1, rows)
+	}
+}
+
+func TestRowCounterCountsSubagentRowsExcludingHeader(t *testing.T) {
+	var subs []*model.Session
+	for i := 0; i < 15; i++ {
+		subs = append(subs, &model.Session{ID: fmt.Sprintf("sub-%d", i), Agent: model.AgentClaude, Title: fmt.Sprintf("worker %d", i)})
+	}
+	detail := newDetailState(&model.Session{ID: "root", Agent: model.AgentClaude, Subagents: subs}, 80, 20, newStyles())
+	detail.tab = tabSubagents
+	detail.subagentSelection = len(subs) - 1
+	detail.rebuild()
+
+	// The header row is not navigable, so the count is the subagent total and the
+	// last subagent reads n/n.
+	if c, total := detail.rowCounter(); c != len(subs) || total != len(subs) {
+		t.Fatalf("last-subagent counter = %d/%d, want %d/%d", c, total, len(subs), len(subs))
+	}
+}
+
 func TestArrowsNeverNavigateNonFoldableDetailScreens(t *testing.T) {
 	for _, arrow := range []tea.KeyMsg{{Type: tea.KeyLeft}, {Type: tea.KeyRight}} {
 		t.Run("timeline/"+arrow.String(), func(t *testing.T) {

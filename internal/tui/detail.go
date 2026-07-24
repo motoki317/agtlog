@@ -1686,6 +1686,21 @@ func boundLines(text string, maxLines int) []string {
 	return bounded
 }
 
+// rowCounter reports the "n/m" position shown in the panel border. The timeline
+// and subagents panels count the cursor's row out of the navigable rows, so the
+// last row reads m/m; a selection-less panel (Info) reports its scroll offset,
+// since its rendered lines are the only position it has.
+func (d *detailState) rowCounter() (current, total int) {
+	switch {
+	case len(d.focusables) > 0:
+		return min(d.focus+1, len(d.focusables)), len(d.focusables)
+	case d.tab == tabSubagents && len(d.subagents) > 0:
+		return d.subagentSelection + 1, len(d.subagents)
+	default:
+		return min(len(d.rendered), d.viewport.YOffset+1), len(d.rendered)
+	}
+}
+
 func (d *detailState) view() string {
 	layout := newDetailLayout(d.height)
 	if layout.compact {
@@ -1716,7 +1731,8 @@ func (d *detailState) view() string {
 	}
 	hint := ""
 	if len(d.rendered) > d.viewport.Height {
-		hint = fmt.Sprintf("%d/%d", min(len(d.rendered), d.viewport.YOffset+1), len(d.rendered))
+		current, total := d.rowCounter()
+		hint = fmt.Sprintf("%d/%d", current, total)
 	}
 	timeline := renderPanelWithLabel(d.tabPanelLabel(), hint, visible, d.width, timelineHeight, d.styles)
 	keyText := detailKeyText(d.width, d.styles.mono, d.tab, d.wrap)
