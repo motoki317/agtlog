@@ -2107,14 +2107,22 @@ func (d *detailState) roleBaseStyle(role detailRole) lipgloss.Style {
 	}
 }
 
-// labelStyle colors the type token: the agent's color for a reply, accent for a
-// tool or Task, and an accent-on-prompt-background for a user prompt.
+// labelStyle colors the type token with its role's identity so the timeline is
+// scannable by who acted: the agent's own color for a reply, green for a human
+// prompt, purple for a tool call, muted for a harness-injected turn, and accent
+// for a Task or advisor. Each keeps its row's background tint. Reusing the key-hint
+// and header hues avoids widening the theme for two more label colors.
 func (d *detailState) labelStyle(detail detailLine) lipgloss.Style {
+	base := d.roleBaseStyle(detail.role)
 	switch detail.role {
 	case detailAssistant:
 		return d.agentStyle(detail.agent)
 	case detailUserPrompt:
-		return d.styles.userPrompt.Foreground(d.styles.accent.GetForeground()).Bold(d.styles.accent.GetBold())
+		return base.Foreground(d.styles.keyHint.GetForeground()).Bold(true)
+	case detailSystemPrompt:
+		return base.Foreground(d.styles.muted.GetForeground())
+	case detailTool:
+		return base.Foreground(d.styles.header.GetForeground()).Bold(true)
 	default:
 		return d.styles.accent
 	}

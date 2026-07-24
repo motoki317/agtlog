@@ -44,6 +44,11 @@ rows, each agent, warnings, muted metadata, estimates, accents, key hints, promp
 removed diff lines. Ordinary user, assistant, and thinking prose never takes an agent color.
 Only the short agent or role label carries identity color; thinking remains muted.
 
+Each timeline role wears a distinct label color so a reader tells who acted at a glance: the agent
+color for a reply, the key-hint hue for a `you:` prompt, the header hue for a `⚙` tool call, the
+accent for a `⑃ Task` or advisor, and muted for a `harness:` turn or thinking. The key-hint and
+header hues stand in for `you:` and tool labels rather than widening the theme with two more colors.
+
 | Theme | Claude | Codex | Accent | Warning | Diff add | Diff remove | Base | User prompt | System prompt |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `default` | `#D19A66` | `#61AFEF` | `#61AFEF` | `#E06C75` | `#98C379` | `#E06C75` | `#1E222A` | `#262B33` | `#2B2A26` |

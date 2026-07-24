@@ -1694,11 +1694,33 @@ func TestUserPromptColorsOnlyTheLabelOverTheFullRowTint(t *testing.T) {
 	body := ansi.Cut(plain, 2+gutterWidth, ansi.StringWidth(plain))
 	start := strings.Index(body, label)
 	base := lipgloss.NewStyle().Foreground(lipgloss.Color("#ABB2BF")).Background(lipgloss.Color("#262B33"))
-	labelStyle := base.Foreground(lipgloss.Color("#61AFEF")).Bold(true)
+	labelStyle := base.Foreground(lipgloss.Color("#98C379")).Bold(true)
 	want := styleSet.row.Render(ansi.Cut(plain, 0, 2)) + styleSet.muted.Render(ansi.Cut(plain, 2, 2+gutterWidth)) + base.Render(body[:start]) + labelStyle.Render(label) + base.Render(body[start+len(label):])
 
 	if got := detail.styleLine(plain, line, false, true); got != want {
 		t.Fatalf("user prompt styling = %q, want neutral prose and a full-row tint as %q", got, want)
+	}
+}
+
+func TestRoleLabelsCarryDistinctIdentityColors(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	detail := &detailState{styles: newStyles(themes["default"])}
+
+	roles := map[string]detailLine{
+		"you":     {role: detailUserPrompt},
+		"claude":  {role: detailAssistant, agent: model.AgentClaude},
+		"harness": {role: detailSystemPrompt},
+		"tool":    {role: detailTool},
+	}
+	seen := make(map[string]string, len(roles))
+	for name, line := range roles {
+		color := fmt.Sprint(detail.labelStyle(line).GetForeground())
+		if prior, clash := seen[color]; clash {
+			t.Fatalf("%s and %s share label color %s; roles must be distinguishable", prior, name, color)
+		}
+		seen[color] = name
 	}
 }
 
