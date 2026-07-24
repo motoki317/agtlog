@@ -1795,6 +1795,28 @@ func TestSystemAndCompactRowsUseTheSystemPromptTint(t *testing.T) {
 	}
 }
 
+func TestCompactRowShowsTriggerAndContext(t *testing.T) {
+	detail := &detailState{}
+	for _, test := range []struct {
+		name    string
+		trigger string
+		post    int64
+		want    string
+	}{
+		{name: "manual", trigger: "manual", post: 20000, want: "Session manually compacted · ctx 20k"},
+		{name: "auto", trigger: "auto", post: 8389, want: "Session automatically compacted · ctx 8389"},
+		{name: "unknown trigger, no context", trigger: "", post: 0, want: "Session compacted"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			event := model.Event{Kind: model.EventCompact, CompactTrigger: test.trigger, CompactPostTokens: test.post}
+			line := detail.eventLines(&model.Session{}, event, 0, "event")[0]
+			if got := ansi.Strip(line.text); !strings.Contains(got, test.want) {
+				t.Errorf("compact row = %q, want to contain %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestSelectionOverridesPromptTints(t *testing.T) {
 	profile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)

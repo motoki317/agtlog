@@ -230,6 +230,12 @@ type Event struct {
 	// slash-command echoes. Both agents log these as user turns, so the timeline
 	// needs the flag to label them apart.
 	Harness bool
+	// CompactTrigger and CompactPostTokens describe an EventCompact boundary: how
+	// the compaction was invoked ("manual" or "auto") and the context token count
+	// that survived it. The summarization request itself is unbilled and unlogged,
+	// so a compaction carries no Usage. Empty and zero for every other event.
+	CompactTrigger    string
+	CompactPostTokens int64
 }
 
 type Session struct {

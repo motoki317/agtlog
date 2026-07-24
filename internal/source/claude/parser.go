@@ -154,7 +154,11 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 				Content json.RawMessage `json:"content"`
 				Usage   claudeUsageJSON `json:"usage"`
 			} `json:"message"`
-			ToolUseResult json.RawMessage `json:"toolUseResult"`
+			ToolUseResult   json.RawMessage `json:"toolUseResult"`
+			CompactMetadata struct {
+				Trigger    string `json:"trigger"`
+				PostTokens int64  `json:"postTokens"`
+			} `json:"compactMetadata"`
 		}
 		if json.Unmarshal(line, &record) != nil {
 			return
@@ -185,7 +189,14 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 		timestamp, _ := time.Parse(time.RFC3339Nano, record.Timestamp)
 		if record.Type == "system" {
 			if record.Subtype == "compact_boundary" {
-				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: model.BoundedDetailText(record.Content), Raw: rawRecord()})
+				session.Events = append(session.Events, model.Event{
+					Timestamp:         timestamp,
+					Kind:              model.EventCompact,
+					Text:              model.BoundedDetailText(record.Content),
+					CompactTrigger:    record.CompactMetadata.Trigger,
+					CompactPostTokens: record.CompactMetadata.PostTokens,
+					Raw:               rawRecord(),
+				})
 			}
 			return
 		}

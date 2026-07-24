@@ -865,7 +865,7 @@ func TestLoadEventsSummarizesBashExit(t *testing.T) {
 
 func TestLoadEventsKeepsCompactionBoundary(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session-compact.jsonl")
-	line := `{"type":"system","subtype":"compact_boundary","timestamp":"2026-01-02T03:00:00Z","content":"Context compacted"}` + "\n"
+	line := `{"type":"system","subtype":"compact_boundary","timestamp":"2026-01-02T03:00:00Z","content":"Context compacted","compactMetadata":{"trigger":"manual","preTokens":181900,"postTokens":8389}}` + "\n"
 	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -876,5 +876,8 @@ func TestLoadEventsKeepsCompactionBoundary(t *testing.T) {
 	}
 	if len(session.Events) != 1 || session.Events[0].Kind != model.EventCompact || session.Events[0].Text != "Context compacted" {
 		t.Fatalf("events = %#v, want compact boundary", session.Events)
+	}
+	if got := session.Events[0]; got.CompactTrigger != "manual" || got.CompactPostTokens != 8389 {
+		t.Fatalf("compact metadata = %q/%d, want manual/8389", got.CompactTrigger, got.CompactPostTokens)
 	}
 }

@@ -1366,11 +1366,26 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 		metrics := humanTokens(event.Subagent.TotalUsage().TotalTokens()) + " · " + formatCost(event.Subagent.TotalCost())
 		return []detailLine{{text: text, label: typeLabel, metrics: metrics, key: childKey, nowrap: true, subagent: true, subagentSession: event.Subagent, role: detailAccent, event: event}}
 	case model.EventCompact:
-		return []detailLine{{text: padding + foldMarker(false, false) + " " + glyphSecondary + " compact: " + firstLine(event.Text), key: key, role: detailSystemPrompt, event: event}}
+		text := padding + foldMarker(false, false) + " " + glyphSecondary + " " + compactTitle(event.CompactTrigger)
+		if event.CompactPostTokens > 0 {
+			text += " · ctx " + humanTokens(event.CompactPostTokens)
+		}
+		return []detailLine{{text: text, key: key, role: detailSystemPrompt, event: event}}
 	case model.EventSystem:
 		return []detailLine{{text: padding + foldMarker(false, false) + " " + glyphSecondary + " " + firstLine(event.Text), key: key, role: detailSystemPrompt, event: event}}
 	default:
 		return nil
+	}
+}
+
+func compactTitle(trigger string) string {
+	switch trigger {
+	case "manual":
+		return "Session manually compacted"
+	case "auto":
+		return "Session automatically compacted"
+	default:
+		return "Session compacted"
 	}
 }
 
