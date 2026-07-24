@@ -122,6 +122,118 @@ func TestSessionTotalCostIncludesNestedSubagents(t *testing.T) {
 	}
 }
 
+func TestSessionOwnedCostEqualsGrossWithoutDuplicates(t *testing.T) {
+	session := Session{
+		Cost: Cost{USD: 1, MissingPricingModels: []string{"unknown-a"}},
+		Subagents: []*Session{{
+			Cost: Cost{USD: 2, Estimated: true},
+		}},
+	}
+
+	want := session.TotalCost()
+	if got := session.OwnedCost(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("OwnedCost() = %#v, want gross %#v", got, want)
+	}
+}
+
+func TestSessionOwnedCostSubtractsDuplicatesAcrossSubagents(t *testing.T) {
+	session := Session{
+		Cost:          Cost{USD: 5, MissingPricingModels: []string{"unknown-a"}},
+		DuplicatedUSD: 2,
+		Subagents: []*Session{{
+			Cost:          Cost{USD: 3, Estimated: true, MissingPricingModels: []string{"unknown-b"}},
+			DuplicatedUSD: 1,
+		}},
+	}
+
+	want := Cost{USD: 5, Estimated: true, MissingPricingModels: []string{"unknown-a", "unknown-b"}}
+	if got := session.OwnedCost(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("OwnedCost() = %#v, want gross minus duplicates %#v", got, want)
+	}
+}
+
+func TestSessionOwnedUsageEqualsGrossWithoutDuplicates(t *testing.T) {
+	session := Session{
+		Usage: []Usage{{InputTokens: 10, OutputTokens: 2}},
+		Subagents: []*Session{{
+			Usage: []Usage{{InputTokens: 20, CacheReadTokens: 4}},
+		}},
+	}
+
+	want := session.TotalUsage()
+	if got := session.OwnedUsage(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("OwnedUsage() = %#v, want gross %#v", got, want)
+	}
+}
+
+func TestSessionOwnedUsageSubtractsDuplicatesAcrossSubagents(t *testing.T) {
+	session := Session{
+		Usage: []Usage{{
+			InputTokens: 10, OutputTokens: 5,
+			CacheCreation5mTokens: 6, CacheCreation1hTokens: 7, CacheReadTokens: 8,
+		}},
+		DuplicatedUsage: Usage{
+			InputTokens: 2, OutputTokens: 1,
+			CacheCreation5mTokens: 2, CacheCreation1hTokens: 3, CacheReadTokens: 4,
+		},
+		Subagents: []*Session{{
+			Usage: []Usage{{
+				InputTokens: 20, OutputTokens: 4,
+				CacheCreation5mTokens: 8, CacheCreation1hTokens: 10, CacheReadTokens: 12,
+			}},
+			DuplicatedUsage: Usage{
+				InputTokens: 5, OutputTokens: 1,
+				CacheCreation5mTokens: 3, CacheCreation1hTokens: 4, CacheReadTokens: 5,
+			},
+		}},
+	}
+
+	want := Usage{
+		InputTokens: 23, OutputTokens: 7,
+		CacheCreation5mTokens: 9, CacheCreation1hTokens: 10, CacheReadTokens: 11,
+	}
+	if got := session.OwnedUsage(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("OwnedUsage() = %#v, want gross minus duplicates %#v", got, want)
+	}
+}
+
+func TestSessionJSONCachesRequestsButNotOwnership(t *testing.T) {
+	session := Session{
+		Requests: []RequestUsage{{
+			MessageID: "message-fiction",
+			RequestID: "request-fiction",
+			Usage:     Usage{Model: "claude-fable-5", InputTokens: 10},
+			USD:       0.25,
+		}},
+		DuplicatedUSD:     0.25,
+		DuplicatedUsage:   Usage{InputTokens: 10},
+		DuplicatedCount:   1,
+		DuplicatedByModel: map[string]float64{"claude-fable-5": 0.25},
+		DuplicatedOwners: []DuplicateOwner{{
+			SessionID: "session-origin",
+			Title:     "Origin",
+			USD:       0.25,
+			Count:     1,
+		}},
+	}
+
+	encoded, err := json.Marshal(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Session
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded.Requests, session.Requests) {
+		t.Fatalf("cached Requests = %#v, want %#v", decoded.Requests, session.Requests)
+	}
+	if decoded.DuplicatedUSD != 0 || decoded.DuplicatedUsage.TotalTokens() != 0 ||
+		decoded.DuplicatedCount != 0 || decoded.DuplicatedByModel != nil || decoded.DuplicatedOwners != nil {
+		t.Fatalf("cached ownership fields = %#v, want zero runtime attribution", decoded)
+	}
+}
+
 func TestCleanTitleRemovesClosingXMLTag(t *testing.T) {
 	if got := CleanTitle("<command-name>/goal</command-name>"); got != "/goal" {
 		t.Fatalf("CleanTitle() = %q, want command title without XML", got)

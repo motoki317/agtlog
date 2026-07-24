@@ -24,6 +24,13 @@ type Usage struct {
 	CostUSD                *float64
 }
 
+type RequestUsage struct {
+	MessageID string
+	RequestID string
+	Usage     Usage
+	USD       float64
+}
+
 func (u Usage) Add(other Usage) Usage {
 	return Usage{
 		InputTokens:            saturatingAdd(u.InputTokens, other.InputTokens),
@@ -239,25 +246,39 @@ type Event struct {
 	CompactPostTokens int64
 }
 
+type DuplicateOwner struct {
+	SessionID string
+	Title     string
+	USD       float64
+	Count     int
+}
+
 type Session struct {
-	ID                  string
-	Agent               AgentKind
-	Path                string
-	CWD                 string
-	Project             string
-	Title               string
-	Models              []string
-	StartedAt           time.Time
-	UpdatedAt           time.Time
-	GitBranch           string
-	AgentPath           string
-	ParentID            string
-	HasError            bool
-	Messages            int
-	Usage               []Usage
+	ID        string
+	Agent     AgentKind
+	Path      string
+	CWD       string
+	Project   string
+	Title     string
+	Models    []string
+	StartedAt time.Time
+	UpdatedAt time.Time
+	GitBranch string
+	AgentPath string
+	ParentID  string
+	HasError  bool
+	Messages  int
+	Usage     []Usage
+	// Requests intentionally repeats Usage until all gross readers can derive their aggregates from the request ledger.
+	Requests            []RequestUsage
 	ModelCosts          map[string]float64
 	ModelCostBreakdowns map[string]CostBreakdown
 	Cost                Cost
+	DuplicatedUSD       float64            `json:"-"`
+	DuplicatedUsage     Usage              `json:"-"`
+	DuplicatedCount     int                `json:"-"`
+	DuplicatedByModel   map[string]float64 `json:"-"`
+	DuplicatedOwners    []DuplicateOwner   `json:"-"`
 	Events              []Event
 	Subagents           []*Session
 }
@@ -273,6 +294,22 @@ func (s Session) TotalUsage() Usage {
 	return total
 }
 
+func (s Session) OwnedUsage() Usage {
+	var total Usage
+	for _, usage := range s.Usage {
+		total = total.Add(usage)
+	}
+	total.InputTokens -= s.DuplicatedUsage.InputTokens
+	total.OutputTokens -= s.DuplicatedUsage.OutputTokens
+	total.CacheCreation5mTokens -= s.DuplicatedUsage.CacheCreation5mTokens
+	total.CacheCreation1hTokens -= s.DuplicatedUsage.CacheCreation1hTokens
+	total.CacheReadTokens -= s.DuplicatedUsage.CacheReadTokens
+	for _, subagent := range s.Subagents {
+		total = total.Add(subagent.OwnedUsage())
+	}
+	return total
+}
+
 func (s Session) TotalCost() Cost {
 	total := s.Cost
 	seen := make(map[string]bool, len(total.MissingPricingModels))
@@ -281,6 +318,27 @@ func (s Session) TotalCost() Cost {
 	}
 	for _, subagent := range s.Subagents {
 		subtotal := subagent.TotalCost()
+		total.USD += subtotal.USD
+		total.Estimated = total.Estimated || subtotal.Estimated
+		for _, name := range subtotal.MissingPricingModels {
+			if !seen[name] {
+				total.MissingPricingModels = append(total.MissingPricingModels, name)
+				seen[name] = true
+			}
+		}
+	}
+	return total
+}
+
+func (s Session) OwnedCost() Cost {
+	total := s.Cost
+	total.USD -= s.DuplicatedUSD
+	seen := make(map[string]bool, len(total.MissingPricingModels))
+	for _, name := range total.MissingPricingModels {
+		seen[name] = true
+	}
+	for _, subagent := range s.Subagents {
+		subtotal := subagent.OwnedCost()
 		total.USD += subtotal.USD
 		total.Estimated = total.Estimated || subtotal.Estimated
 		for _, name := range subtotal.MissingPricingModels {
