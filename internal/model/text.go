@@ -78,8 +78,7 @@ func IsHardNoise(value string) bool {
 func CleanTimelineText(value string) string {
 	tags := []string{"system-reminder", "permission-preamble", "local-command-caveat"}
 	lower := strings.ToLower(value)
-	var output strings.Builder
-	output.Grow(len(value))
+	stripped := make([]byte, 0, len(value))
 	for offset := 0; offset < len(value); {
 		start, matchedTag := len(value), ""
 		for _, tag := range tags {
@@ -88,26 +87,41 @@ func CleanTimelineText(value string) string {
 			}
 		}
 		if matchedTag == "" {
-			output.WriteString(value[offset:])
+			stripped = append(stripped, value[offset:]...)
 			break
 		}
-		output.WriteString(value[offset:start])
+		stripped = append(stripped, value[offset:start]...)
 		closeTag := "</" + matchedTag + ">"
 		end := strings.Index(lower[start:], closeTag)
 		if end < 0 {
 			break
 		}
 		offset = start + end + len(closeTag)
+		// A block that owned its whole line leaves that line's newline behind.
+		// Dropping it keeps the removal from reading as a paragraph break.
+		if indent := len(bytes.TrimRight(stripped, " \t")); (indent == 0 || stripped[indent-1] == '\n') && offset < len(value) && value[offset] == '\n' {
+			stripped, offset = stripped[:indent], offset+1
+		}
 	}
-	value = output.String()
+	value = string(stripped)
 	lines := strings.Split(value, "\n")
 	cleaned := lines[:0]
 	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.EqualFold(line, "warmup") {
+		// Keep indentation so code blocks and nested lists survive; only the
+		// blank lines that separate paragraphs are normalized.
+		line = strings.TrimRightFunc(line, unicode.IsSpace)
+		if strings.EqualFold(strings.TrimSpace(line), "warmup") {
+			continue
+		}
+		if line == "" && (len(cleaned) == 0 || cleaned[len(cleaned)-1] == "") {
+			// Removing a noise block leaves the blank lines that surrounded it,
+			// so collapse runs into the single blank line a paragraph break needs.
 			continue
 		}
 		cleaned = append(cleaned, line)
+	}
+	for len(cleaned) > 0 && cleaned[len(cleaned)-1] == "" {
+		cleaned = cleaned[:len(cleaned)-1]
 	}
 	return strings.Join(cleaned, "\n")
 }

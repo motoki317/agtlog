@@ -353,3 +353,39 @@ func TestCleanTimelineTextRemovesEmbeddedHardNoise(t *testing.T) {
 		t.Fatalf("CleanTimelineText() = %q", got)
 	}
 }
+
+func TestCleanTimelineTextKeepsParagraphsAndIndentation(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{
+			name:  "paragraph break survives",
+			value: "First paragraph.\n\nSecond paragraph.",
+			want:  "First paragraph.\n\nSecond paragraph.",
+		},
+		{
+			name:  "indentation survives, trailing blanks do not",
+			value: "Steps:\n\n  - nested item\n\ttabbed line   \n\n",
+			want:  "Steps:\n\n  - nested item\n\ttabbed line",
+		},
+		{
+			name:  "blank runs left by a removed block collapse to one",
+			value: "Before\n\n<system-reminder>hidden</system-reminder>\n\nAfter",
+			want:  "Before\n\nAfter",
+		},
+		{
+			name:  "whitespace-only text stays hard noise",
+			value: "\n   \n\t\n",
+			want:  "",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := CleanTimelineText(testCase.value); got != testCase.want {
+				t.Fatalf("CleanTimelineText() = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}

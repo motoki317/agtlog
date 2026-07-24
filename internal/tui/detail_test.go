@@ -2680,6 +2680,31 @@ func TestExpandedToolDetailIsPlainTerminalText(t *testing.T) {
 	}
 }
 
+func TestExpandedMessageKeepsBlankLinesAndIndentation(t *testing.T) {
+	text := "First paragraph.\n\n    indented line\n\nLast paragraph."
+	session := &model.Session{ID: "paragraphs", Agent: model.AgentClaude, Events: []model.Event{
+		{Kind: model.EventUser, Text: text},
+		{Kind: model.EventAssistantText, Text: text},
+	}}
+	detail := newDetailState(session, 80, 24, newStyles())
+
+	var body []string
+	for _, line := range detail.lines {
+		if line.expandable {
+			body = body[:0]
+			continue
+		}
+		body = append(body, strings.TrimRight(line.text, " "))
+	}
+	rendered := strings.Join(body, "\n")
+	if !strings.Contains(rendered, "First paragraph.\n\n") || !strings.Contains(rendered, "\n\n  Last paragraph.") {
+		t.Errorf("expanded message lost its paragraph breaks:\n%q", rendered)
+	}
+	if !strings.Contains(rendered, "    indented line") {
+		t.Errorf("expanded message lost its indentation:\n%q", rendered)
+	}
+}
+
 func TestDetailHeaderIncludesProjectFullCWDAndAllModels(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &model.Session{
