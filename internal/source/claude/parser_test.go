@@ -29,8 +29,8 @@ func mainFixture() string {
 }
 
 func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v13:") {
-		t.Fatalf("CacheFingerprint() = %q, want v13 bucket schema", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v14:") {
+		t.Fatalf("CacheFingerprint() = %q, want v14 request ledger", got)
 	}
 }
 
@@ -147,6 +147,27 @@ func TestParseBuildsDeduplicatedBillableUsage(t *testing.T) {
 	if len(session.Usage) != 2 || !reflect.DeepEqual(ownUsage, wantUsage) {
 		t.Errorf("Parse().Usage = %#v, total %#v, want two records totaling %#v", session.Usage, ownUsage, wantUsage)
 	}
+	wantRequests := []model.RequestUsage{
+		{
+			MessageID: "message-main-1", RequestID: "request-main-1",
+			Usage: model.Usage{
+				Model: "claude-opus-4-8", InputTokens: 100, OutputTokens: 20,
+				CacheCreation5mTokens: 10, CacheReadTokens: 5,
+			},
+			USD: 153,
+		},
+		{
+			MessageID: "message-main-2", RequestID: "request-main-2",
+			Usage: model.Usage{
+				Model: "claude-fable-5", InputTokens: 30, OutputTokens: 10,
+				CacheCreation5mTokens: 3, CacheCreation1hTokens: 2,
+			},
+			USD: 105.5,
+		},
+	}
+	if !reflect.DeepEqual(session.Requests, wantRequests) {
+		t.Errorf("Parse().Requests = %#v, want %#v", session.Requests, wantRequests)
+	}
 }
 
 func TestParseCalculatesOwnCostPerMessageModel(t *testing.T) {
@@ -190,6 +211,15 @@ func TestParseDoesNotInventBreakdownForRecordedCostWithoutPricing(t *testing.T) 
 	}
 	if _, ok := session.ModelCostBreakdowns["unknown-model"]; ok {
 		t.Fatalf("Parse().ModelCostBreakdowns = %#v, want no unavailable breakdown", session.ModelCostBreakdowns)
+	}
+	if len(session.Requests) != 1 {
+		t.Fatalf("Parse().Requests = %#v, want recorded-cost request", session.Requests)
+	}
+	request := session.Requests[0]
+	if request.MessageID != "msg-recorded" || request.RequestID != "" ||
+		request.Usage.Model != "unknown-model" || request.Usage.InputTokens != 10 ||
+		request.Usage.OutputTokens != 2 || request.USD != 1.23 {
+		t.Fatalf("Parse().Requests[0] = %#v, want complete recorded-cost ledger entry", request)
 	}
 }
 
@@ -922,6 +952,13 @@ func TestLoadEventsCostsAdvisorSubInference(t *testing.T) {
 	}
 	if got := session.TotalUsage(); got.InputTokens != 1100 || got.OutputTokens != 550 {
 		t.Fatalf("TotalUsage = %d/%d, want 1100/550", got.InputTokens, got.OutputTokens)
+	}
+	wantRequests := []model.RequestUsage{
+		{MessageID: "msg1", RequestID: "req1", Usage: model.Usage{Model: "claude-opus-4-8", InputTokens: 100, OutputTokens: 50}, USD: 200},
+		{MessageID: "msg1\x00advisor\x000", RequestID: "req1", Usage: model.Usage{Model: "claude-fable-5", InputTokens: 1000, OutputTokens: 500}, USD: 3500},
+	}
+	if !reflect.DeepEqual(session.Requests, wantRequests) {
+		t.Fatalf("Requests = %#v, want executor and synthetic advisor ledgers %#v", session.Requests, wantRequests)
 	}
 
 	if err := p.LoadEvents(context.Background(), session); err != nil {

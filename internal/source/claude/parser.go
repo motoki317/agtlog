@@ -134,7 +134,7 @@ func NewParser(calculator cost.Calculator) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v13:" + p.calculator.Fingerprint()
+	return "claude-parser-v14:" + p.calculator.Fingerprint()
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
@@ -925,11 +925,17 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 	missingPricing := make(map[string]bool)
 	for _, record := range deduplicate(usageRecords) {
 		session.Usage = append(session.Usage, record.Usage)
+		calculated := p.calculator.Calculate(record.Usage)
+		session.Requests = append(session.Requests, model.RequestUsage{
+			MessageID: record.MessageID,
+			RequestID: record.RequestID,
+			Usage:     record.Usage,
+			USD:       calculated.USD,
+		})
 		if !seenModels[record.Usage.Model] {
 			session.Models = append(session.Models, record.Usage.Model)
 			seenModels[record.Usage.Model] = true
 		}
-		calculated := p.calculator.Calculate(record.Usage)
 		if session.ModelCosts == nil {
 			session.ModelCosts = make(map[string]float64)
 		}
