@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"strings"
@@ -28,14 +29,20 @@ import (
 var version = "dev"
 
 func main() {
-	err := executeWithDiagnostics(context.Background(), os.Args[1:], os.Stdout, os.Stderr, defaultRegistry)
+	ctx, stop := newApplicationContext()
+	defer stop()
+	err := executeWithDiagnostics(ctx, os.Args[1:], os.Stdout, os.Stderr, defaultRegistry)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "agtlog: %s\n", terminalField(err.Error(), 512))
 		os.Exit(1)
 	}
 }
 
-func defaultRegistry(agent string, offline bool) (*source.Registry, error) {
+func newApplicationContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt)
+}
+
+func defaultRegistry(ctx context.Context, options cliOptions) (*source.Registry, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return nil, err
@@ -43,25 +50,37 @@ func defaultRegistry(agent string, offline bool) (*source.Registry, error) {
 	cacheDir := defaultCacheDir(home, os.Getenv("XDG_CACHE_HOME"))
 	claudeRoots := claude.DefaultRoots(home, os.Getenv("CLAUDE_CONFIG_DIR"))
 	codexRoots := codex.DefaultRoots(home, os.Getenv("CODEX_HOME"))
-	cacheRoots := append(append([]string(nil), claudeRoots...), codexRoots...)
+	logRoots := append(append([]string(nil), claudeRoots...), codexRoots...)
+	cacheRoots := make([]string, 0, 2*len(logRoots))
+	for _, root := range logRoots {
+		cacheRoots = append(cacheRoots, root, filepath.Dir(root))
+	}
 	if resolved, ok := source.ResolveCacheDir(cacheDir, cacheRoots); ok {
 		cacheDir = resolved
 	} else {
+		if options.refreshPrices {
+			return nil, fmt.Errorf("cannot refresh prices: cache directory could not be safely resolved outside agent log and configuration directories; set XDG_CACHE_HOME to a separate location")
+		}
 		cacheDir = ""
 	}
-	table, err := cost.RuntimeTable(cacheDir, offline)
+	var table cost.Table
+	if options.refreshPrices {
+		table, err = cost.RefreshTable(ctx, cacheDir)
+	} else {
+		table, err = cost.RuntimeTable(cacheDir, options.offline)
+	}
 	if err != nil {
 		return nil, err
 	}
 	calculator := cost.NewCalculator(table)
 	var adapters []source.Source
-	if agent == "" || agent == string(model.AgentClaude) {
+	if options.agent == "" || options.agent == string(model.AgentClaude) {
 		adapters = append(adapters, claude.NewSource(
 			claude.NewParser(calculator),
 			claudeRoots,
 		))
 	}
-	if agent == "" || agent == string(model.AgentCodex) {
+	if options.agent == "" || options.agent == string(model.AgentCodex) {
 		adapters = append(adapters, codex.NewSource(
 			codex.NewParser(calculator, "gpt-5"),
 			codexRoots,
@@ -96,21 +115,22 @@ func configuredWatchRootCount(home, claudeConfig, codexHome, agent string) int {
 }
 
 func run(ctx context.Context, args []string, output io.Writer, registry *source.Registry) error {
-	return execute(ctx, args, output, func(string, bool) (*source.Registry, error) { return registry, nil })
+	return execute(ctx, args, output, func(context.Context, cliOptions) (*source.Registry, error) { return registry, nil })
 }
 
 type cliOptions struct {
-	showVersion bool
-	help        bool
-	offline     bool
-	noWatch     bool
-	agent       string
-	theme       string
+	showVersion   bool
+	help          bool
+	offline       bool
+	refreshPrices bool
+	noWatch       bool
+	agent         string
+	theme         string
 }
 
 type tuiRunner func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error
 
-type registryFactory func(string, bool) (*source.Registry, error)
+type registryFactory func(context.Context, cliOptions) (*source.Registry, error)
 
 func executeTUI(ctx context.Context, options cliOptions, input io.Reader, output io.Writer, registry *source.Registry, runner tuiRunner) error {
 	theme, err := tui.ResolveTheme(options.theme)
@@ -155,17 +175,19 @@ func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 	flags.SetOutput(io.Discard)
 	showVersion := flags.Bool("version", false, "print version")
 	offline := flags.Bool("offline", false, "skip pricing refresh")
+	refreshPrices := flags.Bool("refresh-prices", false, "refresh cached prices before starting")
 	noWatch := flags.Bool("no-watch", false, "disable live session following")
 	agent := flags.String("agent", "", "limit sessions to claude or codex")
 	theme := flags.String("theme", "", "color theme: default, nord, or dracula")
 	flags.Usage = func() {
-		_, _ = fmt.Fprintln(output, "Usage: agtlog [--offline] [--no-watch] [--agent claude|codex] [--theme default|nord|dracula] [--version]")
-		_, _ = fmt.Fprintln(output, "  --agent     limit sessions to claude or codex")
-		_, _ = fmt.Fprintln(output, "  --no-watch  disable live session following")
-		_, _ = fmt.Fprintln(output, "  --offline   skip pricing refresh")
-		_, _ = fmt.Fprintln(output, "  --theme     color theme: default, nord, or dracula")
-		_, _ = fmt.Fprintln(output, "              precedence: --theme > AGTLOG_THEME > default; NO_COLOR forces mono")
-		_, _ = fmt.Fprintln(output, "  --version   print version")
+		_, _ = fmt.Fprintln(output, "Usage: agtlog [--offline] [--refresh-prices] [--no-watch] [--agent claude|codex] [--theme default|nord|dracula] [--version]")
+		_, _ = fmt.Fprintln(output, "  --agent           limit sessions to claude or codex")
+		_, _ = fmt.Fprintln(output, "  --no-watch        disable live session following")
+		_, _ = fmt.Fprintln(output, "  --offline         skip pricing refresh")
+		_, _ = fmt.Fprintln(output, "  --refresh-prices  refresh cached prices before starting")
+		_, _ = fmt.Fprintln(output, "  --theme           color theme: default, nord, or dracula")
+		_, _ = fmt.Fprintln(output, "                    precedence: --theme > AGTLOG_THEME > default; NO_COLOR forces mono")
+		_, _ = fmt.Fprintln(output, "  --version         print version")
 	}
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -177,11 +199,15 @@ func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 		flags.Usage()
 		return cliOptions{}, fmt.Errorf("unexpected argument %q", flags.Arg(0))
 	}
+	if *offline && *refreshPrices {
+		flags.Usage()
+		return cliOptions{}, fmt.Errorf("--offline and --refresh-prices cannot be used together")
+	}
 	if *agent != "" && *agent != string(model.AgentClaude) && *agent != string(model.AgentCodex) {
 		flags.Usage()
 		return cliOptions{}, fmt.Errorf("invalid agent %q", *agent)
 	}
-	return cliOptions{showVersion: *showVersion, offline: *offline, noWatch: *noWatch, agent: *agent, theme: *theme}, nil
+	return cliOptions{showVersion: *showVersion, offline: *offline, refreshPrices: *refreshPrices, noWatch: *noWatch, agent: *agent, theme: *theme}, nil
 }
 
 func execute(ctx context.Context, args []string, output io.Writer, registryFactory registryFactory) error {
@@ -210,7 +236,7 @@ func executeApplication(ctx context.Context, args []string, input io.Reader, out
 	if _, err := tui.ResolveTheme(options.theme); err != nil {
 		return err
 	}
-	registry, err := factory(options.agent, options.offline)
+	registry, err := factory(ctx, options)
 	if err != nil {
 		return err
 	}

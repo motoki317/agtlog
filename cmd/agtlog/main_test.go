@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,6 +23,26 @@ func TestTerminalFieldSanitizesDiagnostics(t *testing.T) {
 	got := terminalField("safe\u202ereversed\r\n\x1bforged", 200)
 	if strings.ContainsAny(got, "\r\n\x1b") || strings.ContainsRune(got, '\u202e') {
 		t.Fatalf("terminalField() emitted unsafe text %q", got)
+	}
+}
+
+func TestApplicationContextCancelsOnInterrupt(t *testing.T) {
+	signal.Ignore(os.Interrupt)
+	t.Cleanup(func() { signal.Reset(os.Interrupt) })
+	ctx, stop := newApplicationContext()
+	defer stop()
+
+	process, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("application context was not cancelled by interrupt")
 	}
 }
 
@@ -94,7 +115,7 @@ func TestDefaultRegistryProtectsUnselectedAgentRootFromCache(t *testing.T) {
 	t.Setenv("CODEX_HOME", codexRoot)
 	t.Setenv("XDG_CACHE_HOME", xdgRoot)
 
-	registry, err := defaultRegistry("claude", true)
+	registry, err := defaultRegistry(context.Background(), cliOptions{agent: "claude", offline: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +128,52 @@ func TestDefaultRegistryProtectsUnselectedAgentRootFromCache(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("unselected Codex root entries = %v, want none", entries)
+	}
+}
+
+func TestDefaultRegistryRefreshFailsWhenCacheResolutionIsUnsafe(t *testing.T) {
+	home := t.TempDir()
+	codexRoot := filepath.Join(home, "codex")
+	xdgRoot := filepath.Join(home, "xdg")
+	if err := os.MkdirAll(codexRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(xdgRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(codexRoot, filepath.Join(xdgRoot, "agtlog")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+	t.Setenv("CODEX_HOME", codexRoot)
+	t.Setenv("XDG_CACHE_HOME", xdgRoot)
+
+	_, err := defaultRegistry(context.Background(), cliOptions{refreshPrices: true})
+	if err == nil || !strings.Contains(err.Error(), "safely resolved outside agent") {
+		t.Fatalf("defaultRegistry() error = %v, want unsafe cache refresh error", err)
+	}
+}
+
+func TestDefaultRegistryRefreshRejectsCacheInsideConfigRoot(t *testing.T) {
+	home := t.TempDir()
+	codexRoot := filepath.Join(home, "codex")
+	if err := os.MkdirAll(codexRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude"))
+	t.Setenv("CODEX_HOME", codexRoot)
+	t.Setenv("XDG_CACHE_HOME", codexRoot)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := defaultRegistry(ctx, cliOptions{refreshPrices: true})
+	if err == nil || !strings.Contains(err.Error(), "safely resolved outside agent") {
+		t.Fatalf("defaultRegistry() error = %v, want unsafe config-root cache error", err)
+	}
+	if _, err := os.Stat(filepath.Join(codexRoot, "agtlog")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cache directory stat error = %v, want not exist", err)
 	}
 }
 
@@ -177,7 +244,7 @@ func TestRunPrintsVersionWithoutDiscovery(t *testing.T) {
 func TestExecutePrintsVersionBeforeBuildingRegistry(t *testing.T) {
 	var output bytes.Buffer
 	called := false
-	err := execute(context.Background(), []string{"--version"}, &output, func(string, bool) (*source.Registry, error) {
+	err := execute(context.Background(), []string{"--version", "--refresh-prices"}, &output, func(context.Context, cliOptions) (*source.Registry, error) {
 		called = true
 		return nil, errors.New("registry unavailable")
 	})
@@ -189,6 +256,21 @@ func TestExecutePrintsVersionBeforeBuildingRegistry(t *testing.T) {
 	}
 }
 
+func TestExecutePrintsHelpBeforeBuildingRegistry(t *testing.T) {
+	var output bytes.Buffer
+	called := false
+	err := execute(context.Background(), []string{"--refresh-prices", "--help"}, &output, func(context.Context, cliOptions) (*source.Registry, error) {
+		called = true
+		return nil, errors.New("registry unavailable")
+	})
+	if err != nil {
+		t.Fatalf("execute() error = %v", err)
+	}
+	if called || !strings.Contains(output.String(), "--refresh-prices") {
+		t.Fatalf("execute() called factory = %v, output = %q", called, output.String())
+	}
+}
+
 func TestRunHelpPrintsUsageAndSucceeds(t *testing.T) {
 	registry := source.NewRegistry(nil, source.Options{})
 	var output bytes.Buffer
@@ -196,7 +278,7 @@ func TestRunHelpPrintsUsageAndSucceeds(t *testing.T) {
 	if err := run(context.Background(), []string{"--help"}, &output, registry); err != nil {
 		t.Fatalf("run() error = %v", err)
 	}
-	if !strings.Contains(output.String(), "Usage: agtlog") || !strings.Contains(output.String(), "--version") || !strings.Contains(output.String(), "--theme default|nord|dracula") {
+	if !strings.Contains(output.String(), "Usage: agtlog") || !strings.Contains(output.String(), "--refresh-prices") || !strings.Contains(output.String(), "--version") || !strings.Contains(output.String(), "--theme default|nord|dracula") {
 		t.Fatalf("run() help = %q, want usage and flags", output.String())
 	}
 	if !strings.Contains(output.String(), "--theme > AGTLOG_THEME > default; NO_COLOR forces mono") {
@@ -212,13 +294,34 @@ func TestRunRejectsUnexpectedArguments(t *testing.T) {
 	}
 }
 
-func TestParseOptionsReadsOfflineWatchAndAgentSelection(t *testing.T) {
-	options, err := parseOptions([]string{"--offline", "--no-watch", "--agent", "codex", "--theme", "nord"}, io.Discard)
-	if err != nil {
-		t.Fatalf("parseOptions() error = %v", err)
+func TestParseOptionsReadsOfflineRefreshWatchAndAgentSelection(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want cliOptions
+	}{
+		{
+			name: "existing options",
+			args: []string{"--offline", "--no-watch", "--agent", "codex", "--theme", "nord"},
+			want: cliOptions{offline: true, noWatch: true, agent: "codex", theme: "nord"},
+		},
+		{
+			name: "refresh prices",
+			args: []string{"--refresh-prices"},
+			want: cliOptions{refreshPrices: true},
+		},
 	}
-	if !options.offline || !options.noWatch || options.agent != "codex" || options.theme != "nord" {
-		t.Fatalf("parseOptions() = %#v", options)
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			options, err := parseOptions(test.args, io.Discard)
+			if err != nil {
+				t.Fatalf("parseOptions() error = %v", err)
+			}
+			if options != test.want {
+				t.Fatalf("parseOptions() = %#v, want %#v", options, test.want)
+			}
+		})
 	}
 }
 
@@ -230,7 +333,10 @@ func TestExecuteApplicationReportsFlagErrorsOnce(t *testing.T) {
 		strings.NewReader(""),
 		io.Discard,
 		&diagnostics,
-		func(string, bool) (*source.Registry, error) { t.Fatal("registry factory called"); return nil, nil },
+		func(context.Context, cliOptions) (*source.Registry, error) {
+			t.Fatal("registry factory called")
+			return nil, nil
+		},
 		func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error {
 			t.Fatal("TUI runner called")
 			return nil
@@ -261,7 +367,7 @@ func TestExecuteApplicationRejectsUnknownThemeBeforeDiscovery(t *testing.T) {
 		strings.NewReader(""),
 		io.Discard,
 		io.Discard,
-		func(string, bool) (*source.Registry, error) {
+		func(context.Context, cliOptions) (*source.Registry, error) {
 			called = true
 			return nil, nil
 		},
@@ -273,21 +379,57 @@ func TestExecuteApplicationRejectsUnknownThemeBeforeDiscovery(t *testing.T) {
 }
 
 func TestExecuteApplicationPassesOptionsToRegistryFactory(t *testing.T) {
-	selected := ""
-	offline := false
-	factory := func(agent string, requestedOffline bool) (*source.Registry, error) {
-		selected = agent
-		offline = requestedOffline
+	type contextKey string
+	appCtx := context.WithValue(context.Background(), contextKey("request"), "application")
+	var receivedCtx context.Context
+	var receivedOptions cliOptions
+	factory := func(ctx context.Context, options cliOptions) (*source.Registry, error) {
+		receivedCtx = ctx
+		receivedOptions = options
 		return source.NewRegistry(nil, source.Options{}), nil
 	}
-	runner := func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error { return nil }
+	runnerCalled := false
+	runner := func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error {
+		runnerCalled = true
+		return nil
+	}
 
-	err := executeApplication(context.Background(), []string{"--offline", "--no-watch", "--agent", "codex"}, strings.NewReader(""), io.Discard, io.Discard, factory, runner)
+	err := executeApplication(appCtx, []string{"--refresh-prices", "--no-watch", "--agent", "codex"}, strings.NewReader(""), io.Discard, io.Discard, factory, runner)
 	if err != nil {
 		t.Fatalf("executeApplication() error = %v", err)
 	}
-	if selected != "codex" || !offline {
-		t.Fatalf("factory options = agent %q, offline %v", selected, offline)
+	wantOptions := cliOptions{refreshPrices: true, noWatch: true, agent: "codex"}
+	if receivedCtx != appCtx || receivedOptions != wantOptions || !runnerCalled {
+		t.Fatalf("factory context matches = %v, options = %#v, want %#v, runner called = %v", receivedCtx == appCtx, receivedOptions, wantOptions, runnerCalled)
+	}
+}
+
+func TestExecuteApplicationStopsBeforeTUIWhenRefreshFails(t *testing.T) {
+	refreshErr := errors.New("pricing refresh failed")
+	var output, diagnostics bytes.Buffer
+
+	err := executeApplication(
+		context.Background(),
+		[]string{"--refresh-prices"},
+		strings.NewReader(""),
+		&output,
+		&diagnostics,
+		func(_ context.Context, options cliOptions) (*source.Registry, error) {
+			if !options.refreshPrices {
+				t.Fatal("registry factory did not receive refresh option")
+			}
+			return nil, refreshErr
+		},
+		func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error {
+			t.Fatal("TUI runner called after refresh failure")
+			return nil
+		},
+	)
+	if !errors.Is(err, refreshErr) {
+		t.Fatalf("executeApplication() error = %v, want %v", err, refreshErr)
+	}
+	if output.Len() != 0 || diagnostics.Len() != 0 {
+		t.Fatalf("stdout = %q, diagnostics = %q, want no pre-main output", output.String(), diagnostics.String())
 	}
 }
 
@@ -301,7 +443,7 @@ func TestExecuteApplicationPassesSelectedThemeToTUI(t *testing.T) {
 			_ = os.Setenv("NO_COLOR", noColor)
 		}
 	})
-	factory := func(string, bool) (*source.Registry, error) {
+	factory := func(context.Context, cliOptions) (*source.Registry, error) {
 		return source.NewRegistry(nil, source.Options{}), nil
 	}
 	runner := func(_ context.Context, _ io.Reader, _ io.Writer, initial tui.Model, _ <-chan source.SessionUpdate) error {
@@ -416,11 +558,29 @@ func TestInteractiveProgramEnablesMouseCellMotion(t *testing.T) {
 
 func TestExecuteWritesInvalidFlagUsageOnlyToDiagnostics(t *testing.T) {
 	var output, diagnostics bytes.Buffer
-	err := executeWithDiagnostics(context.Background(), []string{"--definitely-unknown"}, &output, &diagnostics, func(string, bool) (*source.Registry, error) {
+	err := executeWithDiagnostics(context.Background(), []string{"--definitely-unknown"}, &output, &diagnostics, func(context.Context, cliOptions) (*source.Registry, error) {
 		return source.NewRegistry(nil, source.Options{}), nil
 	})
 	if err == nil {
 		t.Fatal("executeWithDiagnostics() error = nil, want invalid flag")
+	}
+	if output.Len() != 0 || !strings.Contains(diagnostics.String(), "Usage: agtlog") {
+		t.Fatalf("stdout = %q, diagnostics = %q", output.String(), diagnostics.String())
+	}
+}
+
+func TestExecuteRejectsOfflineRefreshOnlyOnDiagnostics(t *testing.T) {
+	var output, diagnostics bytes.Buffer
+	called := false
+	err := executeWithDiagnostics(context.Background(), []string{"--offline", "--refresh-prices"}, &output, &diagnostics, func(context.Context, cliOptions) (*source.Registry, error) {
+		called = true
+		return nil, errors.New("registry factory called")
+	})
+	if err == nil || !strings.Contains(err.Error(), "--offline") || !strings.Contains(err.Error(), "--refresh-prices") {
+		t.Fatalf("executeWithDiagnostics() error = %v, want incompatible flags", err)
+	}
+	if called {
+		t.Fatal("registry factory called for incompatible flags")
 	}
 	if output.Len() != 0 || !strings.Contains(diagnostics.String(), "Usage: agtlog") {
 		t.Fatalf("stdout = %q, diagnostics = %q", output.String(), diagnostics.String())

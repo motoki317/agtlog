@@ -36,6 +36,7 @@ in one list, and updates as new activity arrives. Common options:
 --theme NAME           color theme: default, nord, or dracula
 --no-watch             do not follow new activity
 --offline              do not fetch fresh prices
+--refresh-prices       fetch fresh prices now, then start
 --version              print the version
 ```
 
