@@ -25,6 +25,7 @@ const (
 )
 
 type runtimePricingOptions struct {
+	ctx      context.Context
 	cacheDir string
 	offline  bool
 	now      func() time.Time
@@ -44,6 +45,16 @@ func RuntimeTable(cacheDir string, offline bool) (Table, error) {
 		now:      time.Now,
 		fetch:    func(ctx context.Context) ([]byte, error) { return fetchPricing(ctx, client) },
 		start:    func(task func()) { go task() },
+	})
+}
+
+func RefreshTable(ctx context.Context, cacheDir string) (Table, error) {
+	client := &http.Client{}
+	return refreshTable(runtimePricingOptions{
+		ctx:      ctx,
+		cacheDir: cacheDir,
+		now:      time.Now,
+		fetch:    func(ctx context.Context) ([]byte, error) { return fetchPricing(ctx, client) },
 	})
 }
 
@@ -78,6 +89,33 @@ func runtimeTable(options runtimePricingOptions) (Table, error) {
 			}
 			_ = storePricingCache(options.cacheDir, data)
 		})
+	}
+	return table, nil
+}
+
+func refreshTable(options runtimePricingOptions) (Table, error) {
+	if options.cacheDir == "" {
+		return nil, fmt.Errorf("pricing cache directory is empty")
+	}
+	table, err := EmbeddedTable()
+	if err != nil {
+		return nil, err
+	}
+	fetchCtx, cancel := context.WithTimeout(options.ctx, 30*time.Second)
+	defer cancel()
+	data, err := options.fetch(fetchCtx)
+	if err != nil {
+		return nil, err
+	}
+	fetched, err := runtimePricingTable(data)
+	if err != nil {
+		return nil, err
+	}
+	for name, pricing := range fetched {
+		table[name] = pricing
+	}
+	if err := storePricingCache(options.cacheDir, data); err != nil {
+		return nil, err
 	}
 	return table, nil
 }

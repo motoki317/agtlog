@@ -3,11 +3,20 @@ package cost
 import (
 	"bytes"
 	"context"
+	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 func TestEmbeddedTableContainsSupportedModels(t *testing.T) {
 	table, err := EmbeddedTable()
@@ -49,6 +58,191 @@ func TestRuntimeTableOverlaysCachedModels(t *testing.T) {
 	}
 	if _, ok := table["gpt-5.6"]; !ok {
 		t.Fatal("embedded-only gpt-5.6 pricing was removed by overlay")
+	}
+}
+
+func TestRefreshTableOverlaysFetchedModelsAndStoresPayload(t *testing.T) {
+	cacheDir := t.TempDir()
+	payload := []byte(`{"runtime-model":{"input_cost_per_token":7}}`)
+
+	table, err := refreshTable(runtimePricingOptions{
+		ctx:      context.Background(),
+		cacheDir: cacheDir,
+		fetch: func(context.Context) ([]byte, error) {
+			return payload, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("refreshTable() error = %v", err)
+	}
+	if got := table["runtime-model"].Input; got != 7 {
+		t.Fatalf("runtime model input rate = %v, want 7", got)
+	}
+	if _, ok := table["gpt-5.6"]; !ok {
+		t.Fatal("embedded-only gpt-5.6 pricing was removed by overlay")
+	}
+	cached, err := os.ReadFile(filepath.Join(cacheDir, pricingCacheName))
+	if err != nil {
+		t.Fatalf("read refreshed cache: %v", err)
+	}
+	if !bytes.Equal(cached, payload) {
+		t.Fatalf("cached pricing = %q, want %q", cached, payload)
+	}
+}
+
+func TestRefreshTableRejectsEmptyCacheDirectory(t *testing.T) {
+	if _, err := RefreshTable(context.Background(), ""); err == nil {
+		t.Fatal("RefreshTable() error = nil, want empty cache directory error")
+	}
+}
+
+func TestRefreshTableRejectsEmptyCacheDirectoryBeforeFetch(t *testing.T) {
+	fetches := 0
+
+	_, err := refreshTable(runtimePricingOptions{
+		ctx: context.Background(),
+		fetch: func(context.Context) ([]byte, error) {
+			fetches++
+			return []byte(`{"runtime-model":{"input_cost_per_token":7}}`), nil
+		},
+	})
+	if err == nil {
+		t.Fatal("refreshTable() error = nil, want empty cache directory error")
+	}
+	if fetches != 0 {
+		t.Fatalf("fetches = %d, want 0", fetches)
+	}
+}
+
+func TestRefreshTableFetchErrorLeavesExistingCacheUntouched(t *testing.T) {
+	cacheDir := t.TempDir()
+	cachePath := filepath.Join(cacheDir, pricingCacheName)
+	existing := []byte(`{"cached-model":{"input_cost_per_token":3}}`)
+	if err := os.WriteFile(cachePath, existing, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fetchErr := errors.New("pricing service unavailable")
+
+	_, err := refreshTable(runtimePricingOptions{
+		ctx:      context.Background(),
+		cacheDir: cacheDir,
+		fetch: func(context.Context) ([]byte, error) {
+			return nil, fetchErr
+		},
+	})
+	if !errors.Is(err, fetchErr) {
+		t.Fatalf("refreshTable() error = %v, want %v", err, fetchErr)
+	}
+	cached, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(cached, existing) {
+		t.Fatalf("cached pricing = %q, want %q", cached, existing)
+	}
+}
+
+func TestRefreshTableInvalidPayloadLeavesExistingCacheUntouched(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{name: "malformed", payload: []byte(`{malformed`)},
+		{name: "unpriced", payload: []byte(`{"runtime-model":{"max_input_tokens":1000}}`)},
+		{name: "null input rate", payload: []byte(`{"runtime-model":{"input_cost_per_token":null}}`)},
+		{name: "null output rate", payload: []byte(`{"runtime-model":{"output_cost_per_token":null}}`)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cacheDir := t.TempDir()
+			cachePath := filepath.Join(cacheDir, pricingCacheName)
+			existing := []byte(`{"cached-model":{"input_cost_per_token":3}}`)
+			if err := os.WriteFile(cachePath, existing, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := refreshTable(runtimePricingOptions{
+				ctx:      context.Background(),
+				cacheDir: cacheDir,
+				fetch: func(context.Context) ([]byte, error) {
+					return test.payload, nil
+				},
+			})
+			if err == nil {
+				t.Fatal("refreshTable() error = nil, want invalid payload error")
+			}
+			cached, err := os.ReadFile(cachePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(cached, existing) {
+				t.Fatalf("cached pricing = %q, want %q", cached, existing)
+			}
+		})
+	}
+}
+
+func TestRefreshTableReturnsStoreFailure(t *testing.T) {
+	cacheDir := filepath.Join(t.TempDir(), "cache-file")
+	if err := os.WriteFile(cacheDir, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := refreshTable(runtimePricingOptions{
+		ctx:      context.Background(),
+		cacheDir: cacheDir,
+		fetch: func(context.Context) ([]byte, error) {
+			return []byte(`{"runtime-model":{"input_cost_per_token":7}}`), nil
+		},
+	})
+	if err == nil {
+		t.Fatal("refreshTable() error = nil, want store error")
+	}
+}
+
+func TestRefreshTableReturnsCancelledFetch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	cacheDir := t.TempDir()
+
+	_, err := refreshTable(runtimePricingOptions{
+		ctx:      ctx,
+		cacheDir: cacheDir,
+		fetch: func(ctx context.Context) ([]byte, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("refreshTable() error = %v, want %v", err, context.Canceled)
+	}
+	if _, err := os.Stat(filepath.Join(cacheDir, pricingCacheName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pricing cache stat error = %v, want not exist", err)
+	}
+}
+
+func TestRefreshTableGivesFetchThirtySecondDeadline(t *testing.T) {
+	started := time.Now()
+	var deadline time.Time
+
+	_, err := refreshTable(runtimePricingOptions{
+		ctx:      context.Background(),
+		cacheDir: t.TempDir(),
+		fetch: func(ctx context.Context) ([]byte, error) {
+			var ok bool
+			deadline, ok = ctx.Deadline()
+			if !ok {
+				return nil, errors.New("fetch context has no deadline")
+			}
+			return []byte(`{"runtime-model":{"input_cost_per_token":7}}`), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("refreshTable() error = %v", err)
+	}
+	if remaining := deadline.Sub(started); remaining < 29*time.Second || remaining > 31*time.Second {
+		t.Fatalf("fetch deadline after %v, want about 30s", remaining)
 	}
 }
 
@@ -360,6 +554,23 @@ func TestReadPricingResponseEnforcesLimit(t *testing.T) {
 	}
 	if _, err := readPricingResponse(bytes.NewBufferString("12345"), 4); err == nil {
 		t.Fatal("readPricingResponse() accepted response over limit")
+	}
+}
+
+func TestFetchPricingRejectsNonSuccessStatus(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusServiceUnavailable,
+				Status:     "503 Service Unavailable",
+				Body:       http.NoBody,
+				Request:    request,
+			}, nil
+		}),
+	}
+
+	if _, err := fetchPricing(context.Background(), client); err == nil || !strings.Contains(err.Error(), "503 Service Unavailable") {
+		t.Fatalf("fetchPricing() error = %v, want non-success status", err)
 	}
 }
 
