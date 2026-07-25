@@ -26,3 +26,4 @@ trade-offs and alternatives that led to each choice.
 | 2026-07-19 | [Cost model](./20260719-cost-model.md) | Estimate usage with ccusage-compatible API rates and explicit uncertainty |
 | 2026-07-19 | [Live-follow watching](./20260719-live-follow-watching.md) | Combine recursive fsnotify watches with a stat-based recovery scan |
 | 2026-07-19 | [TUI stack](./20260719-tui-stack.md) | Use Bubble Tea and Bubbles for a testable keyboard-first terminal UI |
+| 2026-07-26 | [Codex timeline usage](./20260726-codex-timeline-usage.md) | Preserve polymorphic model context and treat reasoning as output detail |
