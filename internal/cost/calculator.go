@@ -22,7 +22,6 @@ type Pricing struct {
 	OutputAbove272K       *float64 `json:"output_cost_per_token_above_272k_tokens"`
 	CacheWriteAbove272K   *float64 `json:"cache_creation_input_token_cost_above_272k_tokens"`
 	CacheReadAbove272K    *float64 `json:"cache_read_input_token_cost_above_272k_tokens"`
-	MaxInputTokens        int64    `json:"max_input_tokens"`
 	ProviderSpecificEntry struct {
 		Fast float64 `json:"fast"`
 	} `json:"provider_specific_entry"`

@@ -1,6 +1,7 @@
 package cost
 
 import (
+	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -174,6 +175,10 @@ func decodePricingTable(data []byte, strict bool) (Table, error) {
 	}
 	table := make(Table, len(raw))
 	for name, entry := range raw {
+		// LiteLLM ships sample_spec as a documentation template with pricing-shaped keys, so it is not a model.
+		if name == "sample_spec" {
+			continue
+		}
 		var fields map[string]json.RawMessage
 		if err := json.Unmarshal(entry, &fields); err != nil || fields == nil {
 			if strict {
@@ -181,9 +186,16 @@ func decodePricingTable(data []byte, strict bool) (Table, error) {
 			}
 			continue
 		}
-		_, hasInput := fields["input_cost_per_token"]
-		_, hasOutput := fields["output_cost_per_token"]
+		inputRate, hasInput := fields["input_cost_per_token"]
+		outputRate, hasOutput := fields["output_cost_per_token"]
 		if !hasInput && !hasOutput {
+			continue
+		}
+		if hasInput && bytes.Equal(bytes.TrimSpace(inputRate), []byte("null")) ||
+			hasOutput && bytes.Equal(bytes.TrimSpace(outputRate), []byte("null")) {
+			if strict {
+				return nil, fmt.Errorf("invalid pricing rates for %q", name)
+			}
 			continue
 		}
 		var pricing Pricing
@@ -202,7 +214,7 @@ func decodePricingTable(data []byte, strict bool) (Table, error) {
 }
 
 func validPricing(pricing Pricing) bool {
-	if !validRate(pricing.Input) || !validRate(pricing.Output) || pricing.MaxInputTokens < 0 || !validRate(pricing.ProviderSpecificEntry.Fast) {
+	if !validRate(pricing.Input) || !validRate(pricing.Output) || !validRate(pricing.ProviderSpecificEntry.Fast) {
 		return false
 	}
 	for _, rate := range []*float64{

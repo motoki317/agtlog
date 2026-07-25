@@ -23,6 +23,16 @@ func TestEmbeddedTableContainsSupportedModels(t *testing.T) {
 	}
 }
 
+func TestRuntimePricingTableAcceptsEmbeddedSnapshot(t *testing.T) {
+	table, err := runtimePricingTable(embeddedPricing)
+	if err != nil {
+		t.Fatalf("runtimePricingTable(embeddedPricing) error = %v", err)
+	}
+	if got := len(table); got < 1_000 {
+		t.Fatalf("runtimePricingTable(embeddedPricing) models = %d, want at least 1000", got)
+	}
+}
+
 func TestRuntimeTableOverlaysCachedModels(t *testing.T) {
 	cacheDir := t.TempDir()
 	cache := `{"claude-opus-4-8":{"input_cost_per_token":42}}`
@@ -39,6 +49,36 @@ func TestRuntimeTableOverlaysCachedModels(t *testing.T) {
 	}
 	if _, ok := table["gpt-5.6"]; !ok {
 		t.Fatal("embedded-only gpt-5.6 pricing was removed by overlay")
+	}
+}
+
+func TestRuntimePricingTableIgnoresUnusedMaxInputTokens(t *testing.T) {
+	table, err := runtimePricingTable([]byte(`{
+		"runtime-model":{"input_cost_per_token":0.000001,"max_input_tokens":"not runtime pricing"}
+	}`))
+	if err != nil {
+		t.Fatalf("runtimePricingTable() error = %v", err)
+	}
+	if _, ok := table["runtime-model"]; !ok {
+		t.Fatal("runtimePricingTable() removed priced model with unused max_input_tokens metadata")
+	}
+}
+
+func TestRuntimePricingTableSkipsLiteLLMSampleSpec(t *testing.T) {
+	payload := []byte(`{
+		"sample_spec":{"input_cost_per_token":0,"max_input_tokens":"maximum supported input"},
+		"runtime-model":{"input_cost_per_token":0.000001}
+	}`)
+
+	table, err := runtimePricingTable(payload)
+	if err != nil {
+		t.Fatalf("runtimePricingTable() error = %v", err)
+	}
+	if _, ok := table["sample_spec"]; ok {
+		t.Fatal("runtimePricingTable() included LiteLLM sample spec")
+	}
+	if _, ok := table["runtime-model"]; !ok {
+		t.Fatal("runtimePricingTable() removed valid priced model")
 	}
 }
 
