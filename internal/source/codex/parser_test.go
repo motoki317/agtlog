@@ -98,7 +98,7 @@ func TestLoadEventsAttachesTokenCountUsageToAssistantTurn(t *testing.T) {
 		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}`,
 		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"user_message","message":"Chart the route"}}`,
 		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"agent_message","message":"Route ready"}}`,
-		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":45000,"cached_input_tokens":37000,"output_tokens":4000,"reasoning_output_tokens":1000,"total_tokens":45000}}}}`,
+		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":45000,"cached_input_tokens":37000,"output_tokens":4000,"reasoning_output_tokens":1000,"total_tokens":49000}}}}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
 		t.Fatal(err)
@@ -115,13 +115,13 @@ func TestLoadEventsAttachesTokenCountUsageToAssistantTurn(t *testing.T) {
 		}
 	}
 	// The token_count closing the request attaches to the assistant reply, not the
-	// user prompt, so context stays the whole prompt and flow adds reasoning.
+	// user prompt. Context stays the whole prompt, and output already includes reasoning.
 	if len(withUsage) != 1 || session.Events[withUsage[0]].Kind != model.EventAssistantText {
 		t.Fatalf("events carrying usage = %v, want the single assistant reply", withUsage)
 	}
 	usage := session.Events[withUsage[0]].Usage
-	if usage.PromptTokens() != 45_000 || usage.FlowTokens() != 13_000 {
-		t.Fatalf("attached usage prompt=%d flow=%d, want 45000 and 13000", usage.PromptTokens(), usage.FlowTokens())
+	if usage.PromptTokens() != 45_000 || usage.FlowTokens() != 12_000 {
+		t.Fatalf("attached usage prompt=%d flow=%d, want 45000 and 12000", usage.PromptTokens(), usage.FlowTokens())
 	}
 }
 
@@ -220,6 +220,23 @@ func TestCodexUsageCountsReasoningWithinOutput(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("codexUsage() = %#v, want %#v", got, want)
+	}
+}
+
+func TestCodexDisplayUsageCountsReasoningWithinOutput(t *testing.T) {
+	got := codexDisplayUsage(&tokenUsage{
+		InputTokens:           200,
+		OutputTokens:          100,
+		ReasoningOutputTokens: 40,
+		TotalTokens:           300,
+	})
+	want := &model.Usage{
+		InputTokens:            200,
+		OutputTokens:           100,
+		InputIncludesCacheRead: true,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("codexDisplayUsage() = %#v, want %#v", got, want)
 	}
 }
 

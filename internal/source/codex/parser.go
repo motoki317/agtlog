@@ -316,16 +316,16 @@ func codexUsage(usageModel string, selected tokenUsage) model.Usage {
 }
 
 // codexDisplayUsage maps a token_count's per-request usage to the timeline's
-// display usage. Input already folds in the cached prompt, and reasoning counts
-// with output so a turn's flow reflects the whole generation. Returns nil when
-// the request has no tokens, so it never clobbers a turn's real context.
+// display usage. Input already folds in the cached prompt, and output already
+// includes reasoning. Returns nil when the request has no tokens, so it never
+// clobbers a turn's real context.
 func codexDisplayUsage(last *tokenUsage) *model.Usage {
 	if last == nil || !validTokenUsage(last) {
 		return nil
 	}
 	usage := model.Usage{
 		InputTokens:            last.InputTokens,
-		OutputTokens:           last.OutputTokens + last.ReasoningOutputTokens,
+		OutputTokens:           last.OutputTokens,
 		CacheReadTokens:        last.CachedInputTokens,
 		InputIncludesCacheRead: true,
 	}
