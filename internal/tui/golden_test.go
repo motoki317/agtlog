@@ -1,6 +1,9 @@
 package tui
 
 import (
+	"crypto/sha256"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -82,14 +85,19 @@ func TestGoldenDetailFrame(t *testing.T) {
 
 func TestGoldenItemFrame(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
+	raw := []byte(`{"type":"assistant","message":{"model":"claude-opus-4-8","content":[{"type":"tool_use","id":"call-route","name":"Edit"}]}}`)
+	path := filepath.Join(t.TempDir(), "route.jsonl")
+	if err := os.WriteFile(path, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	session := &model.Session{
-		ID: "route", Agent: model.AgentClaude, Path: "/workspace/starship/route.jsonl", CWD: "/workspace/starship", Project: "starship", Title: "Plot route",
+		ID: "route", Agent: model.AgentClaude, Path: path, CWD: "/workspace/starship", Project: "starship", Title: "Plot route",
 		Models: []string{"claude-opus-4-8"}, GitBranch: "orbit/alpha", StartedAt: goldenNow.Add(-12 * time.Minute), UpdatedAt: goldenNow,
 		Usage: []model.Usage{{InputTokens: 64_000, OutputTokens: 4_000}}, Cost: model.Cost{USD: 0.48},
 		Events: []model.Event{
 			{Kind: model.EventUser, Text: "Adjust the lunar route"},
 			{Timestamp: goldenNow.Add(-5 * time.Minute), Kind: model.EventToolCall, Model: "claude-opus-4-8", ToolName: "Edit", ToolInput: "/workspace/starship/route.go", CallID: "call-route", AgentID: "agent-builder", ResultSummary: "route updated", Duration: 750 * time.Millisecond,
-				Raw: `{"type":"assistant","message":{"model":"claude-opus-4-8","content":[{"type":"tool_use","id":"call-route","name":"Edit"}]}}`, Detail: &model.ToolDetail{
+				RecordRef: model.RecordRef{Path: path, Length: int64(len(raw)), Digest: sha256.Sum256(raw)}, Detail: &model.ToolDetail{
 					Input:  "/workspace/starship/route.go",
 					Diff:   "-burn = 3\n burn = estimate\n+burn = 4",
 					Output: "route updated\nchecks ready",
@@ -107,7 +115,7 @@ func TestGoldenItemFrame(t *testing.T) {
 	} {
 		tm.Send(key)
 	}
-	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "call-route") }, teatest.WithDuration(time.Second))
+	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), `"type":"assistant"`) }, teatest.WithDuration(time.Second))
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}

@@ -20,19 +20,19 @@
 │route updated                                                                 │
 │                                                                              │
 │raw:                                                                          │
-│{                                                                             │
-│  "type": "assistant",                                                        │
-│  "message": {                                                                │
-│    "model": "claude-opus-4-8",                                               │
-│    "content": [                                                              │
-│      {                                                                       │
-│        "type": "tool_use",                                                   │
-│        "id": "call-route",                                                   │
-│        "name": "Edit"                                                        │
-│      }                                                                       │
-│    ]                                                                         │
-│  }                                                                           │
-│}                                                                             │
+│{"type":"assistant","message":{"model":"claude-opus-4-8","content":[{"type":"t│
+│ool_use","id":"call-route","name":"Edit"}]}}                                  │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
+│                                                                              │
 │                                                                              │
 │                                                                              │
 │                                                                              │

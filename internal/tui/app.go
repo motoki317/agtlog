@@ -52,6 +52,7 @@ type Model struct {
 	ctx               context.Context
 	refreshGeneration uint64
 	detailGeneration  uint64
+	itemGeneration    uint64
 }
 
 type screen int
@@ -180,7 +181,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
-			m.replaceDetailTree(loaded.session)
+			return m, m.replaceDetailTree(loaded.session)
 		}
 		return m, nil
 	}
@@ -214,8 +215,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.detailGeneration++
 					return m, loadDetail(m.ctx, m.registry, session, m.detailGeneration)
 				}
-				m.replaceDetailTree(session)
-				return m, nil
+				return m, m.replaceDetailTree(session)
 			}
 			m.screen, m.detail = screenList, nil
 			m.detailStack = nil
@@ -480,6 +480,9 @@ func (m *Model) activateDetailSelection() bool {
 		}
 		m.detailStack = append(m.detailStack, m.detail)
 		item := newItemViewWithState(event, detail.session.Agent, crumbs, m.width, m.height, m.styles, m.now(), false, detail.wrap)
+		m.itemGeneration++
+		item.ctx = m.ctx
+		item.generation = m.itemGeneration
 		item.focusKey = detail.focusables[detail.focus].key
 		m.detail = item
 		return true
@@ -603,7 +606,7 @@ func cloneDetailScreenForScroll(screen detailScreen) detailScreen {
 	}
 }
 
-func (m *Model) replaceDetailTree(root *model.Session) {
+func (m *Model) replaceDetailTree(root *model.Session) tea.Cmd {
 	screens := append(append([]detailScreen(nil), m.detailStack...), m.detail)
 	sessions := make(map[string]*model.Session)
 	var indexSessions func(*model.Session)
@@ -615,6 +618,7 @@ func (m *Model) replaceDetailTree(root *model.Session) {
 	}
 	indexSessions(root)
 	replacements := make([]detailScreen, 0, len(screens))
+	var rawCmd tea.Cmd
 	for _, screen := range screens {
 		state, ok := screen.(*detailState)
 		if !ok {
@@ -632,6 +636,10 @@ func (m *Model) replaceDetailTree(root *model.Session) {
 					crumbs = append(crumbs, label)
 				}
 				replacement := newItemViewWithState(event, parent.session.Agent, crumbs, m.width, m.height, m.styles, m.now(), item.showRaw, item.wrap)
+				m.itemGeneration++
+				replacement.ctx = m.ctx
+				replacement.generation = m.itemGeneration
+				rawCmd = replacement.requestRaw()
 				replacement.focusKey = item.focusKey
 				replacement.viewport.SetYOffset(item.viewport.YOffset)
 				replacements = append(replacements, replacement)
@@ -646,11 +654,12 @@ func (m *Model) replaceDetailTree(root *model.Session) {
 	}
 	if len(replacements) == 0 {
 		m.screen, m.detail, m.detailStack = screenList, nil, nil
-		return
+		return nil
 	}
 	last := len(replacements) - 1
 	m.detail = replacements[last]
 	m.detailStack = replacements[:last]
+	return rawCmd
 }
 
 func sameItemEvent(previous, replacement model.Event) bool {

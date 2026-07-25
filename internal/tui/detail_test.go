@@ -1,9 +1,13 @@
 package tui
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -16,11 +20,23 @@ import (
 	"github.com/motoki317/agtlog/internal/cost"
 	"github.com/motoki317/agtlog/internal/model"
 	"github.com/motoki317/agtlog/internal/source"
+	"github.com/motoki317/agtlog/internal/source/claude"
+	"github.com/motoki317/agtlog/internal/source/jsonl"
 	"github.com/muesli/termenv"
 )
 
 type detailTestSource struct {
 	session *model.Session
+}
+
+func writeRawRecord(t testing.TB, raw []byte) model.RecordRef {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	content := append(append([]byte(nil), raw...), '\n')
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return model.RecordRef{Path: path, Length: int64(len(raw)), Digest: sha256.Sum256(raw)}
 }
 
 func testCostBuckets(tokens int64, usd float64) model.CostBuckets {
@@ -2302,32 +2318,54 @@ func TestDrilledDetailFollowsRootLiveUpdate(t *testing.T) {
 
 func TestOpenItemFollowsRootLiveUpdate(t *testing.T) {
 	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	running := []byte(`{"status":"running","padding":"` + strings.Repeat("x", 300) + `"}`)
+	recordRef := writeRawRecord(t, running)
 	root := &model.Session{
-		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Project: "starship", Title: "Plan route",
+		ID: "route", Agent: model.AgentClaude, Path: recordRef.Path, Project: "starship", Title: "Plan route",
 		Events: []model.Event{
 			{Kind: model.EventUser, Text: "Check the route"},
-			{Timestamp: now.Add(-5 * time.Minute), Kind: model.EventToolCall, CallID: "call-route", ToolName: "Bash", ToolInput: "check-route", Raw: `{"status":"running","padding":"` + strings.Repeat("x", 300) + `"}`, Detail: &model.ToolDetail{Input: "check-route", Output: "running"}},
+			{Timestamp: now.Add(-5 * time.Minute), Kind: model.EventToolCall, CallID: "call-route", ToolName: "Bash", ToolInput: "check-route", RecordRef: recordRef, Detail: &model.ToolDetail{Input: "check-route", Output: "running"}},
 		},
 	}
 	m := newModelWithClock([]*model.Session{root}, nil, func() time.Time { return now })
 	for _, msg := range []tea.Msg{tea.WindowSizeMsg{Width: 80, Height: 10}, tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyDown}, tea.KeyMsg{Type: tea.KeyDown}, tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}}, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}}, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}}} {
-		updated, _ := m.Update(msg)
+		updated, cmd := m.Update(msg)
 		m = updated.(Model)
+		if cmd != nil {
+			updated, _ = m.Update(cmd())
+			m = updated.(Model)
+		}
 	}
 	before := m.detail.(*itemView)
 	oldOffset := before.viewport.YOffset
+	oldGeneration := before.generation
 	if !before.showRaw || before.wrap || oldOffset == 0 {
 		t.Fatalf("pre-update item state raw=%t wrap=%t offset=%d", before.showRaw, before.wrap, oldOffset)
 	}
 
+	finished := []byte(`{"status":"finished","padding":"` + strings.Repeat("y", 300) + `"}`)
+	if err := os.WriteFile(recordRef.Path, append(finished, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	finishedRef := model.RecordRef{Path: recordRef.Path, Length: int64(len(finished)), Digest: sha256.Sum256(finished)}
 	replacement := &model.Session{
-		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Project: "voyage", Title: "Plan updated route",
+		ID: "route", Agent: model.AgentClaude, Path: recordRef.Path, Project: "voyage", Title: "Plan updated route",
 		Events: []model.Event{
 			{Kind: model.EventUser, Text: "Check the route"},
-			{Timestamp: now.Add(-7 * time.Minute), Kind: model.EventToolCall, CallID: "call-route", ToolName: "Bash", ToolInput: "check-route", Raw: `{"status":"finished","padding":"` + strings.Repeat("y", 300) + `"}`, Detail: &model.ToolDetail{Input: "check-route", Output: "finished"}},
+			{Timestamp: now.Add(-7 * time.Minute), Kind: model.EventToolCall, CallID: "call-route", ToolName: "Bash", ToolInput: "check-route", RecordRef: finishedRef, Detail: &model.ToolDetail{Input: "check-route", Output: "finished"}},
 		},
 	}
-	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+	updated, cmd := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("live refresh did not re-request the visible raw record")
+	}
+	updated, _ = m.Update(rawRecordLoadedMsg{generation: oldGeneration, record: []byte(`{"status":"stale"}`)})
+	m = updated.(Model)
+	if item := m.detail.(*itemView); !item.rawLoading || len(item.raw) != 0 {
+		t.Fatalf("refreshed item accepted stale generation %d into generation %d", oldGeneration, item.generation)
+	}
+	updated, _ = m.Update(cmd())
 	m = updated.(Model)
 
 	view := ansi.Strip(m.View())
@@ -2348,7 +2386,7 @@ func TestOpenItemFollowsRootLiveUpdate(t *testing.T) {
 		refreshedLines = append(refreshedLines, line.text)
 	}
 	content := strings.Join(refreshedLines, "\n")
-	for _, want := range []string{"finished", "relative time: 7m", `"status": "finished"`} {
+	for _, want := range []string{"finished", "relative time: 7m", `"status":"finished"`} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("refreshed item content missing %q:\n%s", want, content)
 		}
@@ -2808,14 +2846,25 @@ func TestTimelineBodyLinesBoundsRunesBeforeWrapping(t *testing.T) {
 }
 
 func TestDetailHasBodyUsesBoundedInputProjection(t *testing.T) {
-	input := strings.Repeat("a", 2_500) + "\n" + strings.Repeat("b", 2_500)
-	event := model.Event{
-		Kind: model.EventToolCall, ToolName: "exec_command",
-		Detail: &model.ToolDetail{Input: input},
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "newline omitted from middle", input: strings.Repeat("a", 2_500) + "\n" + strings.Repeat("b", 2_500), want: false},
+		{name: "newline retained in head", input: "first\n" + strings.Repeat("b", 5_000), want: true},
 	}
 
-	if detailHasBody(event) {
-		t.Fatal("detailHasBody() exposed a newline omitted by the timeline's bounded projection")
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			event := model.Event{
+				Kind: model.EventToolCall, ToolName: "exec_command",
+				Detail: &model.ToolDetail{Input: test.input},
+			}
+			if got := detailHasBody(event); got != test.want {
+				t.Fatalf("detailHasBody() = %t, want %t for bounded input %q", got, test.want, model.BoundedDetailText(test.input))
+			}
+		})
 	}
 }
 
@@ -4086,11 +4135,12 @@ func TestItemViewStartsWithPresentMetadataAndOmitsEmptyFields(t *testing.T) {
 	}
 }
 
-func TestItemViewShowsBothTimesAndTogglesPrettyRawRecord(t *testing.T) {
+func TestItemViewShowsBothTimesAndLoadsRawRecordAsynchronously(t *testing.T) {
 	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	raw := []byte(`{"type":"user","message":{"content":"Inspect the route"}}`)
 	event := model.Event{
 		Timestamp: now.Add(-5 * time.Minute), Kind: model.EventUser, Text: "Inspect the route",
-		Raw: `{"type":"user","message":{"content":"Inspect the route"}}`,
+		RecordRef: writeRawRecord(t, raw),
 	}
 	item := newItemView(event, model.AgentClaude, nil, 80, 18, newStyles())
 	item.setNow(now)
@@ -4105,39 +4155,328 @@ func TestItemViewShowsBothTimesAndTogglesPrettyRawRecord(t *testing.T) {
 		t.Fatalf("raw record visible before toggle:\n%s", plain)
 	}
 
-	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	cmd := item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	if cmd == nil || !strings.Contains(ansi.Strip(item.view()), "loading raw…") {
+		t.Fatalf("raw toggle did not start an asynchronous load:\n%s", ansi.Strip(item.view()))
+	}
+	item.update(cmd())
 	plain = ansi.Strip(item.view())
-	for _, want := range []string{"raw:", `"message": {`, `"content": "Inspect the route"`, "R hide raw"} {
+	for _, want := range []string{"raw:", string(raw), "R hide raw"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("item view missing %q after raw toggle:\n%s", want, plain)
 		}
 	}
+	if strings.Contains(plain, `"message": {`) {
+		t.Fatalf("raw record was indented instead of kept source-exact:\n%s", plain)
+	}
 }
 
-func TestItemRawPanelReelidesEncryptedTokens(t *testing.T) {
-	token := "gAAAA" + strings.Repeat("A", 70)
+func TestItemRawToggleReusesInFlightRead(t *testing.T) {
+	raw := []byte(`{"status":"ready"}`)
 	item := newItemView(model.Event{
-		Kind: model.EventSystem,
-		Raw:  `{"secret":` + strconv.Quote(token) + `}`,
+		Kind: model.EventSystem, RecordRef: writeRawRecord(t, raw),
 	}, model.AgentCodex, nil, 80, 12, newStyles())
-	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+
+	cmd := item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	if cmd == nil || !item.showRaw || !item.rawLoading {
+		t.Fatal("first raw toggle did not schedule one visible load")
+	}
+	if duplicate := item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}}); duplicate != nil || item.showRaw {
+		t.Fatal("second raw toggle did not hide the in-flight load without duplicating it")
+	}
+	item.update(cmd())
+	if item.showRaw || item.rawLoading || !bytes.Equal(item.raw, raw) {
+		t.Fatal("hidden raw completion did not cache the complete record")
+	}
+	if duplicate := item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}}); duplicate != nil || !item.showRaw {
+		t.Fatal("third raw toggle did not reveal the cached result without another read")
+	}
+	if !strings.Contains(ansi.Strip(item.view()), string(raw)) {
+		t.Fatal("cached raw record was not visible after the third toggle")
+	}
+}
+
+func TestVisibleRawStateDoesNotClaimUnscheduledLoad(t *testing.T) {
+	event := model.Event{
+		Kind:      model.EventSystem,
+		RecordRef: model.RecordRef{Path: "/fictional/session.jsonl", Length: 24},
+	}
+	item := newItemViewWithState(event, model.AgentCodex, nil, 80, 12, newStyles(), time.Time{}, true, true)
+
+	if item.rawLoading {
+		t.Fatal("state-preserving constructor marked raw loading without returning a command")
+	}
+	if cmd := item.requestRaw(); cmd == nil || !item.rawLoading {
+		t.Fatal("requestRaw did not pair the loading state with a command")
+	}
+	if cmd := item.requestRaw(); cmd != nil {
+		t.Fatal("requestRaw scheduled a duplicate in-flight load")
+	}
+}
+
+func TestItemViewReportsRawReadFailuresWithoutFallback(t *testing.T) {
+	tests := []struct {
+		name    string
+		replace func(t *testing.T, path string)
+	}{
+		{
+			name: "missing file",
+			replace: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "non-regular file",
+			replace: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			raw := []byte(`{"status":"authoritative"}`)
+			ref := writeRawRecord(t, raw)
+			test.replace(t, ref.Path)
+			item := newItemView(model.Event{
+				Kind: model.EventSystem, Text: "derived fallback", RecordRef: ref,
+			}, model.AgentCodex, nil, 80, 12, newStyles())
+
+			cmd := item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+			if cmd == nil {
+				t.Fatal("raw toggle did not schedule the failing read")
+			}
+			item.update(cmd())
+			texts := make([]string, 0, len(item.lines))
+			for _, line := range item.lines {
+				texts = append(texts, line.text)
+			}
+			content := strings.Join(texts, "\n")
+			rawIndex := slices.Index(texts, "raw:")
+			if rawIndex < 0 || rawIndex+1 >= len(texts) || texts[rawIndex+1] != "raw unavailable: read failed" {
+				t.Fatalf("item content did not name the read failure:\n%s", content)
+			}
+			if strings.Contains(content, string(raw)) {
+				t.Fatalf("item content presented fallback raw after a read failure:\n%s", content)
+			}
+		})
+	}
+}
+
+func TestItemViewReportsChangedRawWithoutFallback(t *testing.T) {
+	original := []byte(`{"message":"original"}`)
+	ref := writeRawRecord(t, original)
+	changed := []byte(`{"message":"modified"}`)
+	if err := os.WriteFile(ref.Path, append(changed, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	item := newItemView(model.Event{Kind: model.EventSystem, RecordRef: ref}, model.AgentClaude, nil, 80, 12, newStyles())
+
+	cmd := item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	item.update(cmd())
+
+	content := make([]string, 0, len(item.lines))
+	for _, line := range item.lines {
+		content = append(content, line.text)
+	}
+	rendered := strings.Join(content, "\n")
+	if !strings.Contains(rendered, "raw unavailable: source changed") || strings.Contains(rendered, "original") || strings.Contains(rendered, "modified") {
+		t.Fatalf("changed raw rendered a fallback body:\n%s", rendered)
+	}
+}
+
+func TestCurrentItemDiscardsPreviousItemsRawResult(t *testing.T) {
+	rawA := []byte(`{"item":"a"}`)
+	itemA := newItemView(model.Event{
+		Kind: model.EventSystem, RecordRef: writeRawRecord(t, rawA),
+	}, model.AgentCodex, nil, 80, 12, newStyles())
+	itemA.generation = 1
+	cmdA := itemA.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+
+	rawB := []byte(`{"item":"b"}`)
+	itemB := newItemView(model.Event{
+		Kind: model.EventSystem, RecordRef: writeRawRecord(t, rawB),
+	}, model.AgentCodex, nil, 80, 12, newStyles())
+	itemB.generation = 2
+	cmdB := itemB.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	m := NewModel(nil, nil)
+	m.screen = screenDetail
+	m.detail = itemB
+
+	updated, _ := m.Update(cmdA())
+	m = updated.(Model)
+	current := m.detail.(*itemView)
+	if !current.rawLoading || len(current.raw) != 0 {
+		t.Fatalf("current item accepted generation 1 while generation %d was loading", current.generation)
+	}
+
+	updated, _ = m.Update(cmdB())
+	current = updated.(Model).detail.(*itemView)
+	if current.rawLoading || !bytes.Equal(current.raw, rawB) {
+		t.Fatalf("current item raw = %q loading=%t, want item B", current.raw, current.rawLoading)
+	}
+}
+
+func TestFullFidelityCompactionSummaryAcrossParserTimelineAndItem(t *testing.T) {
+	summary := "first-" + strings.Repeat("界", 5_000) + "-last"
+	line := `{"type":"user","timestamp":"2026-01-02T03:04:05Z","isCompactSummary":true,"message":{"content":` + strconv.Quote(summary) + `}}`
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentClaude}
+	parser := claude.NewParser(cost.NewCalculator(cost.Table{}))
+
+	if err := parser.LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Events) != 1 || session.Events[0].Text != summary {
+		t.Fatalf("parsed compaction summary has %d runes, want %d", len([]rune(session.Events[0].Text)), len([]rune(summary)))
+	}
+	bounded := model.BoundedDetailText(summary)
+	detail := newDetailState(session, 80, 12, newStyles())
+	foundBounded := false
+	for _, timelineLine := range detail.lines {
+		foundBounded = foundBounded || strings.Contains(timelineLine.text, bounded)
+		if strings.Contains(timelineLine.text, summary) {
+			t.Fatal("timeline rendered the unbounded compaction summary")
+		}
+	}
+	if !foundBounded {
+		t.Fatal("timeline did not render the existing 4096-rune middle-ellipsis form")
+	}
+
+	item := newItemView(session.Events[0], model.AgentClaude, nil, 80, 12, newStyles())
+	foundFull := false
+	for _, itemLine := range item.lines {
+		foundFull = foundFull || itemLine.text == summary
+	}
+	if !foundFull {
+		t.Fatal("item view did not retain the complete compaction summary")
+	}
+	cmd := item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	item.update(cmd())
+	if string(item.raw) != line {
+		t.Fatalf("raw item bytes differ from fixture line: got %d bytes, want %d", len(item.raw), len(line))
+	}
+
+	changed := []byte(line)
+	changed[len(changed)-2] ^= 1
+	if err := os.WriteFile(path, append(changed, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changedItem := newItemView(session.Events[0], model.AgentClaude, nil, 80, 12, newStyles())
+	cmd = changedItem.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	changedItem.update(cmd())
+	content := make([]string, 0, len(changedItem.lines))
+	for _, itemLine := range changedItem.lines {
+		content = append(content, itemLine.text)
+	}
+	if got := strings.Join(content, "\n"); !strings.Contains(got, "raw unavailable: source changed") || strings.Contains(got, line) {
+		t.Fatalf("rewritten fixture rendered stale raw content:\n%s", got)
+	}
+}
+
+func TestItemViewDiscardsRawResultAfterBackNavigation(t *testing.T) {
+	raw := []byte(`{"message":"source"}`)
+	event := model.Event{Kind: model.EventSystem, Text: "Derived", RecordRef: writeRawRecord(t, raw)}
+	session := &model.Session{ID: "route", Agent: model.AgentClaude, Events: []model.Event{event}}
+	m := NewModel([]*model.Session{session}, nil)
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyEnter}} {
+		updated, _ := m.Update(key)
+		m = updated.(Model)
+	}
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	m = updated.(Model)
+	if cmd == nil {
+		t.Fatal("raw toggle did not return a load command")
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+
+	if _, itemOpen := m.detail.(*itemView); itemOpen {
+		t.Fatal("late raw result reopened or mutated the item after back navigation")
+	}
+}
+
+func TestItemRawPanelKeepsEncryptedTokensSourceExact(t *testing.T) {
+	token := "gAAAA" + strings.Repeat("A", 70)
+	raw := []byte(`{"secret":` + strconv.Quote(token) + `}`)
+	item := newItemView(model.Event{
+		Kind: model.EventSystem, RecordRef: writeRawRecord(t, raw),
+	}, model.AgentCodex, nil, 80, 12, newStyles())
+	cmd := item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	item.update(cmd())
 
 	plain := ansi.Strip(item.view())
-	if strings.Contains(plain, token) || !strings.Contains(plain, "<encrypted 75 chars>") {
-		t.Fatalf("raw panel did not safely elide encrypted token:\n%s", plain)
+	if string(item.raw) != string(raw) || strings.Contains(plain, "<encrypted 75 chars>") {
+		t.Fatalf("raw panel did not keep the encrypted token source-exact:\n%s", plain)
 	}
 }
 
 func TestItemRawPanelSanitizesMalformedTerminalText(t *testing.T) {
+	raw := []byte("malformed\x1b[2J\u202erecord")
 	item := newItemView(model.Event{
-		Kind: model.EventSystem,
-		Raw:  "malformed\x1b[2J\u202erecord",
+		Kind: model.EventSystem, RecordRef: writeRawRecord(t, raw),
 	}, model.AgentCodex, nil, 40, 10, newStyles())
-	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	cmd := item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	item.update(cmd())
 
 	view := item.view()
-	if strings.Contains(view, "\x1b[2J") || strings.Contains(view, "\u202e") || !strings.Contains(ansi.Strip(view), "malformed record") {
+	if strings.Contains(view, "\x1b[2J") || strings.Contains(view, "\u202e") || !strings.Contains(ansi.Strip(view), `malformed\x1b[2J\u202erecord`) {
 		t.Fatalf("raw panel did not sanitize terminal text:\n%q", view)
+	}
+}
+
+func TestTerminalSafeRawRecordEscapesOnlyUnsafeCharacters(t *testing.T) {
+	raw := append([]byte(`safe \ path "界"`), '\t', '\n', '\r', 0, 0x1b, 0x7f)
+	raw = append(raw, []byte("\u202e")...)
+	raw = append(raw, 0xff)
+	want := `safe \ path "界"\t\n\r\x00\x1b\x7f\u202e\xff`
+
+	if got := terminalSafeRawRecord(raw); got != want {
+		t.Fatalf("terminalSafeRawRecord() = %q, want %q", got, want)
+	}
+}
+
+func TestTerminalSafeRawRecordDisambiguatesEscapedText(t *testing.T) {
+	tests := []struct {
+		name    string
+		unsafe  []byte
+		literal []byte
+	}{
+		{name: "tab", unsafe: []byte{'\t'}, literal: []byte(`\t`)},
+		{name: "newline", unsafe: []byte{'\n'}, literal: []byte(`\n`)},
+		{name: "escape", unsafe: []byte{0x1b}, literal: []byte(`\x1b`)},
+		{name: "format rune", unsafe: []byte("\u202e"), literal: []byte(`\u202e`)},
+		{name: "invalid UTF-8", unsafe: []byte{0xff}, literal: []byte(`\xff`)},
+		{name: "backslash then tab", unsafe: []byte{'\\', '\t'}, literal: []byte(`\t`)},
+		{name: "backslash then newline", unsafe: []byte{'\\', '\n'}, literal: []byte(`\n`)},
+		{name: "backslash then escape", unsafe: []byte{'\\', 0x1b}, literal: []byte(`\x1b`)},
+		{name: "backslash then format rune", unsafe: append([]byte{'\\'}, []byte("\u202e")...), literal: []byte(`\u202e`)},
+		{name: "backslash then invalid UTF-8", unsafe: []byte{'\\', 0xff}, literal: []byte(`\xff`)},
+		{name: "repeated backslash then newline", unsafe: []byte{'\\', '\\', '\n'}, literal: []byte(`\\n`)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			escapedUnsafe := terminalSafeRawRecord(test.unsafe)
+			escapedLiteral := terminalSafeRawRecord(test.literal)
+			if escapedUnsafe == escapedLiteral {
+				t.Fatalf("unsafe %q and literal %q both rendered as %q", test.unsafe, test.literal, escapedUnsafe)
+			}
+		})
 	}
 }
 
@@ -4337,6 +4676,20 @@ func TestDetailAndItemWrapByDefault(t *testing.T) {
 	}
 }
 
+func TestLoadedItemModelUpdateSharesImmutableRawRecord(t *testing.T) {
+	item := newItemView(model.Event{Kind: model.EventSystem}, model.AgentCodex, nil, 80, 12, newStyles())
+	item.raw = []byte(`{"route":"ready"}`)
+	m := NewModel(nil, nil)
+	m.screen = screenDetail
+	m.detail = item
+
+	updated, _ := m.Update(struct{}{})
+	cloned := updated.(Model).detail.(*itemView)
+	if &cloned.raw[0] != &item.raw[0] {
+		t.Fatal("Model.Update copied an immutable loaded raw record")
+	}
+}
+
 func TestItemViewLayoutChangesClampScrollOffset(t *testing.T) {
 	lines := make([]string, 12)
 	for index := range lines {
@@ -4363,6 +4716,43 @@ func TestItemViewLayoutChangesClampScrollOffset(t *testing.T) {
 			t.Fatalf("unwrapped item offset = %d, want <= %d", item.viewport.YOffset, maxOffset)
 		}
 	})
+}
+
+func BenchmarkItemRenderer16MiB(b *testing.B) {
+	const envelope = `{"payload":""}`
+	raw := []byte(`{"payload":"` + strings.Repeat("x", jsonl.MaxLineBytes-len(envelope)) + `"}`)
+	item := newItemView(model.Event{
+		Kind:      model.EventSystem,
+		RecordRef: model.RecordRef{Path: "/fictional/session.jsonl", Length: int64(len(raw)), Digest: sha256.Sum256(raw)},
+	}, model.AgentCodex, nil, 120, 24, newStyles())
+	item.showRaw = true
+	item.raw = raw
+	item.rebuildLines()
+	b.SetBytes(int64(len(raw)))
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		item.rebuildLines()
+		item.rebuild()
+	}
+}
+
+func BenchmarkLoadedItemModelUpdate16MiB(b *testing.B) {
+	raw := make([]byte, 16<<20)
+	item := newItemView(model.Event{Kind: model.EventSystem}, model.AgentCodex, nil, 120, 24, newStyles())
+	item.raw = raw
+	m := NewModel(nil, nil)
+	m.screen = screenDetail
+	m.detail = item
+	b.SetBytes(int64(len(raw)))
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for b.Loop() {
+		updated, _ := m.Update(struct{}{})
+		m = updated.(Model)
+	}
 }
 
 func TestItemViewNarrowTitleKeepsItemLabel(t *testing.T) {

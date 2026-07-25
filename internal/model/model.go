@@ -219,7 +219,6 @@ type Event struct {
 	Kind          EventKind
 	Text          string
 	RecordRef     RecordRef `json:"-"`
-	Raw           string
 	Model         string
 	CallID        string
 	ToolName      string
