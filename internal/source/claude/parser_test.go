@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"math"
 	"os"
@@ -34,7 +35,7 @@ func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
 	}
 }
 
-func TestLoadEventsPopulatesBoundedEncryptedElidedRawRecord(t *testing.T) {
+func TestLoadEventsPopulatesClaudeRecordRef(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session-raw.jsonl")
 	token := "gAAAA" + strings.Repeat("A", 70)
 	line := `{"type":"user","timestamp":"2026-01-02T03:04:05Z","message":{"content":` + strconv.Quote("Inspect "+token+strings.Repeat(" route", 900)) + `}}`
@@ -48,12 +49,38 @@ func TestLoadEventsPopulatesBoundedEncryptedElidedRawRecord(t *testing.T) {
 	if len(session.Events) != 1 {
 		t.Fatalf("LoadEvents().Events = %#v, want one", session.Events)
 	}
-	raw := session.Events[0].Raw
-	if raw == "" || strings.Contains(raw, token) || !strings.Contains(raw, "<encrypted 75 chars>") || !json.Valid([]byte(raw)) {
-		t.Fatalf("Event.Raw = %q, want populated with encrypted token elided", raw)
+	want := model.RecordRef{Path: path, Length: int64(len(line)), Digest: sha256.Sum256([]byte(line))}
+	if got := session.Events[0].RecordRef; got != want {
+		t.Fatalf("Event.RecordRef = %#v, want %#v", got, want)
 	}
-	if len([]rune(raw)) > 4096 {
-		t.Fatalf("Event.Raw rune count = %d, want bounded", len([]rune(raw)))
+}
+
+func TestLoadEventsPreservesFullClaudeMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-long-message.jsonl")
+	text := "first-" + strings.Repeat("x", 5_000) + "-last"
+	line := `{"type":"user","timestamp":"2026-01-02T03:04:05Z","message":{"content":` + strconv.Quote(text) + `}}`
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 1 || session.Events[0].Text != text {
+		t.Fatalf("LoadEvents().Events[0].Text has %d runes, want %d", len([]rune(session.Events[0].Text)), len([]rune(text)))
+	}
+}
+
+func TestUserTextJoinsClaudeTextBlocks(t *testing.T) {
+	content := json.RawMessage(`[
+		{"type":"text","text":"Survey the ridge"},
+		{"type":"tool_result","text":"ignored"},
+		{"type":"text","text":"Then map the basin"}
+	]`)
+
+	if got, want := userText(content), "Survey the ridge\nThen map the basin"; got != want {
+		t.Fatalf("userText() = %q, want %q", got, want)
 	}
 }
 
@@ -795,6 +822,14 @@ func TestClaudeToolDetailLeavesDeepJSONRaw(t *testing.T) {
 	}
 }
 
+func TestClaudePrettyInputReturnsUnboundedRawWhenGuardTrips(t *testing.T) {
+	input := json.RawMessage(`{"payload":"` + strings.Repeat("x", 5_000) + `"}`)
+
+	if got := claudePrettyInput(input); got != string(input) {
+		t.Fatalf("claudePrettyInput() returned %d bytes, want unbounded %d-byte input", len(got), len(input))
+	}
+}
+
 func TestClaudeToolDetailOmitsSubagentTools(t *testing.T) {
 	for _, name := range []string{"Agent", "Task"} {
 		if detail := claudeToolDetail(name, json.RawMessage(`{"description":"Survey the ridge"}`)); detail != nil {
@@ -803,7 +838,7 @@ func TestClaudeToolDetailOmitsSubagentTools(t *testing.T) {
 	}
 }
 
-func TestClaudeToolDetailBoundsEveryField(t *testing.T) {
+func TestClaudeToolDetailPreservesEveryField(t *testing.T) {
 	value := "start\n" + strings.Repeat("界", 5000) + "\nend"
 	bashInput, err := json.Marshal(map[string]string{"command": value})
 	if err != nil {
@@ -813,12 +848,12 @@ func TestClaudeToolDetailBoundsEveryField(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := claudeToolDetail("Bash", bashInput).Input, model.BoundedDetailText(value); got != want {
-		t.Fatalf("bounded Input has %d runes, want %d", len([]rune(got)), len([]rune(want)))
+	if got := claudeToolDetail("Bash", bashInput).Input; got != value {
+		t.Fatalf("Input has %d runes, want %d", len([]rune(got)), len([]rune(value)))
 	}
 	unboundedDiff := "+" + strings.ReplaceAll(value, "\n", "\n+")
-	if got, want := claudeToolDetail("Write", writeInput).Diff, model.BoundedDetailText(unboundedDiff); got != want {
-		t.Fatalf("bounded Diff has %d runes, want %d", len([]rune(got)), len([]rune(want)))
+	if got := claudeToolDetail("Write", writeInput).Diff; got != unboundedDiff {
+		t.Fatalf("Diff has %d runes, want %d", len([]rune(got)), len([]rune(unboundedDiff)))
 	}
 
 	path := filepath.Join(t.TempDir(), "session-bounded-output.jsonl")
@@ -850,8 +885,8 @@ func TestClaudeToolDetailBoundsEveryField(t *testing.T) {
 	if err := testParser().LoadEvents(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := session.Events[0].Detail.Output, model.BoundedDetailText(value); got != want {
-		t.Fatalf("bounded Output has %d runes, want %d", len([]rune(got)), len([]rune(want)))
+	if got := session.Events[0].Detail.Output; got != value {
+		t.Fatalf("Output has %d runes, want %d", len([]rune(got)), len([]rune(value)))
 	}
 }
 

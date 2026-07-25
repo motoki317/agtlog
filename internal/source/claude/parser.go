@@ -3,6 +3,7 @@ package claude
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -183,7 +184,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 		messageID    string
 	}
 	var advisorRefs []advisorRef
-	err = jsonl.ForEachContext(ctx, file, func(line []byte) {
+	err = jsonl.ForEachContextWithOffset(ctx, file, func(line []byte, offset, length int64) {
 		var record struct {
 			Type      string `json:"type"`
 			Subtype   string `json:"subtype"`
@@ -219,25 +220,17 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 		if json.Unmarshal(markers.Origin, &origin) != nil {
 			origin = nil
 		}
-		var raw string
-		rawLoaded := false
-		rawRecord := func() string {
-			if !rawLoaded {
-				raw = model.BoundedRawRecord(string(line))
-				rawLoaded = true
-			}
-			return raw
-		}
+		recordRef := model.RecordRef{Path: session.Path, Offset: offset, Length: length, Digest: sha256.Sum256(line)}
 		timestamp, _ := time.Parse(time.RFC3339Nano, record.Timestamp)
 		if record.Type == "system" {
 			if record.Subtype == "compact_boundary" {
 				session.Events = append(session.Events, model.Event{
 					Timestamp:         timestamp,
 					Kind:              model.EventCompact,
-					Text:              model.BoundedDetailText(record.Content),
+					Text:              model.ElideEncrypted(record.Content),
 					CompactTrigger:    record.CompactMetadata.Trigger,
 					CompactPostTokens: record.CompactMetadata.PostTokens,
-					Raw:               rawRecord(),
+					RecordRef:         recordRef,
 				})
 			}
 			return
@@ -250,9 +243,9 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 				session.Events = append(session.Events, model.Event{
 					Timestamp: timestamp,
 					Kind:      model.EventUser,
-					Text:      model.BoundedDetailText(text),
+					Text:      model.ElideEncrypted(text),
 					Harness:   claudeUserIsHarness(markers.IsMeta, markers.IsCompactSummary, markers.PromptSource, origin, text),
-					Raw:       rawRecord(),
+					RecordRef: recordRef,
 				})
 			}
 		}
@@ -292,7 +285,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 					continue
 				}
 				event.Kind, event.CallID, event.ToolName = model.EventToolCall, block.ID, block.Name
-				event.ToolInput = model.BoundedDetailText(claudeToolInput(block.Name, block.Input))
+				event.ToolInput = model.ElideEncrypted(claudeToolInput(block.Name, block.Input))
 				event.Detail = claudeToolDetail(block.Name, block.Input)
 				if block.Name == "Agent" || block.Name == "Task" {
 					event.Kind = model.EventSubagent
@@ -309,7 +302,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 				if index, ok := calls[block.ToolUseID]; ok {
 					call := &session.Events[index]
 					if call.Detail != nil && block.ToolUseID != "" {
-						call.Detail.Output = model.BoundedDetailText(claudeResultText(block.Content))
+						call.Detail.Output = model.ElideEncrypted(claudeResultText(block.Content))
 					}
 					if agentID := toolResultAgentID(record.ToolUseResult); call.Kind == model.EventSubagent && agentID != "" {
 						if subagent := subagentByID(session.Subagents, agentID); subagent != nil {
@@ -318,7 +311,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 							linkedSubagents[subagent] = true
 						}
 					}
-					event.Text = model.BoundedDetailText(claudeResultSummary(call.ToolName, event.Text, block.IsError))
+					event.Text = model.ElideEncrypted(claudeResultSummary(call.ToolName, event.Text, block.IsError))
 					call.ResultSummary = event.Text
 					if !timestamp.Before(call.Timestamp) {
 						call.Duration = timestamp.Sub(call.Timestamp)
@@ -344,9 +337,9 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 			default:
 				continue
 			}
-			event.Text = model.BoundedDetailText(event.Text)
+			event.Text = model.ElideEncrypted(event.Text)
 			if event.Text != "" || event.Kind == model.EventToolCall || event.Kind == model.EventToolResult || event.Kind == model.EventSubagent || event.Kind == model.EventAdvisor {
-				event.Raw = rawRecord()
+				event.RecordRef = recordRef
 				session.Events = append(session.Events, event)
 			}
 		}
@@ -512,42 +505,42 @@ func claudeToolDetail(name string, input json.RawMessage) *model.ToolDetail {
 			New string `json:"new_string"`
 		}
 		if json.Unmarshal(input, &fields) != nil {
-			detail.Input = model.BoundedDetailText(string(input))
+			detail.Input = model.ElideEncrypted(string(input))
 			return detail
 		}
-		detail.Diff = model.BoundedDetailText(claudeReplaceBlock(fields.Old, fields.New))
+		detail.Diff = model.ElideEncrypted(claudeReplaceBlock(fields.Old, fields.New))
 	case "MultiEdit":
 		var fields struct {
 			Edits json.RawMessage `json:"edits"`
 		}
 		if json.Unmarshal(input, &fields) != nil {
-			detail.Input = model.BoundedDetailText(string(input))
+			detail.Input = model.ElideEncrypted(string(input))
 			return detail
 		}
 		diff, ok := claudeMultiEditDiff(fields.Edits)
 		if !ok {
-			detail.Input = model.BoundedDetailText(string(input))
+			detail.Input = model.ElideEncrypted(string(input))
 			return detail
 		}
-		detail.Diff = model.BoundedDetailText(diff)
+		detail.Diff = model.ElideEncrypted(diff)
 	case "Write":
 		var fields struct {
 			Content string `json:"content"`
 		}
 		if json.Unmarshal(input, &fields) != nil {
-			detail.Input = model.BoundedDetailText(string(input))
+			detail.Input = model.ElideEncrypted(string(input))
 			return detail
 		}
-		detail.Diff = model.BoundedDetailText(claudeReplaceBlock("", fields.Content))
+		detail.Diff = model.ElideEncrypted(claudeReplaceBlock("", fields.Content))
 	case "Bash":
 		var fields struct {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal(input, &fields) != nil {
-			detail.Input = model.BoundedDetailText(string(input))
+			detail.Input = model.ElideEncrypted(string(input))
 			return detail
 		}
-		detail.Input = model.BoundedDetailText(fields.Command)
+		detail.Input = model.ElideEncrypted(fields.Command)
 	case "Read":
 		var fields struct {
 			FilePath string `json:"file_path"`
@@ -555,7 +548,7 @@ func claudeToolDetail(name string, input json.RawMessage) *model.ToolDetail {
 			Limit    *int   `json:"limit"`
 		}
 		if json.Unmarshal(input, &fields) != nil {
-			detail.Input = model.BoundedDetailText(string(input))
+			detail.Input = model.ElideEncrypted(string(input))
 			return detail
 		}
 		parts := []string{fields.FilePath}
@@ -565,9 +558,9 @@ func claudeToolDetail(name string, input json.RawMessage) *model.ToolDetail {
 		if fields.Limit != nil {
 			parts = append(parts, fmt.Sprintf("limit %d", *fields.Limit))
 		}
-		detail.Input = model.BoundedDetailText(strings.Join(parts, " · "))
+		detail.Input = model.ElideEncrypted(strings.Join(parts, " · "))
 	default:
-		detail.Input = model.BoundedDetailText(claudePrettyInput(input))
+		detail.Input = model.ElideEncrypted(claudePrettyInput(input))
 	}
 	return detail
 }
@@ -575,7 +568,7 @@ func claudeToolDetail(name string, input json.RawMessage) *model.ToolDetail {
 func claudePrettyInput(input json.RawMessage) string {
 	raw := string(input)
 	if bounded := model.BoundedDetailText(raw); bounded != raw {
-		return bounded
+		return raw
 	}
 	input = bytes.TrimSpace(input)
 	if !claudeJSONNestingWithin(input, 32) {
@@ -1013,12 +1006,13 @@ func userText(content json.RawMessage) string {
 	if json.Unmarshal(content, &blocks) != nil {
 		return ""
 	}
+	parts := make([]string, 0, len(blocks))
 	for _, block := range blocks {
 		if block.Type == "text" && block.Text != "" {
 			if text := model.CleanTimelineText(block.Text); text != "" {
-				return text
+				parts = append(parts, text)
 			}
 		}
 	}
-	return ""
+	return strings.Join(parts, "\n")
 }
