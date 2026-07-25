@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -145,7 +146,10 @@ type flattenedSubagent struct {
 	s     *model.Session
 }
 
-const detailPreviewLineCap = 40
+const (
+	detailPreviewLineCap = 40
+	detailPreviewRuneCap = 4096
+)
 
 const (
 	detailRelativeTimeWidth = 4
@@ -1596,7 +1600,7 @@ func detailPlainText(text string) string {
 
 func detailHasBody(event model.Event) bool {
 	detail := event.Detail
-	return detail != nil && (detail.Diff != "" || detail.Output != "" || strings.Contains(model.BoundedDetailText(detail.Input), "\n") && detailInputBody(event) != "")
+	return detail != nil && (detail.Diff != "" || detail.Output != "" || detailInputBody(event) != "" && strings.Contains(detail.Input, "\n"))
 }
 
 // assistantTextLines renders an assistant reply as one collapsible row: a preview
@@ -1669,25 +1673,238 @@ func firstLine(text string) string {
 	return ""
 }
 
-func boundLines(text string, maxLines int) []string {
-	lines := strings.Split(text, "\n")
-	if len(lines) <= maxLines {
-		return lines
+func timelineBodyLines(text string) []string {
+	type sourceLine struct {
+		start int
+		end   int
+		runes int
 	}
-	if maxLines <= 0 {
-		return nil
+
+	headLines := make([]sourceLine, 0, detailPreviewLineCap)
+	tailLines := make([]sourceLine, detailPreviewLineCap)
+	totalLines, totalRunes := 0, 0
+	var firstContent sourceLine
+	hasContent := false
+	for start := 0; ; {
+		end := len(text)
+		if newline := strings.IndexByte(text[start:], '\n'); newline >= 0 {
+			end = start + newline
+		}
+		runes := utf8.RuneCountInString(text[start:end])
+		if end < len(text) {
+			runes++
+		}
+		line := sourceLine{start: start, end: end, runes: runes}
+		if !hasContent && timelineLineHasVisibleContent(text[start:end]) {
+			firstContent, hasContent = line, true
+		}
+		if len(headLines) < detailPreviewLineCap {
+			headLines = append(headLines, line)
+		}
+		tailLines[totalLines%detailPreviewLineCap] = line
+		totalLines++
+		totalRunes += runes
+		if end == len(text) {
+			break
+		}
+		start = end + 1
 	}
-	head := (maxLines - 1) / 2
-	tail := maxLines - 1 - head
-	bounded := make([]string, 0, maxLines)
-	bounded = append(bounded, lines[:head]...)
-	bounded = append(bounded, fmt.Sprintf("… %d lines hidden …", len(lines)-head-tail))
-	bounded = append(bounded, lines[len(lines)-tail:]...)
+	if totalRunes <= detailPreviewRuneCap && totalLines <= detailPreviewLineCap {
+		bounded := make([]string, len(headLines))
+		for index, line := range headLines {
+			bounded[index] = text[line.start:line.end]
+		}
+		return bounded
+	}
+	if totalLines == 1 {
+		return []string{truncateTimelineLine(text, detailPreviewRuneCap)}
+	}
+
+	headLimit := (detailPreviewLineCap - 1) / 2
+	tailLimit := detailPreviewLineCap - 1 - headLimit
+	head, tail := make([]sourceLine, 0, headLimit), make([]sourceLine, 0, tailLimit)
+	selectedRunes := 0
+	fits := func(candidateRunes, headCount, tailCount int) bool {
+		hidden := totalLines - headCount - tailCount
+		markerRunes := utf8.RuneCountInString(timelineHiddenMarker(hidden))
+		if tailCount > 0 {
+			markerRunes++
+		}
+		return candidateRunes+markerRunes <= detailPreviewRuneCap
+	}
+	for headIndex, tailIndex := 0, totalLines-1; headIndex <= tailIndex; {
+		progressed := false
+		if headIndex < headLimit {
+			line := headLines[headIndex]
+			if fits(selectedRunes+line.runes, len(head)+1, len(tail)) {
+				head = append(head, line)
+				selectedRunes += line.runes
+				headIndex++
+				progressed = true
+			}
+		}
+		if headIndex <= tailIndex && len(tail) < tailLimit {
+			line := tailLines[tailIndex%detailPreviewLineCap]
+			if fits(selectedRunes+line.runes, len(head), len(tail)+1) {
+				tail = append(tail, line)
+				selectedRunes += line.runes
+				tailIndex--
+				progressed = true
+			}
+		}
+		if !progressed {
+			break
+		}
+		if headIndex == headLimit && len(tail) == tailLimit {
+			break
+		}
+	}
+	selectedHasContent := false
+	for _, line := range head {
+		selectedHasContent = selectedHasContent || timelineLineHasVisibleContent(text[line.start:line.end])
+	}
+	for _, line := range tail {
+		selectedHasContent = selectedHasContent || timelineLineHasVisibleContent(text[line.start:line.end])
+	}
+	if hasContent && !selectedHasContent {
+		for {
+			hidden := totalLines - len(head) - len(tail) - 1
+			lineRunes := detailPreviewRuneCap - selectedRunes
+			rows := len(head) + 1 + len(tail)
+			if hidden > 0 {
+				lineRunes -= utf8.RuneCountInString(timelineHiddenMarker(hidden)) + 1
+				rows++
+				if len(tail) > 0 {
+					lineRunes--
+				}
+			} else if len(tail) > 0 {
+				lineRunes--
+			}
+			if rows <= detailPreviewLineCap && lineRunes > 1 {
+				bounded := make([]string, 0, rows)
+				for _, line := range head {
+					bounded = append(bounded, text[line.start:line.end])
+				}
+				bounded = append(bounded, truncateTimelineLine(text[firstContent.start:firstContent.end], lineRunes))
+				if hidden > 0 {
+					bounded = append(bounded, timelineHiddenMarker(hidden))
+				}
+				for index := len(tail) - 1; index >= 0; index-- {
+					line := tail[index]
+					bounded = append(bounded, text[line.start:line.end])
+				}
+				return bounded
+			}
+			if len(tail) > 0 {
+				selectedRunes -= tail[len(tail)-1].runes
+				tail = tail[:len(tail)-1]
+			} else if len(head) > 0 {
+				selectedRunes -= head[len(head)-1].runes
+				head = head[:len(head)-1]
+			} else {
+				break
+			}
+		}
+	}
+	if len(head) == 0 {
+		hidden := totalLines - 1 - len(tail)
+		lineRunes := detailPreviewRuneCap - selectedRunes - 1
+		if hidden > 0 {
+			lineRunes -= utf8.RuneCountInString(timelineHiddenMarker(hidden))
+			if len(tail) > 0 {
+				lineRunes--
+			}
+		}
+		if lineRunes > 1 {
+			line := headLines[0]
+			bounded := []string{truncateTimelineLine(text[line.start:line.end], lineRunes)}
+			if hidden > 0 {
+				bounded = append(bounded, timelineHiddenMarker(hidden))
+			}
+			for index := len(tail) - 1; index >= 0; index-- {
+				line = tail[index]
+				bounded = append(bounded, text[line.start:line.end])
+			}
+			return bounded
+		}
+	}
+
+	bounded := make([]string, 0, len(head)+1+len(tail))
+	for _, line := range head {
+		bounded = append(bounded, text[line.start:line.end])
+	}
+	bounded = append(bounded, timelineHiddenMarker(totalLines-len(head)-len(tail)))
+	for index := len(tail) - 1; index >= 0; index-- {
+		line := tail[index]
+		bounded = append(bounded, text[line.start:line.end])
+	}
 	return bounded
 }
 
-func timelineBodyLines(text string) []string {
-	return boundLines(model.BoundedDetailText(text), detailPreviewLineCap)
+func timelineLineHasVisibleContent(line string) bool {
+	var state byte
+	for len(line) > 0 {
+		sequence, width, consumed, nextState := ansi.DecodeSequence(line, state, nil)
+		if consumed == 0 {
+			return false
+		}
+		line = line[consumed:]
+		state = nextState
+		if width == 0 {
+			continue
+		}
+		for _, char := range sequence {
+			if !unicode.IsSpace(char) && !unicode.IsControl(char) && !unicode.In(char, unicode.Cf) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func truncateTimelineLine(line string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+
+	var output strings.Builder
+	output.Grow(min(len(line), maxRunes*utf8.UTFMax))
+	state, runes, lastRuneStart := byte(0), 0, 0
+	for len(line) > 0 {
+		sequence, width, consumed, nextState := ansi.DecodeSequence(line, state, nil)
+		if consumed == 0 {
+			break
+		}
+		line = line[consumed:]
+		state = nextState
+
+		if width == 0 {
+			char, size := utf8.DecodeRuneInString(sequence)
+			if size != len(sequence) || char == utf8.RuneError && size == 1 || char == '\x1b' {
+				continue
+			}
+		}
+		for _, char := range sequence {
+			if unicode.IsControl(char) || unicode.In(char, unicode.Cf) {
+				char = ' '
+			}
+			if runes == maxRunes {
+				bounded := output.String()
+				return bounded[:lastRuneStart] + "…"
+			}
+			lastRuneStart = output.Len()
+			output.WriteRune(char)
+			runes++
+		}
+	}
+	return output.String()
+}
+
+func timelineHiddenMarker(hidden int) string {
+	if hidden == 1 {
+		return "… 1 line hidden …"
+	}
+	return fmt.Sprintf("… %d lines hidden …", hidden)
 }
 
 // rowCounter reports the "n/m" position shown in the panel border. The timeline

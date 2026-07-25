@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -2828,31 +2829,198 @@ func TestFirstLineKeepsTimelineTerse(t *testing.T) {
 	}
 }
 
-func TestBoundLinesElidesMiddleWithHeadAndTail(t *testing.T) {
-	text := strings.Join([]string{"one", "two", "three", "four", "five", "six", "seven", "eight"}, "\n")
-	want := []string{"one", "two", "… 4 lines hidden …", "seven", "eight"}
-	if got := boundLines(text, 5); !slices.Equal(got, want) {
-		t.Fatalf("boundLines() = %#v, want %#v", got, want)
+func TestTimelineBodyLinesOverLineCapElidesWholeLines(t *testing.T) {
+	lines := make([]string, detailPreviewLineCap+2)
+	for index := range lines {
+		lines[index] = fmt.Sprintf("route-%02d", index)
+	}
+	want := append(slices.Clone(lines[:19]), "… 3 lines hidden …")
+	want = append(want, lines[22:]...)
+
+	if got := timelineBodyLines(strings.Join(lines, "\n")); !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() = %#v, want %#v", got, want)
 	}
 }
 
-func TestTimelineBodyLinesBoundsRunesBeforeWrapping(t *testing.T) {
-	text := strings.Repeat("route", 6_000)
-	want := []string{model.BoundedDetailText(text)}
+func TestTimelineBodyLinesOverRuneBudgetElidesWholeLines(t *testing.T) {
+	head := strings.Repeat("h", 2_000)
+	tail := strings.Repeat("t", 2_000)
+	text := strings.Join([]string{head, strings.Repeat("m", 2_000), tail}, "\n")
+	want := []string{head, "… 1 line hidden …", tail}
+
+	if got := timelineBodyLines(text); !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() = %#v, want %#v", got, want)
+	}
+}
+
+func TestTimelineBodyLinesCountsLineBreaksAgainstRuneBudget(t *testing.T) {
+	lines := make([]string, detailPreviewLineCap)
+	for index := range lines {
+		lines[index] = strings.Repeat("x", 102)
+	}
+	want := append(slices.Clone(lines[:19]), "… 1 line hidden …")
+	want = append(want, lines[20:]...)
+
+	if got := timelineBodyLines(strings.Join(lines, "\n")); !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() returned %d lines, want one source line elided", len(got))
+	}
+}
+
+func TestTimelineBodyLinesIncludesMarkerInRuneBudget(t *testing.T) {
+	lines := make([]string, detailPreviewLineCap)
+	for index := range lines {
+		lines[index] = strings.Repeat("x", 104)
+	}
+	want := append(slices.Clone(lines[:19]), "… 2 lines hidden …")
+	want = append(want, lines[21:]...)
+
+	got := timelineBodyLines(strings.Join(lines, "\n"))
+	if !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() returned %d lines, want two source lines elided", len(got))
+	}
+	if runes := utf8.RuneCountInString(strings.Join(got, "\n")); runes > detailPreviewRuneCap {
+		t.Fatalf("timelineBodyLines() rendered %d runes, want <= %d", runes, detailPreviewRuneCap)
+	}
+}
+
+func TestTimelineBodyLinesOverBothLimitsUsesOneAccurateMarker(t *testing.T) {
+	lines := make([]string, 50)
+	for index := range lines {
+		lines[index] = fmt.Sprintf("route-%02d-", index) + strings.Repeat("x", 191)
+	}
+	want := append(slices.Clone(lines[:10]), "… 30 lines hidden …")
+	want = append(want, lines[40:]...)
+
+	if got := timelineBodyLines(strings.Join(lines, "\n")); !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() = %#v, want %#v", got, want)
+	}
+}
+
+func TestTimelineBodyLinesLongSingleLineEndsWithEllipsis(t *testing.T) {
+	text := strings.Repeat("航", detailPreviewRuneCap+100)
+	want := []string{strings.Repeat("航", detailPreviewRuneCap-1) + "…"}
 
 	if got := timelineBodyLines(text); !slices.Equal(got, want) {
 		t.Fatalf("timelineBodyLines() returned %d lines with %d runes, want one line with %d runes", len(got), len([]rune(strings.Join(got, "\n"))), len([]rune(want[0])))
 	}
 }
 
-func TestDetailHasBodyUsesBoundedInputProjection(t *testing.T) {
+func TestTimelineBodyLinesLongANSISequenceKeepsVisibleContent(t *testing.T) {
+	control := "\x1b]0;" + strings.Repeat("x", 5_000) + "\x07"
+	text := control + strings.Repeat("A", 5_000)
+	want := []string{strings.Repeat("A", detailPreviewRuneCap-1) + "…"}
+
+	got := timelineBodyLines(text)
+	if !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() rendered %q, want visible content with trailing ellipsis", detailPlainText(strings.Join(got, "\n")))
+	}
+}
+
+func TestTimelineBodyLinesTwoLongLinesKeepsTruncatedHead(t *testing.T) {
+	marker := "… 1 line hidden …"
+	lineRunes := detailPreviewRuneCap - utf8.RuneCountInString(marker) - 1
+	text := strings.Repeat("A", 5_000) + "\n" + strings.Repeat("B", 5_000)
+	want := []string{strings.Repeat("A", lineRunes-1) + "…", marker}
+
+	if got := timelineBodyLines(text); !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() = %#v, want a truncated head line and marker", got)
+	}
+}
+
+func TestTimelineBodyLinesThreeLongLinesKeepsTruncatedHead(t *testing.T) {
+	marker := "… 2 lines hidden …"
+	lineRunes := detailPreviewRuneCap - utf8.RuneCountInString(marker) - 1
+	text := strings.Join([]string{strings.Repeat("A", 5_000), strings.Repeat("B", 5_000), strings.Repeat("C", 5_000)}, "\n")
+	want := []string{strings.Repeat("A", lineRunes-1) + "…", marker}
+
+	if got := timelineBodyLines(text); !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() = %#v, want a truncated head line and marker", got)
+	}
+}
+
+func TestTimelineBodyLinesLongHeadAndShortTailKeepsBoth(t *testing.T) {
+	tail := "short tail line"
+	lineRunes := detailPreviewRuneCap - utf8.RuneCountInString(tail) - 1
+	text := strings.Repeat("A", 5_000) + "\n" + tail
+	want := []string{strings.Repeat("A", lineRunes-1) + "…", tail}
+
+	if got := timelineBodyLines(text); !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() = %#v, want truncated head and whole tail", got)
+	}
+}
+
+func TestTimelineBodyLinesBlankHeadStillKeepsContent(t *testing.T) {
+	text := "\n" + strings.Repeat("A", 5_000)
+	want := []string{"", strings.Repeat("A", detailPreviewRuneCap-2) + "…"}
+
+	if got := timelineBodyLines(text); !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() = %#v, want blank head and truncated content", got)
+	}
+}
+
+func TestTimelineBodyLinesBlankWindowsStillKeepMiddleContent(t *testing.T) {
+	lines := make([]string, detailPreviewLineCap)
+	lines[19] = strings.Repeat("A", 5_000)
+	want := slices.Clone(lines)
+	want[19] = strings.Repeat("A", 4_056) + "…"
+
+	if got := timelineBodyLines(strings.Join(lines, "\n")); !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() returned %d rows without the expected middle content", len(got))
+	}
+}
+
+func TestTimelineBodyLinesBlankWindowsOverLineCapKeepContent(t *testing.T) {
+	lines := make([]string, detailPreviewLineCap+1)
+	lines[19] = strings.Repeat("A", 5_000)
+	want := make([]string, detailPreviewLineCap)
+	want[19] = strings.Repeat("A", 4_038) + "…"
+	want[20] = "… 2 lines hidden …"
+
+	if got := timelineBodyLines(strings.Join(lines, "\n")); !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() returned %d rows without the expected content and marker", len(got))
+	}
+}
+
+func TestTimelineBodyLinesBlankWindowsKeepShortMiddleWhole(t *testing.T) {
+	lines := make([]string, detailPreviewLineCap+1)
+	lines[19] = "visible middle"
+	want := make([]string, detailPreviewLineCap)
+	want[19] = lines[19]
+	want[20] = "… 2 lines hidden …"
+
+	if got := timelineBodyLines(strings.Join(lines, "\n")); !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() = %#v, want whole middle line and marker", got)
+	}
+}
+
+func TestTimelineBodyLinesFormattingOnlyWindowsKeepVisibleContent(t *testing.T) {
+	lines := make([]string, detailPreviewLineCap+1)
+	for index := range lines {
+		lines[index] = " \t\x1b[31m\x1b[0m"
+	}
+	lines[19] = strings.Repeat("A", 5_000)
+
+	got := timelineBodyLines(strings.Join(lines, "\n"))
+	if !slices.ContainsFunc(got, func(line string) bool { return strings.Contains(line, "A") }) {
+		t.Fatalf("timelineBodyLines() hid the only visibly non-blank source line")
+	}
+	if len(got) > detailPreviewLineCap {
+		t.Fatalf("timelineBodyLines() returned %d rows, want <= %d", len(got), detailPreviewLineCap)
+	}
+	if runes := utf8.RuneCountInString(strings.Join(got, "\n")); runes > detailPreviewRuneCap {
+		t.Fatalf("timelineBodyLines() rendered %d runes, want <= %d", runes, detailPreviewRuneCap)
+	}
+}
+
+func TestDetailHasBodyUsesTimelineInputProjection(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
 		want  bool
 	}{
-		{name: "newline omitted from middle", input: strings.Repeat("a", 2_500) + "\n" + strings.Repeat("b", 2_500), want: false},
+		{name: "rune-bounded lines", input: strings.Repeat("a", 2_500) + "\n" + strings.Repeat("b", 2_500), want: true},
 		{name: "newline retained in head", input: "first\n" + strings.Repeat("b", 5_000), want: true},
+		{name: "long multiline preview", input: strings.Repeat("a", 5_000) + "\n" + strings.Repeat("b", 5_000), want: true},
 	}
 
 	for _, test := range tests {
@@ -2862,7 +3030,7 @@ func TestDetailHasBodyUsesBoundedInputProjection(t *testing.T) {
 				Detail: &model.ToolDetail{Input: test.input},
 			}
 			if got := detailHasBody(event); got != test.want {
-				t.Fatalf("detailHasBody() = %t, want %t for bounded input %q", got, test.want, model.BoundedDetailText(test.input))
+				t.Fatalf("detailHasBody() = %t, want %t for timeline projection %#v", got, test.want, timelineBodyLines(test.input))
 			}
 		})
 	}
@@ -4342,7 +4510,7 @@ func TestFullFidelityCompactionSummaryAcrossParserTimelineAndItem(t *testing.T) 
 	if len(session.Events) != 1 || session.Events[0].Text != summary {
 		t.Fatalf("parsed compaction summary has %d runes, want %d", len([]rune(session.Events[0].Text)), len([]rune(summary)))
 	}
-	bounded := model.BoundedDetailText(summary)
+	bounded := string([]rune(summary)[:detailPreviewRuneCap-1]) + "…"
 	detail := newDetailState(session, 80, 12, newStyles())
 	foundBounded := false
 	for _, timelineLine := range detail.lines {
@@ -4352,7 +4520,7 @@ func TestFullFidelityCompactionSummaryAcrossParserTimelineAndItem(t *testing.T) 
 		}
 	}
 	if !foundBounded {
-		t.Fatal("timeline did not render the existing 4096-rune middle-ellipsis form")
+		t.Fatal("timeline did not render the 4096-rune trailing-ellipsis form")
 	}
 
 	item := newItemView(session.Events[0], model.AgentClaude, nil, 80, 12, newStyles())
