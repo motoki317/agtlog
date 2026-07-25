@@ -2798,6 +2798,27 @@ func TestBoundLinesElidesMiddleWithHeadAndTail(t *testing.T) {
 	}
 }
 
+func TestTimelineBodyLinesBoundsRunesBeforeWrapping(t *testing.T) {
+	text := strings.Repeat("route", 6_000)
+	want := []string{model.BoundedDetailText(text)}
+
+	if got := timelineBodyLines(text); !slices.Equal(got, want) {
+		t.Fatalf("timelineBodyLines() returned %d lines with %d runes, want one line with %d runes", len(got), len([]rune(strings.Join(got, "\n"))), len([]rune(want[0])))
+	}
+}
+
+func TestDetailHasBodyUsesBoundedInputProjection(t *testing.T) {
+	input := strings.Repeat("a", 2_500) + "\n" + strings.Repeat("b", 2_500)
+	event := model.Event{
+		Kind: model.EventToolCall, ToolName: "exec_command",
+		Detail: &model.ToolDetail{Input: input},
+	}
+
+	if detailHasBody(event) {
+		t.Fatal("detailHasBody() exposed a newline omitted by the timeline's bounded projection")
+	}
+}
+
 func TestDetailTimelineExpandsByDefault(t *testing.T) {
 	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Survey the crater"},

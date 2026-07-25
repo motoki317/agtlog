@@ -1407,7 +1407,7 @@ func (d *detailState) userPromptLines(event model.Event, indent int, key string,
 		return lines
 	}
 	childPadding := strings.Repeat(" ", indent+2)
-	for _, line := range boundLines(event.Text, detailPreviewLineCap) {
+	for _, line := range timelineBodyLines(event.Text) {
 		lines = append(lines, detailLine{text: childPadding + detailPlainText(line), role: role})
 	}
 	return lines
@@ -1547,7 +1547,7 @@ func (d *detailState) toolEventLines(event model.Event, indent int, key string) 
 	}
 	childPadding := strings.Repeat(" ", indent+2)
 	if event.Detail.Diff != "" {
-		for _, text := range boundLines(event.Detail.Diff, detailPreviewLineCap) {
+		for _, text := range timelineBodyLines(event.Detail.Diff) {
 			plain := detailPlainText(text)
 			role := detailDiffContext
 			if strings.HasPrefix(plain, "+") {
@@ -1566,7 +1566,7 @@ func (d *detailState) toolEventLines(event model.Event, indent int, key string) 
 			continue
 		}
 		lines = append(lines, detailLine{text: childPadding + section.label, role: detailSecondary})
-		for _, text := range boundLines(section.text, detailPreviewLineCap) {
+		for _, text := range timelineBodyLines(section.text) {
 			lines = append(lines, detailLine{text: childPadding + detailPlainText(text), role: detailRow})
 		}
 	}
@@ -1596,7 +1596,7 @@ func detailPlainText(text string) string {
 
 func detailHasBody(event model.Event) bool {
 	detail := event.Detail
-	return detail != nil && (detail.Diff != "" || detail.Output != "" || strings.Contains(detail.Input, "\n") && detailInputBody(event) != "")
+	return detail != nil && (detail.Diff != "" || detail.Output != "" || strings.Contains(model.BoundedDetailText(detail.Input), "\n") && detailInputBody(event) != "")
 }
 
 // assistantTextLines renders an assistant reply as one collapsible row: a preview
@@ -1619,7 +1619,7 @@ func (d *detailState) assistantTextLines(event model.Event, indent int, key stri
 		return lines
 	}
 	childPadding := strings.Repeat(" ", indent+2)
-	for _, line := range boundLines(event.Text, detailPreviewLineCap) {
+	for _, line := range timelineBodyLines(event.Text) {
 		lines = append(lines, detailLine{text: childPadding + detailPlainText(line), role: detailAssistant})
 	}
 	return lines
@@ -1684,6 +1684,10 @@ func boundLines(text string, maxLines int) []string {
 	bounded = append(bounded, fmt.Sprintf("… %d lines hidden …", len(lines)-head-tail))
 	bounded = append(bounded, lines[len(lines)-tail:]...)
 	return bounded
+}
+
+func timelineBodyLines(text string) []string {
+	return boundLines(model.BoundedDetailText(text), detailPreviewLineCap)
 }
 
 // rowCounter reports the "n/m" position shown in the panel border. The timeline
