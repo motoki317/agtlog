@@ -18,14 +18,22 @@ func ForEach(reader io.Reader, visit func([]byte)) error {
 }
 
 func ForEachContext(ctx context.Context, reader io.Reader, visit func([]byte)) error {
+	return ForEachContextWithOffset(ctx, reader, func(line []byte, _, _ int64) {
+		visit(line)
+	})
+}
+
+func ForEachContextWithOffset(ctx context.Context, reader io.Reader, visit func([]byte, int64, int64)) error {
 	buffered := bufio.NewReaderSize(reader, readerBufferBytes)
 	line := make([]byte, 0, readerBufferBytes)
 	tooLong := false
+	var offset, position int64
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		fragment, err := buffered.ReadSlice('\n')
+		position += int64(len(fragment))
 		if !tooLong {
 			if len(line)+len(fragment) <= maxLineBytes {
 				line = append(line, fragment...)
@@ -43,11 +51,12 @@ func ForEachContext(ctx context.Context, reader io.Reader, visit func([]byte)) e
 		if !tooLong {
 			line = trimLineEnding(line)
 			if len(line) > 0 {
-				visit(line)
+				visit(line, offset, int64(len(line)))
 			}
 		}
 		line = line[:0]
 		tooLong = false
+		offset = position
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
