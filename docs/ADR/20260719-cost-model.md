@@ -62,6 +62,11 @@ or older than 24 hours, agtlog starts a timeout-bounded background fetch and wri
 replacement for the next launch. It does not change prices during a running session. `--offline`
 disables the fetch while retaining the embedded and cached tables.
 
+`--refresh-prices` is the user-requested exception to deferred refresh. It fetches and validates the
+table synchronously with a 30-second timeout, atomically replaces the cache, and applies the fresh
+overlay to the session that then starts. Any refresh-stage failure aborts startup. The default path
+keeps its background timing and silent-failure behavior; only an explicit request delays the UI.
+
 # Consequences
 
 - Claude and Codex totals are comparable at public API rates, but only Claude values can represent
@@ -91,12 +96,17 @@ list. The estimate is useful when its API-rate meaning is explicit.
 total. **Always sum per-turn deltas** was also rejected because context resets can make that sum
 diverge from Codex's authoritative cumulative counter.
 
-**Use only embedded prices** was rejected because rates can change between releases. **Fetch before
-startup** and **hot-swap a running table** were rejected because either choice would delay the UI or
-change totals during a session.
+**Use only embedded prices** was rejected because rates can change between releases. **Drop the
+embedded snapshot and rely on runtime downloads** was reconsidered and rejected because a first run
+without network access would price every model at zero with a missing-pricing marker, and
+`--offline` would no longer retain a usable price floor.
+
+**Fetch before every startup** was rejected because it would delay the UI by default.
+`--refresh-prices` accepts that delay only when the user requests it. **Hot-swap a running table**
+was rejected because it would change totals during a session.
 
 # Notes
 
-`just update-pricing` refreshes the embedded release snapshot from LiteLLM. A weekly workflow runs
-the recipe and opens a pull request when the tracked snapshot changes. Runtime caching complements
-that release process; it does not replace review of the embedded data.
+`just update-pricing` manually refreshes the embedded release snapshot from LiteLLM. Runtime caching
+complements that manual release process; it does not replace review of the embedded data. A
+scheduled refresh workflow remains future work.
