@@ -87,8 +87,15 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				} `json:"info"`
 			} `json:"payload"`
 		}
-		if json.Unmarshal(line, &record) != nil {
-			return
+		if err := json.Unmarshal(line, &record); err != nil {
+			// Codex reuses field names across payload variants with different
+			// shapes (turn_context.summary is a string, reasoning.summary an
+			// array). encoding/json still fills every other field, so dropping
+			// the record would lose the model and mis-price the whole session.
+			var typeErr *json.UnmarshalTypeError
+			if !errors.As(err, &typeErr) {
+				return
+			}
 		}
 		recordRef := model.RecordRef{Path: path, Offset: offset, Length: length, Digest: sha256.Sum256(line)}
 		timestamp, _ := time.Parse(time.RFC3339Nano, record.Timestamp)

@@ -125,6 +125,33 @@ func TestLoadEventsAttachesTokenCountUsageToAssistantTurn(t *testing.T) {
 	}
 }
 
+func TestLoadEventsPricesUsageFromStringSummaryTurnContextModel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-string-summary.jsonl")
+	lines := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"summary":"auto","model":"gpt-5.6-sol"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"agent_message","message":"Route ready"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":120}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 1 || session.Events[0].Usage == nil {
+		t.Fatalf("LoadEvents().Events = %#v, want one priced assistant event", session.Events)
+	}
+	event := session.Events[0]
+	if event.Model != "gpt-5.6-sol" || event.Usage.Model != "gpt-5.6-sol" {
+		t.Fatalf("event model = %q, usage model = %q, want gpt-5.6-sol", event.Model, event.Usage.Model)
+	}
+	if got := event.Cost.Total(); got != 200 {
+		t.Fatalf("event cost = %v, want 200 from gpt-5.6 pricing", got)
+	}
+}
+
 func fixture(name string) string {
 	return filepath.Join("testdata", "sessions", "2026", "01", "02", name)
 }
