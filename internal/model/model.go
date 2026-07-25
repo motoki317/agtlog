@@ -200,18 +200,25 @@ const (
 )
 
 // ToolDetail is the full tool payload shown when a tool call is expanded.
-// Fields are bounded (BoundedDetailText) and empty when the log lacked them.
 type ToolDetail struct {
 	Input  string // Full invocation; newlines preserved.
 	Diff   string // Unified-diff body for edits, writes, and patches.
 	Output string // Full result; newlines preserved.
 }
 
+// RecordRef locates the physical JSONL line an event came from.
+type RecordRef struct {
+	Path   string
+	Offset int64
+	Length int64
+	Digest [32]byte
+}
+
 type Event struct {
-	Timestamp time.Time
-	Kind      EventKind
-	Text      string
-	// Raw is the structurally complete source JSON after encrypted-token elision and length bounding, not a byte-verbatim copy. A verbatim view would require lazily rereading the source line on toggle.
+	Timestamp     time.Time
+	Kind          EventKind
+	Text          string
+	RecordRef     RecordRef `json:"-"`
 	Raw           string
 	Model         string
 	CallID        string

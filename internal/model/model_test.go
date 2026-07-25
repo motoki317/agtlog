@@ -1,6 +1,7 @@
 package model
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -9,6 +10,26 @@ import (
 	"testing"
 	"unicode/utf8"
 )
+
+func TestEventRecordRefIsNotSerialized(t *testing.T) {
+	event := Event{
+		Kind: EventUser,
+		RecordRef: RecordRef{
+			Path:   "/fictional/session.jsonl",
+			Offset: 17,
+			Length: 23,
+			Digest: sha256.Sum256([]byte("original record")),
+		},
+	}
+
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "fictional") || strings.Contains(string(encoded), "Offset") || strings.Contains(string(encoded), "Digest") {
+		t.Fatalf("json.Marshal(Event) included RecordRef: %s", encoded)
+	}
+}
 
 func TestSessionTotalUsageIncludesNestedSubagents(t *testing.T) {
 	session := Session{
