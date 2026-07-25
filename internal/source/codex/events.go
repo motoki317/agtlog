@@ -3,6 +3,7 @@ package codex
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,7 +54,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 		applyPatch          bool
 	}
 	calls := make(map[string]pendingCall)
-	dedupTextByEvent := make(map[int]string)
+	dedupTextByEvent := make(map[int][32]byte)
 	currentModel := ""
 	// requestStart marks where the current billed request's events begin, so a
 	// token_count closing that request can attribute its usage to the first
@@ -61,7 +62,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 	requestStart := 0
 	isSubagent := session.AgentPath != ""
 	active := !isSubagent
-	err = jsonl.ForEachContext(ctx, file, func(line []byte) {
+	err = jsonl.ForEachContextWithOffset(ctx, file, func(line []byte, offset, length int64) {
 		var record struct {
 			Timestamp string `json:"timestamp"`
 			Type      string `json:"type"`
@@ -89,6 +90,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 		if json.Unmarshal(line, &record) != nil {
 			return
 		}
+		recordRef := model.RecordRef{Path: path, Offset: offset, Length: length, Digest: sha256.Sum256(line)}
 		timestamp, _ := time.Parse(time.RFC3339Nano, record.Timestamp)
 		if record.Type == "session_meta" {
 			if record.Payload.ThreadSource == "subagent" {
@@ -109,7 +111,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 			currentModel = record.Payload.Model
 			return
 		}
-		event := model.Event{Timestamp: timestamp, Model: currentModel}
+		event := model.Event{Timestamp: timestamp, Model: currentModel, RecordRef: recordRef}
 		preferredMessage := true
 		if record.Type == "event_msg" {
 			switch record.Payload.Type {
@@ -124,10 +126,10 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 					return
 				}
 			case "sub_agent_activity":
-				appendCodexSubagentEvent(session, record.Payload.AgentPath, record.Payload.AgentID, record.Payload.Kind, timestamp, model.BoundedRawRecord(string(line)))
+				appendCodexSubagentEvent(session, record.Payload.AgentPath, record.Payload.AgentID, record.Payload.Kind, timestamp, recordRef)
 				return
 			case "context_compacted":
-				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: "context compacted", Raw: model.BoundedRawRecord(string(line)), Model: currentModel})
+				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: "context compacted", RecordRef: recordRef, Model: currentModel})
 				return
 			case "token_count":
 				if usage := codexDisplayUsage(record.Payload.Info.Last); usage != nil {
@@ -220,11 +222,11 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 						}
 					}
 				}
-				event.Text = model.BoundedDetailText(summary)
+				event.Text = codexElideEncrypted(summary)
 				if linked {
 					call := &session.Events[pending.eventIndex]
 					if call.Detail != nil && event.CallID != "" {
-						call.Detail.Output = model.BoundedDetailText(output)
+						call.Detail.Output = codexElideEncrypted(output)
 					}
 					call.ResultSummary = event.Text
 					if !timestamp.Before(call.Timestamp) {
@@ -239,16 +241,14 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 		if event.Kind == model.EventUser || event.Kind == model.EventAssistantText || event.Kind == model.EventThinking {
 			event.Text = codexElideEncrypted(event.Text)
 		}
-		event.ToolInput = model.BoundedDetailText(event.ToolInput)
+		event.ToolInput = codexElideEncrypted(event.ToolInput)
 		if event.Kind == model.EventUser || event.Kind == model.EventAssistantText {
 			if event.Text != "" {
-				event.Raw = model.BoundedRawRecord(string(line))
 				appendCodexMessage(session, event, preferredMessage, dedupText, dedupTextByEvent)
 			}
 		} else {
-			event.Text = model.BoundedDetailText(event.Text)
+			event.Text = codexElideEncrypted(event.Text)
 			if event.Text != "" || event.Kind == model.EventToolCall || event.Kind == model.EventToolResult {
-				event.Raw = model.BoundedRawRecord(string(line))
 				session.Events = append(session.Events, event)
 			}
 		}
@@ -267,9 +267,9 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 	return nil
 }
 
-func appendCodexMessage(session *model.Session, event model.Event, preferred bool, dedupText string, dedupTextByEvent map[int]string) {
-	event.Text = model.BoundedDetailText(model.CleanTimelineText(event.Text))
-	dedupText = model.BoundedDetailText(model.CleanTimelineText(dedupText))
+func appendCodexMessage(session *model.Session, event model.Event, preferred bool, dedupText string, dedupTextByEvent map[int][32]byte) {
+	event.Text = codexElideEncrypted(model.CleanTimelineText(event.Text))
+	dedupKey := sha256.Sum256([]byte(model.CleanTimelineText(dedupText)))
 	if event.Text == "" {
 		return
 	}
@@ -281,11 +281,14 @@ func appendCodexMessage(session *model.Session, event model.Event, preferred boo
 	}
 	for index := len(session.Events) - 1; index >= 0 && index >= len(session.Events)-16; index-- {
 		existing := session.Events[index]
-		existingText := existing.Text
-		if text, ok := dedupTextByEvent[index]; ok {
-			existingText = text
+		if existing.Kind != event.Kind {
+			continue
 		}
-		if existing.Kind != event.Kind || existingText != dedupText {
+		existingKey, ok := dedupTextByEvent[index]
+		if !ok {
+			existingKey = sha256.Sum256([]byte(model.CleanTimelineText(existing.Text)))
+		}
+		if existingKey != dedupKey {
 			continue
 		}
 		if preferred {
@@ -294,7 +297,7 @@ func appendCodexMessage(session *model.Session, event model.Event, preferred boo
 			}
 			session.Events[index] = event
 			if dedupTextByEvent != nil {
-				dedupTextByEvent[index] = dedupText
+				dedupTextByEvent[index] = dedupKey
 			}
 		}
 		return
@@ -302,7 +305,7 @@ func appendCodexMessage(session *model.Session, event model.Event, preferred boo
 	index := len(session.Events)
 	session.Events = append(session.Events, event)
 	if dedupTextByEvent != nil {
-		dedupTextByEvent[index] = dedupText
+		dedupTextByEvent[index] = dedupKey
 	}
 }
 
@@ -321,7 +324,7 @@ func clearCodexEvents(session *model.Session) {
 	}
 }
 
-func appendCodexSubagentEvent(root *model.Session, agentPath, agentID, activity string, timestamp time.Time, raw string) {
+func appendCodexSubagentEvent(root *model.Session, agentPath, agentID, activity string, timestamp time.Time, recordRef model.RecordRef) {
 	parts := agentPathParts(agentPath)
 	base := agentPathParts(root.AgentPath)
 	if len(base) > 0 && len(parts) > len(base) {
@@ -350,9 +353,9 @@ func appendCodexSubagentEvent(root *model.Session, agentPath, agentID, activity 
 		}
 		if index == len(parts)-1 {
 			if activity == "started" {
-				parent.Events = append(parent.Events, model.Event{Timestamp: timestamp, Kind: model.EventSubagent, Raw: raw, AgentID: agentID, Subagent: child})
+				parent.Events = append(parent.Events, model.Event{Timestamp: timestamp, Kind: model.EventSubagent, RecordRef: recordRef, AgentID: agentID, Subagent: child})
 			} else {
-				child.Events = append(child.Events, model.Event{Timestamp: timestamp, Kind: model.EventSystem, Text: activity, Raw: raw, AgentID: agentID})
+				child.Events = append(child.Events, model.Event{Timestamp: timestamp, Kind: model.EventSystem, Text: activity, RecordRef: recordRef, AgentID: agentID})
 			}
 			return
 		}
@@ -451,18 +454,18 @@ func codexToolDetail(name, input string) *model.ToolDetail {
 	detail := &model.ToolDetail{}
 	switch name {
 	case "apply_patch":
-		detail.Diff = model.BoundedDetailText(input)
+		detail.Diff = codexElideEncrypted(input)
 	case "exec_command":
 		var fields struct {
 			Command string `json:"cmd"`
 		}
 		if json.Unmarshal([]byte(input), &fields) == nil {
-			detail.Input = model.BoundedDetailText(fields.Command)
+			detail.Input = codexElideEncrypted(fields.Command)
 		} else {
-			detail.Input = model.BoundedDetailText(input)
+			detail.Input = codexElideEncrypted(input)
 		}
 	default:
-		detail.Input = model.BoundedDetailText(codexPrettyInput(input))
+		detail.Input = codexElideEncrypted(codexPrettyInput(input))
 	}
 	return detail
 }
@@ -477,7 +480,7 @@ func codexToolPresentation(name, input string) (string, *model.ToolDetail) {
 func codexExecToolPresentation(input string) (string, *model.ToolDetail) {
 	calls := codexExecTools(input)
 	if len(calls) > 1 {
-		return "", &model.ToolDetail{Input: model.BoundedDetailText(codexPrettyInput(input))}
+		return "", &model.ToolDetail{Input: codexElideEncrypted(codexPrettyInput(input))}
 	}
 	name, _, wrapped := codexExecTool(input)
 	if wrapped && name == "apply_patch" {
@@ -486,13 +489,13 @@ func codexExecToolPresentation(input string) (string, *model.ToolDetail) {
 		}
 	}
 	if wrapped && name != "exec_command" {
-		return "", &model.ToolDetail{Input: model.BoundedDetailText(codexPrettyInput(input))}
+		return "", &model.ToolDetail{Input: codexElideEncrypted(codexPrettyInput(input))}
 	}
 	command, ok := codexExecCommand(input)
 	if !ok {
-		return strings.Join(strings.Fields(input), " "), &model.ToolDetail{Input: model.BoundedDetailText(codexPrettyInput(input))}
+		return strings.Join(strings.Fields(input), " "), &model.ToolDetail{Input: codexElideEncrypted(codexPrettyInput(input))}
 	}
-	return strings.SplitN(command, "\n", 2)[0], &model.ToolDetail{Input: model.BoundedDetailText(command)}
+	return strings.SplitN(command, "\n", 2)[0], &model.ToolDetail{Input: codexElideEncrypted(command)}
 }
 
 // codexPatchFiles returns the basenames of the files a Codex apply_patch envelope
@@ -904,7 +907,7 @@ func codexJSIdentifierBefore(input string, index int) bool {
 
 func codexPrettyInput(input string) string {
 	if bounded := model.BoundedDetailText(input); bounded != input {
-		return bounded
+		return input
 	}
 	raw := bytes.TrimSpace([]byte(input))
 	if !codexJSONNestingWithin(raw, 32) {

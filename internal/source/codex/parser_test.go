@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"math"
 	"os"
@@ -54,7 +55,7 @@ func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
 	}
 }
 
-func TestLoadEventsPopulatesBoundedEncryptedElidedRawRecord(t *testing.T) {
+func TestLoadEventsPopulatesCodexRecordRef(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout-raw.jsonl")
 	token := "gAAAA" + strings.Repeat("A", 70)
 	line := `{"timestamp":"2026-01-02T03:04:05Z","type":"event_msg","payload":{"type":"user_message","message":` + strconv.Quote("Inspect "+token+strings.Repeat(" route", 900)) + `}}`
@@ -68,12 +69,26 @@ func TestLoadEventsPopulatesBoundedEncryptedElidedRawRecord(t *testing.T) {
 	if len(session.Events) != 1 {
 		t.Fatalf("LoadEvents().Events = %#v, want one", session.Events)
 	}
-	raw := session.Events[0].Raw
-	if raw == "" || strings.Contains(raw, token) || !strings.Contains(raw, "<encrypted 75 chars>") || !json.Valid([]byte(raw)) {
-		t.Fatalf("Event.Raw = %q, want populated with encrypted token elided", raw)
+	want := model.RecordRef{Path: path, Length: int64(len(line)), Digest: sha256.Sum256([]byte(line))}
+	if got := session.Events[0].RecordRef; got != want {
+		t.Fatalf("Event.RecordRef = %#v, want %#v", got, want)
 	}
-	if len([]rune(raw)) > 4096 {
-		t.Fatalf("Event.Raw rune count = %d, want bounded", len([]rune(raw)))
+}
+
+func TestLoadEventsPreservesFullCodexMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-long-message.jsonl")
+	text := "first-" + strings.Repeat("x", 5_000) + "-last"
+	line := `{"timestamp":"2026-01-02T03:04:05Z","type":"event_msg","payload":{"type":"agent_message","message":` + strconv.Quote(text) + `}}`
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 1 || session.Events[0].Text != text {
+		t.Fatalf("LoadEvents().Events[0].Text has %d runes, want %d", len([]rune(session.Events[0].Text)), len([]rune(text)))
 	}
 }
 
@@ -902,7 +917,7 @@ func TestLoadEventsCoalescesLongMirroredUserMessage(t *testing.T) {
 	if err := testParser().LoadEvents(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	want := model.BoundedDetailText(model.CleanTimelineText(message))
+	want := model.CleanTimelineText(message)
 	if len(session.Events) != 1 || session.Events[0].Kind != model.EventUser || session.Events[0].Text != want {
 		t.Fatalf("long mirrored events = %#v, want one normalized user event", session.Events)
 	}
@@ -915,7 +930,7 @@ func TestAppendCodexMessagePreservesHumanClassification(t *testing.T) {
 		model.Event{Kind: model.EventUser, Text: "Survey the crater", Harness: true},
 		true,
 		"Survey the crater",
-		make(map[int]string),
+		make(map[int][32]byte),
 	)
 
 	if len(session.Events) != 1 || session.Events[0].Harness {
@@ -925,7 +940,7 @@ func TestAppendCodexMessagePreservesHumanClassification(t *testing.T) {
 
 func TestAppendCodexMessagePreservesDistinctSameKindMessages(t *testing.T) {
 	session := &model.Session{}
-	dedupTextByEvent := make(map[int]string)
+	dedupTextByEvent := make(map[int][32]byte)
 	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: "Survey the northern ridge"}, false, "Survey the northern ridge", dedupTextByEvent)
 	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: "Survey the southern ridge"}, false, "Survey the southern ridge", dedupTextByEvent)
 
@@ -934,9 +949,25 @@ func TestAppendCodexMessagePreservesDistinctSameKindMessages(t *testing.T) {
 	}
 }
 
+func TestAppendCodexMessageDistinguishesLongMessagesByMiddle(t *testing.T) {
+	prefix := strings.Repeat("north", 600)
+	suffix := strings.Repeat("south", 600)
+	first := prefix + " crater-a " + suffix
+	second := prefix + " crater-b " + suffix
+	session := &model.Session{}
+	dedupTextByEvent := make(map[int][32]byte)
+
+	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: first}, false, first, dedupTextByEvent)
+	appendCodexMessage(session, model.Event{Kind: model.EventUser, Text: second}, false, second, dedupTextByEvent)
+
+	if len(session.Events) != 2 {
+		t.Fatalf("events = %#v, want both long messages that differ only in the middle", session.Events)
+	}
+}
+
 func TestAppendCodexMessageDoesNotDeduplicateBeyondWindow(t *testing.T) {
 	session := &model.Session{Events: []model.Event{{Kind: model.EventUser, Text: "Repeat the survey"}}}
-	dedupTextByEvent := make(map[int]string)
+	dedupTextByEvent := make(map[int][32]byte)
 	for index := range 16 {
 		session.Events = append(session.Events, model.Event{Kind: model.EventThinking, Text: "Checkpoint " + strconv.Itoa(index)})
 	}
@@ -1026,6 +1057,9 @@ func TestLoadEventsNestsInlineSubagentsAtSpawn(t *testing.T) {
 	}
 	if len(scout.Events) != 1 || scout.Events[0].Kind != model.EventSubagent || scout.Events[0].Subagent != mapper {
 		t.Fatalf("scout events = %#v", scout.Events)
+	}
+	if session.Events[0].RecordRef.Path != path || scout.Events[0].RecordRef.Path != path {
+		t.Fatalf("subagent activity refs = root %q, child %q, want physical parent file %q", session.Events[0].RecordRef.Path, scout.Events[0].RecordRef.Path, path)
 	}
 }
 
@@ -1549,6 +1583,14 @@ func TestCodexToolDetailLeavesDeepJSONRaw(t *testing.T) {
 	}
 }
 
+func TestCodexPrettyInputReturnsUnboundedRawWhenGuardTrips(t *testing.T) {
+	input := `{"payload":"` + strings.Repeat("x", 5_000) + `"}`
+
+	if got := codexPrettyInput(input); got != input {
+		t.Fatalf("codexPrettyInput() returned %d bytes, want unbounded %d-byte input", len(got), len(input))
+	}
+}
+
 func TestCodexToolDetailPreservesRawInputWhitespace(t *testing.T) {
 	input := "  custom call\n    indented body\n"
 	detail := codexToolDetail("custom_tool", input)
@@ -1557,17 +1599,17 @@ func TestCodexToolDetailPreservesRawInputWhitespace(t *testing.T) {
 	}
 }
 
-func TestCodexToolDetailBoundsEveryField(t *testing.T) {
+func TestCodexToolDetailPreservesEveryField(t *testing.T) {
 	value := "start\n" + strings.Repeat("界", 5000) + "\nend"
 	execInput, err := json.Marshal(map[string]string{"cmd": value})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := codexToolDetail("exec_command", string(execInput)).Input, model.BoundedDetailText(value); got != want {
-		t.Fatalf("bounded Input has %d runes, want %d", len([]rune(got)), len([]rune(want)))
+	if got := codexToolDetail("exec_command", string(execInput)).Input; got != value {
+		t.Fatalf("Input has %d runes, want %d", len([]rune(got)), len([]rune(value)))
 	}
-	if got, want := codexToolDetail("apply_patch", value).Diff, model.BoundedDetailText(value); got != want {
-		t.Fatalf("bounded Diff has %d runes, want %d", len([]rune(got)), len([]rune(want)))
+	if got := codexToolDetail("apply_patch", value).Diff; got != value {
+		t.Fatalf("Diff has %d runes, want %d", len([]rune(got)), len([]rune(value)))
 	}
 
 	path := filepath.Join(t.TempDir(), "rollout-bounded-output.jsonl")
@@ -1599,8 +1641,8 @@ func TestCodexToolDetailBoundsEveryField(t *testing.T) {
 	if err := testParser().LoadEvents(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := session.Events[0].Detail.Output, model.BoundedDetailText(value); got != want {
-		t.Fatalf("bounded Output has %d runes, want %d", len([]rune(got)), len([]rune(want)))
+	if got := session.Events[0].Detail.Output; got != value {
+		t.Fatalf("Output has %d runes, want %d", len([]rune(got)), len([]rune(value)))
 	}
 }
 
