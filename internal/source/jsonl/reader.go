@@ -9,7 +9,8 @@ import (
 
 const (
 	readerBufferBytes = 64 * 1024
-	maxLineBytes      = 16 * 1024 * 1024
+	MaxLineBytes      = 16 * 1024 * 1024
+	maxLineBytes      = MaxLineBytes
 )
 
 // ForEach bounds memory per record and treats an oversized record like malformed JSON.

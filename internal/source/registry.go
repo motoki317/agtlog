@@ -2,7 +2,9 @@ package source
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"os"
 	"runtime"
 	"sort"
@@ -10,7 +12,55 @@ import (
 	"sync"
 
 	"github.com/motoki317/agtlog/internal/model"
+	"github.com/motoki317/agtlog/internal/source/jsonl"
 )
+
+var (
+	ErrRecordChanged = errors.New("record source changed")
+	ErrRecordRead    = errors.New("record read failed")
+)
+
+func ReadRecord(ctx context.Context, ref model.RecordRef) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if ref.Path == "" || ref.Offset < 0 || ref.Length <= 0 || ref.Length > jsonl.MaxLineBytes {
+		return nil, fmt.Errorf("%w: invalid record reference", ErrRecordRead)
+	}
+	info, err := os.Lstat(ref.Path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRecordRead, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: source path is not a regular file", ErrRecordRead)
+	}
+	file, err := os.Open(ref.Path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRecordRead, err)
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRecordRead, err)
+	}
+	if !openedInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: source path is not a regular file", ErrRecordRead)
+	}
+	if !os.SameFile(info, openedInfo) {
+		return nil, ErrRecordChanged
+	}
+	record := make([]byte, int(ref.Length))
+	if _, err := file.ReadAt(record, ref.Offset); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRecordRead, err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if sha256.Sum256(record) != ref.Digest {
+		return nil, ErrRecordChanged
+	}
+	return record, nil
+}
 
 func (r *Registry) LoadDetail(ctx context.Context, session *model.Session) error {
 	if session == nil {

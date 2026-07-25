@@ -1,7 +1,10 @@
 package source_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +15,107 @@ import (
 	"github.com/motoki317/agtlog/internal/source"
 	"github.com/motoki317/agtlog/internal/source/claude"
 	"github.com/motoki317/agtlog/internal/source/codex"
+	"github.com/motoki317/agtlog/internal/source/jsonl"
 )
+
+func TestReadRecordReportsChangedSource(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	original := []byte(`{"message":"original"}`)
+	if err := os.WriteFile(path, append(original, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ref := model.RecordRef{Path: path, Length: int64(len(original)), Digest: sha256.Sum256(original)}
+	changed := []byte(`{"message":"modified"}`)
+	if len(changed) != len(original) {
+		t.Fatal("test records must have equal lengths")
+	}
+	if err := os.WriteFile(path, append(changed, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := source.ReadRecord(context.Background(), ref)
+	if !errors.Is(err, source.ErrRecordChanged) {
+		t.Fatalf("ReadRecord() error = %v, want ErrRecordChanged", err)
+	}
+}
+
+func TestReadRecordRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target.jsonl")
+	raw := []byte(`{"message":"source"}`)
+	if err := os.WriteFile(target, append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, "session.jsonl")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	ref := model.RecordRef{Path: link, Length: int64(len(raw)), Digest: sha256.Sum256(raw)}
+
+	_, err := source.ReadRecord(context.Background(), ref)
+	if !errors.Is(err, source.ErrRecordRead) {
+		t.Fatalf("ReadRecord() error = %v, want ErrRecordRead", err)
+	}
+}
+
+func TestReadRecordRejectsInvalidReferencesBeforeReading(t *testing.T) {
+	tests := []struct {
+		name string
+		ref  model.RecordRef
+	}{
+		{name: "empty path", ref: model.RecordRef{Length: 1}},
+		{name: "negative offset", ref: model.RecordRef{Path: "/fictional/session.jsonl", Offset: -1, Length: 1}},
+		{name: "zero length", ref: model.RecordRef{Path: "/fictional/session.jsonl"}},
+		{name: "over line ceiling", ref: model.RecordRef{Path: "/fictional/session.jsonl", Length: jsonl.MaxLineBytes + 1}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := source.ReadRecord(context.Background(), test.ref)
+			if !errors.Is(err, source.ErrRecordRead) {
+				t.Fatalf("ReadRecord() error = %v, want ErrRecordRead", err)
+			}
+		})
+	}
+}
+
+func TestReadRecordHonorsCancellationBeforeOpening(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := source.ReadRecord(ctx, model.RecordRef{Path: "/fictional/session.jsonl", Length: 1})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadRecord() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestReadRecordSurvivesAppendAfterReferencedLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	raw := []byte(`{"message":"original"}`)
+	if err := os.WriteFile(path, append(append([]byte(nil), raw...), '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ref := model.RecordRef{Path: path, Length: int64(len(raw)), Digest: sha256.Sum256(raw)}
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("{\"message\":\"later\"}\n"); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := source.ReadRecord(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("ReadRecord() error = %v", err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("ReadRecord() = %q, want %q", got, raw)
+	}
+}
 
 func TestRegistryDiscoversEveryRegisteredSource(t *testing.T) {
 	cacheRead := 0.5
