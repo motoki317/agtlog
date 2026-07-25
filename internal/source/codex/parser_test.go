@@ -152,6 +152,40 @@ func TestLoadEventsPricesUsageFromStringSummaryTurnContextModel(t *testing.T) {
 	}
 }
 
+func TestLoadEventsKeepsSubagentTurnContextModel(t *testing.T) {
+	dir := t.TempDir()
+	rootPath := filepath.Join(dir, "rollout-thread-root.jsonl")
+	childPath := filepath.Join(dir, "rollout-thread-scout.jsonl")
+	if err := os.WriteFile(rootPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	childLines := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent","agent_path":"/root/scout"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}`,
+		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"agent_message","message":"Survey ready"}}`,
+		`{"timestamp":"2026-01-02T03:04:04Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(childPath, []byte(childLines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	child := &model.Session{Path: childPath, Agent: model.AgentCodex, AgentPath: "/root/scout"}
+	session := &model.Session{
+		Path: rootPath, Agent: model.AgentCodex, Subagents: []*model.Session{child},
+	}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(child.Events) != 1 || child.Events[0].Usage == nil {
+		t.Fatalf("subagent events = %#v, want one assistant event with usage", child.Events)
+	}
+	event := child.Events[0]
+	if event.Model != "gpt-5.6-sol" || event.Usage.Model != "gpt-5.6-sol" {
+		t.Fatalf("subagent event model = %q, usage model = %q, want gpt-5.6-sol", event.Model, event.Usage.Model)
+	}
+}
+
 func fixture(name string) string {
 	return filepath.Join("testdata", "sessions", "2026", "01", "02", name)
 }

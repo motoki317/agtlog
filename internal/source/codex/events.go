@@ -111,11 +111,13 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 			}
 			return
 		}
-		if !active {
-			return
-		}
+		// turn_context precedes the subagent bridge record that flips active,
+		// so the model must be tracked before the gate or subagent rows lose it.
 		if record.Type == "turn_context" {
 			currentModel = record.Payload.Model
+			return
+		}
+		if !active {
 			return
 		}
 		event := model.Event{Timestamp: timestamp, Model: currentModel, RecordRef: recordRef}
