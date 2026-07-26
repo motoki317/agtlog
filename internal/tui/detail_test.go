@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1996,6 +1997,24 @@ func TestTurnSummaryOmitsTokensWithoutUsage(t *testing.T) {
 	}
 }
 
+func TestNextRequestContextSkipsAggregateUsage(t *testing.T) {
+	usage := model.Usage{InputTokens: 30}
+	var aggregate model.Event
+	if err := json.Unmarshal([]byte(`{"Kind":"usage","UsageAggregate":true}`), &aggregate); err != nil {
+		t.Fatal(err)
+	}
+	aggregate.Usage = &usage
+	events := []model.Event{
+		{Kind: model.EventUser, Text: "Chart the route"},
+		{Kind: model.EventAssistantText, Text: "Route ready"},
+		aggregate,
+	}
+
+	if got := nextRequestContext(events, 0); got != 0 {
+		t.Fatalf("nextRequestContext() = %d, want no context from session aggregate", got)
+	}
+}
+
 func TestSystemAndCompactRowsUseTheSystemPromptTint(t *testing.T) {
 	profile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
@@ -2010,6 +2029,42 @@ func TestSystemAndCompactRowsUseTheSystemPromptTint(t *testing.T) {
 		if got, want := detail.styleLine(plain, line, false, true), wantStyle.Render(plain); got != want {
 			t.Errorf("%s row styling = %q, want system tint %q", kind, got, want)
 		}
+	}
+}
+
+func TestUsageRowShowsStandardMetricsWithSystemPromptRole(t *testing.T) {
+	usage := model.Usage{
+		InputTokens:            100,
+		OutputTokens:           20,
+		CacheReadTokens:        40,
+		InputIncludesCacheRead: true,
+	}
+	event := model.Event{
+		Kind:          model.EventUsage,
+		Text:          "unattributed usage",
+		Model:         "gpt-5.6-sol",
+		Usage:         &usage,
+		Cost:          model.CostBreakdown{Input: model.CostBuckets{{RatePerToken: 0.001, Tokens: 10}}},
+		Priced:        true,
+		CostEstimated: true,
+	}
+	lines := (&detailState{}).eventLines(&model.Session{}, event, 0, "event")
+	if len(lines) != 1 || lines[0].role != detailSystemPrompt ||
+		!strings.Contains(lines[0].text, "unattributed usage") ||
+		!strings.Contains(lines[0].text, "gpt-5.6") ||
+		!strings.Contains(lines[0].metrics, "↓20") ||
+		!strings.Contains(lines[0].metrics, "ctx 100") ||
+		!strings.Contains(lines[0].metrics, "~$0.01") {
+		t.Fatalf("usage row = %#v, want system row with request metrics", lines)
+	}
+}
+
+func TestAggregateUsageRowOmitsRequestContext(t *testing.T) {
+	usage := model.Usage{InputTokens: 30}
+	event := model.Event{Kind: model.EventUsage, Usage: &usage, UsageAggregate: true}
+
+	if metrics := metricsText(eventMetricParts(event)); strings.Contains(metrics, "ctx ") {
+		t.Fatalf("aggregate usage metrics = %q, want no per-request context", metrics)
 	}
 }
 
@@ -2142,13 +2197,16 @@ func TestNarrowKeyBarsKeepWholeEssentialHints(t *testing.T) {
 	})
 
 	t.Run("item", func(t *testing.T) {
-		item := newItemView(model.Event{Kind: model.EventThinking, Text: "Chart route"}, model.AgentClaude, nil, 20, 8, newStyles())
+		item := newItemView(model.Event{
+			Kind: model.EventThinking, Text: "Chart route",
+			RecordRef: model.RecordRef{Path: "/fictional/session.jsonl", Length: 1},
+		}, model.AgentClaude, nil, 20, 8, newStyles())
 		keyBar := strings.TrimSpace(strings.Split(ansi.Strip(item.view()), "\n")[7])
 		if !strings.Contains(keyBar, "R raw") || !strings.Contains(keyBar, "esc back") || strings.Contains(keyBar, "…") || ansi.StringWidth(keyBar) > 20 {
 			t.Fatalf("20-column item key bar lost a whole back hint: %q", keyBar)
 		}
 		item.showRaw = true
-		keyBar = itemKeyText(20, item.showRaw)
+		keyBar = itemKeyText(20, item.showRaw, true)
 		if !strings.Contains(keyBar, "R raw*") || !strings.Contains(keyBar, "esc back") || ansi.StringWidth(keyBar) > 20 {
 			t.Fatalf("20-column item key bar lost raw state: %q", keyBar)
 		}
@@ -2195,7 +2253,7 @@ func TestWideKeyBarsAdvertiseMouse(t *testing.T) {
 	if keyBar := detailKeyText(160, false, tabInfo, true); !strings.Contains(keyBar, "mouse wheel scroll") || strings.Contains(keyBar, "click") {
 		t.Fatalf("wide Info key bar advertises an inactive mouse action: %q", keyBar)
 	}
-	if keyBar := itemKeyText(160, false); !strings.Contains(keyBar, "wheel scroll") {
+	if keyBar := itemKeyText(160, false, true); !strings.Contains(keyBar, "wheel scroll") {
 		t.Fatalf("wide item key bar missing mouse hint: %q", keyBar)
 	}
 }
@@ -4339,6 +4397,23 @@ func TestItemViewShowsBothTimesAndLoadsRawRecordAsynchronously(t *testing.T) {
 	}
 }
 
+func TestUsageItemOmitsRawHintWithoutReadableRecord(t *testing.T) {
+	for name, ref := range map[string]model.RecordRef{
+		"aggregate":        {},
+		"unmatched offset": {Path: "/fictional/session.jsonl", Offset: 42},
+	} {
+		t.Run(name, func(t *testing.T) {
+			item := newItemView(model.Event{
+				Kind: model.EventUsage, Text: "session usage", RecordRef: ref,
+			}, model.AgentCodex, nil, 80, 12, newStyles())
+
+			if view := ansi.Strip(item.view()); strings.Contains(view, "R raw") {
+				t.Fatalf("usage item advertised unavailable raw record:\n%s", view)
+			}
+		})
+	}
+}
+
 func TestItemRawToggleReusesInFlightRead(t *testing.T) {
 	raw := []byte(`{"status":"ready"}`)
 	item := newItemView(model.Event{
@@ -4694,6 +4769,7 @@ func TestItemTextRolesMatchTimelinePromptSemantics(t *testing.T) {
 		{kind: model.EventThinking, want: detailSecondary},
 		{kind: model.EventSystem, want: detailSystemPrompt},
 		{kind: model.EventCompact, want: detailSystemPrompt},
+		{kind: model.EventUsage, want: detailSystemPrompt},
 	} {
 		lines := itemEventLines(model.Event{Kind: test.kind, Text: "ordinary prose"}, model.AgentCodex)
 		if len(lines) != 1 || lines[0].role != test.want {
@@ -4702,7 +4778,7 @@ func TestItemTextRolesMatchTimelinePromptSemantics(t *testing.T) {
 	}
 }
 
-func TestItemLabelsHarnessAndHumanTurns(t *testing.T) {
+func TestItemLabelsMatchTimelineRoles(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		event     model.Event
@@ -4711,6 +4787,7 @@ func TestItemLabelsHarnessAndHumanTurns(t *testing.T) {
 	}{
 		{name: "harness", event: model.Event{Kind: model.EventUser, Text: "Injected instructions", Harness: true}, wantLabel: "Harness", wantRole: detailSystemPrompt},
 		{name: "human", event: model.Event{Kind: model.EventUser, Text: "Survey the crater"}, wantLabel: "User", wantRole: detailUserPrompt},
+		{name: "usage", event: model.Event{Kind: model.EventUsage, Text: "unattributed usage"}, wantLabel: "Usage", wantRole: detailSystemPrompt},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := itemLabel(test.event, model.AgentClaude); got != test.wantLabel {

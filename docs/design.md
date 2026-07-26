@@ -140,21 +140,27 @@ The header panel uses three lines:
 3. recursive tokens and cost, followed by own and subagent splits.
 
 The timeline is one flat chronological list, expanded by default. A session is one continuous log,
-so every event — prompt, thinking summary, tool call, compaction, system note, subagent spawn — is
-a sibling row, and each row states its own request's tokens, cost, and the context window it was
-sent with:
+so every event — prompt, thinking summary, tool call, compaction, system note, unattributed usage,
+subagent spawn — is a sibling row. Request rows state their tokens, cost, and the context window
+they were sent with. Usage fallback rows include the model; aggregate `session usage` rows omit
+context because they do not represent one request:
 
 ```text
 ▸ you: Investigate the failing watcher                                    ctx 62k
   ◇ thinking: The lock is held across the reload      ↑61k/0/1200 ↓340 · ctx 62k
 ▾ ⚙ Edit(watch.go) → updated · 0.4s                  ↑62k/0/900 ↓1100 · ctx 63k
     output: watcher tests passed
-  claude: The race is fixed                          ↑63k/0/800 ↓2000 · ctx 64k
+  codex: The race is fixed                           ↑63k/0/800 ↓2000 · ctx 64k
+  ◇ unattributed usage (gpt-5.6)                     ↑64k/0/0 ↓800 · ctx 64k
   ⑃ Task(inspect watcher) opus-4.8                              420k · $1.02
 ```
 
 A user prompt bills nothing itself, so its row reports only the window the request it triggered was
 sent with. Reading down, the context column therefore only grows until a compaction resets it.
+When a billed request has no eligible content row, a muted `unattributed usage` row carries its
+model, tokens, cost, and context. If cumulative usage cannot be partitioned safely into request
+deltas, ordinary request rows remain unpriced and one `session usage` row per model carries the
+authoritative aggregate.
 
 Indentation is reserved for what a row contains. A prompt with more than one line, an assistant
 reply beyond the preview cap, and a tool call with a diff, output, or multiline input each carry
@@ -189,8 +195,8 @@ truncation. Wrapping operates on plain text before color is applied; every visua
 the logical row's role, and selection highlights all wrapped rows belonging to the selected item.
 
 `space` is the only in-place expansion key. `enter` or `l` opens the focused row: a subagent opens
-its session detail, while an assistant reply, tool, thinking row, user message, compaction, or
-system event opens a pushed item view. A tool item shows its full input, diff, and output, bounded only by the
+its session detail, while an assistant reply, tool, thinking row, user message, compaction, system
+event, or usage event opens a pushed item view. A tool item shows its full input, diff, and output, bounded only by the
 model's per-field limit rather than the timeline preview cap. Other item views show the event's
 full text. The item title extends the session breadcrumb with a short event label. Its viewport
 supports `j`, `k`, `g`, `G`, and `w`; the normal back keys restore the parent detail.

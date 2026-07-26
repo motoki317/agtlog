@@ -53,14 +53,16 @@ func TestGoldenDetailFrame(t *testing.T) {
 			{Kind: model.EventAssistantText, Text: "The ridge is clear"},
 		},
 	}
+	unattributedUsage := model.Usage{InputTokens: 120_000, OutputTokens: 8_000, InputIncludesCacheRead: true}
 	parent := &model.Session{
-		ID: "route", Agent: model.AgentClaude, Path: "/workspace/starship/route.jsonl", CWD: "/workspace/starship", Project: "starship", Title: "Plan route",
-		Models: []string{"claude-opus-4-8"}, GitBranch: "orbit/alpha", StartedAt: goldenNow.Add(-20 * time.Minute), UpdatedAt: goldenNow,
-		Usage: []model.Usage{{InputTokens: 120_000, OutputTokens: 8_000}}, Cost: model.Cost{USD: 0.84}, Subagents: []*model.Session{child},
+		ID: "route", Agent: model.AgentCodex, Path: "/workspace/starship/route.jsonl", CWD: "/workspace/starship", Project: "starship", Title: "Plan route",
+		Models: []string{"gpt-5.6-sol"}, GitBranch: "orbit/alpha", StartedAt: goldenNow.Add(-20 * time.Minute), UpdatedAt: goldenNow,
+		Usage: []model.Usage{{InputTokens: 120_000, OutputTokens: 8_000}}, Cost: model.Cost{USD: 0.84, Estimated: true}, Subagents: []*model.Session{child},
 		Events: []model.Event{
 			{Timestamp: goldenNow.Add(-14 * time.Minute), Kind: model.EventUser, Text: "Delegate the survey"},
 			{Timestamp: goldenNow.Add(-13 * time.Minute), Kind: model.EventThinking, Text: "Select a safe path"},
 			{Timestamp: goldenNow.Add(-12 * time.Minute), Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/starship/map.go", ResultSummary: "map ready", Duration: 400 * time.Millisecond, Detail: &model.ToolDetail{Input: "/workspace/starship/map.go", Output: "map ready"}},
+			{Timestamp: goldenNow.Add(-11 * time.Minute), Kind: model.EventUsage, Model: "gpt-5.6-sol", Text: "unattributed usage", Usage: &unattributedUsage, Cost: model.CostBreakdown{Input: model.CostBuckets{{RatePerToken: 0.000007, Tokens: 120_000}}}, Priced: true, CostEstimated: true},
 			{Timestamp: goldenNow.Add(-11 * time.Minute), Kind: model.EventAssistantText, Text: "Survey delegated"},
 			{Timestamp: goldenNow.Add(-10 * time.Minute), Kind: model.EventSubagent, ToolName: "Agent", Subagent: child},
 		},

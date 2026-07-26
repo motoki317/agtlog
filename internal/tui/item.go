@@ -185,7 +185,7 @@ func (i *itemView) view() string {
 	if panelHeight == i.height {
 		return panel
 	}
-	keyBar := i.styles.keyHint.Render(fitPlain(itemKeyText(i.width, i.showRaw), i.width, false))
+	keyBar := i.styles.keyHint.Render(fitPlain(itemKeyText(i.width, i.showRaw, validRecordRef(i.event.RecordRef)), i.width, false))
 	return panel + "\n" + keyBar
 }
 
@@ -410,7 +410,7 @@ func itemEventLines(event model.Event, agent model.AgentKind) []detailLine {
 			}
 		} else if event.Kind == model.EventAssistantText {
 			role = detailRow
-		} else if event.Kind == model.EventSystem || event.Kind == model.EventCompact {
+		} else if event.Kind == model.EventSystem || event.Kind == model.EventCompact || event.Kind == model.EventUsage {
 			role = detailSystemPrompt
 		}
 		return itemTextLines(event.Text, role, agent)
@@ -486,13 +486,18 @@ func itemLabel(event model.Event, agent model.AgentKind) string {
 		return "Compact"
 	case model.EventSystem:
 		return "System"
+	case model.EventUsage:
+		return "Usage"
 	default:
 		return "Item"
 	}
 }
 
-func itemKeyText(width int, showRaw bool) string {
+func itemKeyText(width int, showRaw, rawAvailable bool) string {
 	timeHint := timeFormatKey + " time"
+	if !rawAvailable {
+		return fitKeyHints(width, []string{"j/k scroll", "w wrap", timeHint, "esc back", "wheel scroll"}, []string{"wheel scroll", "j/k scroll", "w wrap", timeHint})
+	}
 	rawHint := rawRecordKey + " raw"
 	if showRaw {
 		rawHint = rawRecordKey + " hide raw"

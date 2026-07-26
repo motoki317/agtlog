@@ -1297,6 +1297,9 @@ func nextRequestContext(events []model.Event, userIndex int) int64 {
 		if event.Kind == model.EventUser {
 			return 0
 		}
+		if event.UsageAggregate {
+			continue
+		}
 		if event.Usage != nil {
 			return event.Usage.PromptTokens()
 		}
@@ -1334,8 +1337,10 @@ func eventMetricParts(event model.Event) []string {
 	if part, ok := costPart(event.Cost.Total(), event.Priced, event.CostEstimated); ok {
 		parts = append(parts, part)
 	}
-	if part, ok := contextPart(usage.PromptTokens()); ok {
-		parts = append(parts, part)
+	if !event.UsageAggregate {
+		if part, ok := contextPart(usage.PromptTokens()); ok {
+			parts = append(parts, part)
+		}
 	}
 	return parts
 }
@@ -1490,6 +1495,13 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 		return []detailLine{{text: text, key: key, role: detailSystemPrompt, event: event}}
 	case model.EventSystem:
 		return []detailLine{{text: padding + foldMarker(false, false) + " " + glyphSecondary + " " + firstLine(event.Text), key: key, role: detailSystemPrompt, event: event}}
+	case model.EventUsage:
+		title := firstLine(event.Text)
+		if event.Model != "" {
+			title += " (" + shortModelName(event.Model) + ")"
+		}
+		text := padding + foldMarker(false, false) + " " + glyphSecondary + " " + title
+		return []detailLine{{text: text, metrics: metricsText(eventMetricParts(event)), key: key, nowrap: true, role: detailSystemPrompt, event: event}}
 	default:
 		return nil
 	}
