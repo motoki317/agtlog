@@ -21,7 +21,7 @@ func (m Model) helpView() string {
 		if _, item := m.detail.(*itemView); item {
 			lines = []string{
 				"j/k scroll · g/G edge",
-				"w wrap · " + rawRecordKey + " raw · " + timeFormatKey + " time",
+				"w wrap · " + timeFormatKey + " time",
 				"esc/h back",
 				"mouse wheel scroll",
 				"? help · q/ctrl-c quit",

@@ -27,3 +27,4 @@ trade-offs and alternatives that led to each choice.
 | 2026-07-19 | [Live-follow watching](./20260719-live-follow-watching.md) | Combine recursive fsnotify watches with a stat-based recovery scan |
 | 2026-07-19 | [TUI stack](./20260719-tui-stack.md) | Use Bubble Tea and Bubbles for a testable keyboard-first terminal UI |
 | 2026-07-26 | [Codex timeline usage](./20260726-codex-timeline-usage.md) | Preserve polymorphic model context and treat reasoning as output detail |
+| 2026-07-26 | [Always-present raw item records](./20260726-always-present-raw-item-records.md) | Load raw records on item open and present valid JSON as terminal-safe indented lines |

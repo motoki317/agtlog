@@ -6,7 +6,6 @@ const (
 	expandAllKey   = "E"
 	collapseAllKey = "C"
 	timeFormatKey  = "T"
-	rawRecordKey   = "R"
 	sortColumnKey  = "O"
 	sortAgeKey     = "A"
 	sortTitleKey   = "N"

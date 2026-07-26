@@ -1,7 +1,7 @@
 ---
 date: "2026-07-25"
 author: "@motoki317"
-status: "accepted"
+status: "superseded"
 ---
 
 # Context
@@ -66,3 +66,5 @@ That parser could drift from the normal full-session parser and produce differen
 
 Derived fields continue to elide encrypted tokens.
 Only the explicitly requested raw view is source-exact.
+
+Superseded by [Always-present raw item records](./20260726-always-present-raw-item-records.md).

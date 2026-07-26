@@ -197,7 +197,8 @@ the logical row's role, and selection highlights all wrapped rows belonging to t
 `space` is the only in-place expansion key. `enter` or `l` opens the focused row: a subagent opens
 its session detail, while an assistant reply, tool, thinking row, user message, compaction, system
 event, or usage event opens a pushed item view. Item views use the Info tab's section vocabulary
-and order: Event, Request when the row carries usage, kind-specific content, then Raw when toggled.
+and order: Event, Request when the row carries usage, kind-specific content, then Raw when the row
+has a source record.
 Event presents metadata as aligned label and value columns. Request shows token flow, request
 context where one exists, and the same per-bucket rate terms used by Info before closing with a
 precise total. A substituted rate names both the published stand-in and the logged model before

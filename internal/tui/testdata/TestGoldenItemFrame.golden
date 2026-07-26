@@ -32,17 +32,17 @@
 │route updated                                                                 │
 │                                                                              │
 │Raw                                                                           │
-│{"type":"assistant","message":{"model":"claude-opus-4-8","content":[{"type":"t│
-│ool_use","id":"call-route","name":"Edit"}]}}                                  │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-╰──────────────────────────────────────────────────────────────────────────────╯
-j/k scroll   w wrap   R hide raw   T time   esc back   wheel scroll
+│{                                                                             │
+│  "type": "assistant",                                                        │
+│  "message": {                                                                │
+│    "model": "claude-opus-4-8",                                               │
+│    "content": [                                                              │
+│      {                                                                       │
+│        "type": "tool_use",                                                   │
+│        "id": "call-route",                                                   │
+│        "name": "Edit"                                                        │
+│      }                                                                       │
+│    ]                                                                         │
+│  }                                                                           │
+╰──────────────────────────────────────────────────────────────────────── 1/46 ╯
+j/k scroll   w wrap   T time   esc back   wheel scroll

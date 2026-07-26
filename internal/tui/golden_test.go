@@ -118,11 +118,10 @@ func TestGoldenItemFrame(t *testing.T) {
 		{Type: tea.KeyEnter},
 		{Type: tea.KeyUp},
 		{Type: tea.KeyEnter},
-		{Type: tea.KeyRunes, Runes: []rune{'R'}},
 	} {
 		tm.Send(key)
 	}
-	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), `"type":"assistant"`) }, teatest.WithDuration(time.Second))
+	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), `"type": "assistant"`) }, teatest.WithDuration(time.Second))
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}

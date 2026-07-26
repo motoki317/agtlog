@@ -306,8 +306,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		if key, ok := msg.(tea.KeyMsg); ok && (key.String() == "enter" || key.String() == "l") {
-			if m.activateDetailSelection() {
-				return m, nil
+			if opened, cmd := m.activateDetailSelection(); opened {
+				return m, cmd
 			}
 		}
 		return m, m.detail.update(msg)
@@ -444,10 +444,10 @@ func (m *Model) updateDetailMouse(mouse tea.MouseMsg) tea.Cmd {
 	return nil
 }
 
-func (m *Model) activateDetailSelection() bool {
+func (m *Model) activateDetailSelection() (bool, tea.Cmd) {
 	detail, ok := m.detail.(*detailState)
 	if !ok {
-		return false
+		return false, nil
 	}
 	if subagent := detail.focusedSubagent(); subagent != nil {
 		wrap := detail.wrap
@@ -471,7 +471,7 @@ func (m *Model) activateDetailSelection() bool {
 		child.resize(m.width, m.height)
 		child.anchorBottom()
 		m.detail = child
-		return true
+		return true, nil
 	}
 	if event, exists := detail.focusedEvent(); exists {
 		crumbs := append([]string(nil), detail.crumbs...)
@@ -479,15 +479,15 @@ func (m *Model) activateDetailSelection() bool {
 			crumbs = append(crumbs, label)
 		}
 		m.detailStack = append(m.detailStack, m.detail)
-		item := newItemViewWithState(event, detail.session.Agent, crumbs, m.width, m.height, m.styles, m.now(), false, detail.wrap)
+		item := newItemViewWithState(event, detail.session.Agent, crumbs, m.width, m.height, m.styles, m.now(), detail.wrap)
 		m.itemGeneration++
 		item.ctx = m.ctx
 		item.generation = m.itemGeneration
 		item.focusKey = detail.focusables[detail.focus].key
 		m.detail = item
-		return true
+		return true, item.requestRaw()
 	}
-	return false
+	return false, nil
 }
 
 func (m *Model) openListSelection() tea.Cmd {
@@ -635,13 +635,17 @@ func (m *Model) replaceDetailTree(root *model.Session) tea.Cmd {
 				if label := detailCrumbLabel(parent.session); label != "" {
 					crumbs = append(crumbs, label)
 				}
-				replacement := newItemViewWithState(event, parent.session.Agent, crumbs, m.width, m.height, m.styles, m.now(), item.showRaw, item.wrap)
+				offset := item.intendedYOffset()
+				replacement := newItemViewWithState(event, parent.session.Agent, crumbs, m.width, m.height, m.styles, m.now(), item.wrap)
 				m.itemGeneration++
 				replacement.ctx = m.ctx
 				replacement.generation = m.itemGeneration
 				rawCmd = replacement.requestRaw()
 				replacement.focusKey = item.focusKey
-				replacement.viewport.SetYOffset(item.viewport.YOffset)
+				replacement.viewport.SetYOffset(offset)
+				if rawCmd != nil {
+					replacement.restoreYOffset = &offset
+				}
 				replacements = append(replacements, replacement)
 			}
 			continue

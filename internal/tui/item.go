@@ -1,7 +1,9 @@
 package tui
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -29,12 +31,13 @@ type itemView struct {
 	styles         styles
 	wrap           bool
 	now            time.Time
-	showRaw        bool
 	ctx            context.Context
 	generation     uint64
 	raw            []byte
+	rawLines       []detailLine
 	rawLoading     bool
 	rawUnavailable string
+	restoreYOffset *int
 	lines          []detailLine
 	rendered       []renderedRow
 }
@@ -45,13 +48,13 @@ var (
 )
 
 func newItemView(event model.Event, agent model.AgentKind, crumbs []string, width, height int, styles styles) *itemView {
-	return newItemViewWithState(event, agent, crumbs, width, height, styles, event.Timestamp, false, true)
+	return newItemViewWithState(event, agent, crumbs, width, height, styles, event.Timestamp, true)
 }
 
-func newItemViewWithState(event model.Event, agent model.AgentKind, crumbs []string, width, height int, styles styles, now time.Time, showRaw, wrap bool) *itemView {
+func newItemViewWithState(event model.Event, agent model.AgentKind, crumbs []string, width, height int, styles styles, now time.Time, wrap bool) *itemView {
 	item := &itemView{
 		event: event, agent: agent, crumbs: append([]string(nil), crumbs...), styles: styles,
-		viewport: newViewport(max(1, width-2), max(1, height-3)), wrap: wrap, now: now, showRaw: showRaw,
+		viewport: newViewport(max(1, width-2), max(1, height-3)), wrap: wrap, now: now,
 		ctx: context.Background(),
 	}
 	item.rebuildLines()
@@ -78,6 +81,7 @@ func (i *itemView) setWrap(wrap bool) {
 	if i.wrap == wrap {
 		return
 	}
+	i.restoreYOffset = nil
 	i.wrap = wrap
 	i.rebuild()
 }
@@ -92,7 +96,15 @@ func (i *itemView) setNow(now time.Time) {
 }
 
 func (i *itemView) scrollWheel(button tea.MouseButton) {
+	i.restoreYOffset = nil
 	scrollViewport(&i.viewport, button)
+}
+
+func (i *itemView) intendedYOffset() int {
+	if i.restoreYOffset != nil {
+		return *i.restoreYOffset
+	}
+	return i.viewport.YOffset
 }
 
 func (i *itemView) update(msg tea.Msg) tea.Cmd {
@@ -102,9 +114,14 @@ func (i *itemView) update(msg tea.Msg) tea.Cmd {
 		}
 		i.rawLoading = false
 		i.raw = loaded.record
+		i.rawLines = rawDetailLines(loaded.safeLines, i.agent)
 		i.rawUnavailable = rawUnavailableMessage(loaded.err)
 		i.rebuildLines()
 		i.rebuild()
+		if i.restoreYOffset != nil {
+			i.viewport.SetYOffset(*i.restoreYOffset)
+			i.restoreYOffset = nil
+		}
 		return nil
 	}
 	key, ok := msg.(tea.KeyMsg)
@@ -115,30 +132,25 @@ func (i *itemView) update(msg tea.Msg) tea.Cmd {
 	}
 	switch key.String() {
 	case "j", "down":
+		i.restoreYOffset = nil
 		i.viewport.ScrollDown(1)
 	case "k", "up":
+		i.restoreYOffset = nil
 		i.viewport.ScrollUp(1)
 	case "g":
+		i.restoreYOffset = nil
 		i.viewport.GotoTop()
 	case "G":
+		i.restoreYOffset = nil
 		i.viewport.GotoBottom()
 	case "w":
 		i.setWrap(!i.wrap)
-	case rawRecordKey:
-		if validRecordRef(i.event.RecordRef) {
-			i.showRaw = !i.showRaw
-			if cmd := i.requestRaw(); cmd != nil {
-				return cmd
-			}
-			i.rebuildLines()
-			i.rebuild()
-		}
 	}
 	return nil
 }
 
 func (i *itemView) requestRaw() tea.Cmd {
-	if !i.showRaw || !validRecordRef(i.event.RecordRef) || i.raw != nil || i.rawUnavailable != "" || i.rawLoading {
+	if !validRecordRef(i.event.RecordRef) || i.raw != nil || i.rawUnavailable != "" || i.rawLoading {
 		return nil
 	}
 	i.rawLoading = true
@@ -187,7 +199,7 @@ func (i *itemView) view() string {
 	if panelHeight == i.height {
 		return panel
 	}
-	keyBar := i.styles.keyHint.Render(fitPlain(itemKeyText(i.width, i.showRaw, validRecordRef(i.event.RecordRef)), i.width, false))
+	keyBar := i.styles.keyHint.Render(fitPlain(itemKeyText(i.width), i.width, false))
 	return panel + "\n" + keyBar
 }
 
@@ -237,14 +249,19 @@ func (i *itemView) rebuildLines() {
 	} else {
 		i.lines = appendItemLinesSection(i.lines, itemContentTitle(i.event), content, i.agent)
 	}
-	if i.showRaw && validRecordRef(i.event.RecordRef) {
-		raw := terminalSafeRawRecord(i.raw)
+	if validRecordRef(i.event.RecordRef) {
+		var rawLines []detailLine
 		if i.rawLoading {
-			raw = "loading raw…"
+			rawLines = itemTextLines("loading raw…", detailRow, i.agent)
 		} else if i.rawUnavailable != "" {
-			raw = i.rawUnavailable
+			rawLines = itemTextLines(i.rawUnavailable, detailRow, i.agent)
+		} else {
+			rawLines = i.rawLines
 		}
-		i.lines = appendItemSection(i.lines, "Raw", raw, detailRow, i.agent)
+		if len(rawLines) == 0 {
+			rawLines = []detailLine{{role: detailRow, agent: i.agent}}
+		}
+		i.lines = appendItemLinesSection(i.lines, "Raw", rawLines, i.agent)
 	}
 }
 
@@ -362,13 +379,18 @@ func formatPreciseCost(usd float64, estimated bool) string {
 type rawRecordLoadedMsg struct {
 	generation uint64
 	record     []byte
+	safeLines  []string
 	err        error
 }
 
 func loadRawRecord(ctx context.Context, ref model.RecordRef, generation uint64) tea.Cmd {
 	return func() tea.Msg {
 		record, err := source.ReadRecord(ctx, ref)
-		return rawRecordLoadedMsg{generation: generation, record: record, err: err}
+		var safeLines []string
+		if err == nil {
+			safeLines = terminalSafePrettyRawRecordLines(record)
+		}
+		return rawRecordLoadedMsg{generation: generation, record: record, safeLines: safeLines, err: err}
 	}
 }
 
@@ -442,6 +464,27 @@ func terminalSafeRawRecord(raw []byte) string {
 		safe.WriteRune(char)
 	}
 	return safe.String()
+}
+
+func terminalSafePrettyRawRecordLines(raw []byte) []string {
+	var indented bytes.Buffer
+	if err := json.Indent(&indented, raw, "", "  "); err != nil {
+		return []string{terminalSafeRawRecord(raw)}
+	}
+	lines := bytes.Split(indented.Bytes(), []byte{'\n'})
+	safe := make([]string, len(lines))
+	for index, line := range lines {
+		safe[index] = terminalSafeRawRecord(line)
+	}
+	return safe
+}
+
+func rawDetailLines(lines []string, agent model.AgentKind) []detailLine {
+	result := make([]detailLine, len(lines))
+	for index, line := range lines {
+		result[index] = detailLine{text: line, role: detailRow, agent: agent}
+	}
+	return result
 }
 
 func rawRecordEscapeSuffix(raw []byte) bool {
@@ -620,17 +663,7 @@ func itemLabel(event model.Event, agent model.AgentKind) string {
 	}
 }
 
-func itemKeyText(width int, showRaw, rawAvailable bool) string {
+func itemKeyText(width int) string {
 	timeHint := timeFormatKey + " time"
-	if !rawAvailable {
-		return fitKeyHints(width, []string{"j/k scroll", "w wrap", timeHint, "esc back", "wheel scroll"}, []string{"wheel scroll", "j/k scroll", "w wrap", timeHint})
-	}
-	rawHint := rawRecordKey + " raw"
-	if showRaw {
-		rawHint = rawRecordKey + " hide raw"
-		if width < ansi.StringWidth(rawHint+"   esc back") {
-			rawHint = rawRecordKey + " raw*"
-		}
-	}
-	return fitKeyHints(width, []string{"j/k scroll", "w wrap", rawHint, timeHint, "esc back", "wheel scroll"}, []string{"wheel scroll", "j/k scroll", "w wrap", timeHint, rawHint})
+	return fitKeyHints(width, []string{"j/k scroll", "w wrap", timeHint, "esc back", "wheel scroll"}, []string{"wheel scroll", "j/k scroll", "w wrap", timeHint})
 }
