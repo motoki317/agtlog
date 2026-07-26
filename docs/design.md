@@ -122,7 +122,7 @@ as one column in the supported terminal path.
 | Glyph | Meaning |
 | --- | --- |
 | `⑃` | Marks a subagent that opens as its own detail screen |
-| `~$` | API-equivalent estimate; a subscription user normally pays less |
+| `~$` | The applied rate is not the logged model's own published rate |
 | `!` | Session error or missing pricing, depending on the cell |
 | `▸` / `▾` | Collapsed / expanded item |
 | `▸ you:` | User prompt |
@@ -196,10 +196,19 @@ the logical row's role, and selection highlights all wrapped rows belonging to t
 
 `space` is the only in-place expansion key. `enter` or `l` opens the focused row: a subagent opens
 its session detail, while an assistant reply, tool, thinking row, user message, compaction, system
-event, or usage event opens a pushed item view. A tool item shows its full input, diff, and output, bounded only by the
-model's per-field limit rather than the timeline preview cap. Other item views show the event's
-full text. The item title extends the session breadcrumb with a short event label. Its viewport
-supports `j`, `k`, `g`, `G`, and `w`; the normal back keys restore the parent detail.
+event, or usage event opens a pushed item view. Item views use the Info tab's section vocabulary
+and order: Event, Request when the row carries usage, kind-specific content, then Raw when toggled.
+Event presents metadata as aligned label and value columns. Request shows token flow, request
+context where one exists, and the same per-bucket rate terms used by Info before closing with a
+precise total. A substituted rate names both the published stand-in and the logged model before
+the arithmetic. Aggregate usage identifies itself as session-level fallback usage and carries no
+request context.
+
+A tool item shows its full Input, Diff, Output, and Result summary sections, bounded only by the
+model's per-field limit rather than the timeline preview cap. Other content sections use Message,
+Prompt, Harness, Thinking, Advisor, System, Compact, or Usage according to the row kind. The item
+title extends the session breadcrumb with a short event label. Its viewport supports `j`, `k`,
+`g`, `G`, and `w`; the normal back keys restore the parent detail.
 
 ## Key budget
 

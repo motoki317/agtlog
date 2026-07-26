@@ -1,11 +1,11 @@
 ╭─ Session · starship ─────────────────────────────────────────────────────────────────────────────────────────────────╮
 │Plan route                                                                                                            │
 │claude │ starship (/workspace/starship) │ opus-4.8                                                                    │
-│branch orbit/alpha │ Jan 02 05:44→Jan 02 06:04 │ total ~$1.28 │ own $0.84 │ subagents ~$0.44                          │
+│branch orbit/alpha │ Jan 02 05:44→Jan 02 06:04 │ total $1.28 │ own $0.84 │ subagents $0.44                            │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Timeline  Subagents (2)  [Info] ────────────────────────────────────────────────────────────────────────────────────╮
 │  Cost                                                                                                                │
-│  total: ~$1.28                                                                                                       │
+│  total: $1.28                                                                                                        │
 │  tokens: ↑30k/4000/168k ↓15k                                                                                         │
 │                                                                                                                      │
 │  Own model costs · $0.84                                                                                             │
@@ -15,18 +15,18 @@
 │    cache read    30k × $0.5/Mtok  = $0.01                                                                            │
 │    output       8000 × $25/Mtok   = $0.20                                                                            │
 │    subtotal                       = $0.84                                                                            │
-│  Codex: always estimated from the default pricing model. Claude: logged or priced cost.                              │
+│  Both agents use the same rate table. ~ means the applied rate is not the logged model's own published rate.         │
 │                                                                                                                      │
 │  Definitions                                                                                                         │
 │  own: this session's own turns                                                                                       │
 │  subagents: delegated child sessions; their totals include nested descendants                                        │
 │                                                                                                                      │
 │  Cost tree                                                                                                           │
-│  total = own + Σ subs · ↑30k/4000/168k ↓15k / ~$1.28                                                                 │
+│  total = own + Σ subs · ↑30k/4000/168k ↓15k / $1.28                                                                  │
 │  ├─ own · ↑30k/4000/120k ↓8000 / $0.84                                                                               │
-│  └─ subagent Scout the ridge · ↑0/0/48k ↓7000 / ~$0.44                                                               │
+│  └─ subagent Scout the ridge · ↑0/0/48k ↓7000 / $0.44                                                                │
 │     ├─ own · ↑0/0/40k ↓5000 / $0.32                                                                                  │
-│     └─ subagent Map the cavern · ↑0/0/8000 ↓2000 / ~$0.12                                                            │
+│     └─ subagent Map the cavern · ↑0/0/8000 ↓2000 / $0.12                                                             │
 │                                                                                                                      │
 │                                                                                                                      │
 │                                                                                                                      │

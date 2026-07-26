@@ -600,7 +600,8 @@ func TestThirdDetailTabExplainsCostAndRecursiveTree(t *testing.T) {
 		"cache read    10 × $1000/Mtok = $0.01",
 		"output        20 × $1000/Mtok = $0.02",
 		"subtotal                      = $0.13",
-		"Codex: always estimated from the default pricing model. Claude: logged or priced cost.",
+		"Both agents use the same rate table. ~ means the applied rate",
+		"published rate.",
 		"own: this session's own turns",
 		"subagents: delegated child sessions",
 		"total = own + Σ subs · ↑10/0/140 ↓30 / $0.18",
@@ -790,12 +791,12 @@ func TestInfoModelMathHandlesInclusiveCacheAndMissingPricing(t *testing.T) {
 	for _, want := range []string{
 		"total: ~$0.11! · missing pricing: unknown-model",
 		"tokens: ↑20/0/85 ↓10",
-		"gpt-5 (est.)",
-		"input        80 × $1000/Mtok = ~$0.08",
-		"cache read   20 × $1000/Mtok = ~$0.02",
-		"output       10 × $1000/Mtok = ~$0.01",
-		"subtotal                     = ~$0.11",
-		"unknown-model! (est.)",
+		"gpt-5",
+		"input        80 × $1000/Mtok = $0.08",
+		"cache read   20 × $1000/Mtok = $0.02",
+		"output       10 × $1000/Mtok = $0.01",
+		"subtotal                     = $0.11",
+		"unknown-model!",
 		"input        5 · price unavailable",
 	} {
 		if !strings.Contains(text, want) {
@@ -807,6 +808,43 @@ func TestInfoModelMathHandlesInclusiveCacheAndMissingPricing(t *testing.T) {
 	outputAt := strings.Index(text, "output       10")
 	if inputAt < 0 || readAt <= inputAt || outputAt <= readAt || strings.Contains(text, "effective") || strings.Contains(text, "/token") {
 		t.Fatalf("Info model groups are out of order or retained a blended rate:\n%s", text)
+	}
+}
+
+func TestInfoModelMathNamesOnlySubstitutedRate(t *testing.T) {
+	session := &model.Session{
+		Usage: []model.Usage{
+			{Model: "model-a", InputTokens: 10},
+			{Model: "agents-a1", InputTokens: 20},
+		},
+		ModelCosts: map[string]float64{"model-a": 0.01, "agents-a1": 0.02},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{
+			"model-a":   {Input: testCostBuckets(10, 0.01)},
+			"agents-a1": {Input: testCostBuckets(20, 0.02)},
+		},
+		Cost: model.Cost{
+			USD: 0.03, Estimated: true,
+			EstimatedRates: []model.EstimatedRate{{Model: "agents-a1", PricingModel: "model-a"}},
+		},
+	}
+
+	text := strings.Join(ownModelCostLines(session), "\n")
+	if !strings.Contains(text, "agents-a1 (est. · priced as model-a)") {
+		t.Fatalf("substituted model did not name its stand-in:\n%s", text)
+	}
+	if strings.Contains(text, "model-a (est.") || !strings.Contains(text, "subtotal                     = $0.01") {
+		t.Fatalf("exact model inherited session estimate state:\n%s", text)
+	}
+}
+
+func TestInfoExplainsEstimateMarker(t *testing.T) {
+	text := ""
+	for _, line := range sessionInfoLines(&model.Session{}) {
+		text += line.text + "\n"
+	}
+	want := "Both agents use the same rate table. ~ means the applied rate is not the logged model's own published rate."
+	if !strings.Contains(text, want) {
+		t.Fatalf("Info explanation missing %q:\n%s", want, text)
 	}
 }
 
@@ -2445,7 +2483,7 @@ func TestOpenItemFollowsRootLiveUpdate(t *testing.T) {
 		refreshedLines = append(refreshedLines, line.text)
 	}
 	content := strings.Join(refreshedLines, "\n")
-	for _, want := range []string{"finished", "relative time: 7m", `"status":"finished"`} {
+	for _, want := range []string{"finished", "relative time  7m", `"status":"finished"`} {
 		if !strings.Contains(content, want) {
 			t.Fatalf("refreshed item content missing %q:\n%s", want, content)
 		}
@@ -4260,7 +4298,7 @@ func TestEnterOnToolOpensFullItemView(t *testing.T) {
 	if len(m.detailStack) != 1 {
 		t.Fatalf("tool open stack depth = %d, want 1:\n%s", len(m.detailStack), view)
 	}
-	for _, want := range []string{"starship › Plan route › Bash", "input:", "command-41", "+route-41", "output:", "result-41"} {
+	for _, want := range []string{"starship › Plan route › Bash", "Input", "command-41", "+route-41", "Output", "result-41"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("tool item view missing %q:\n%s", want, view)
 		}
@@ -4296,7 +4334,7 @@ func TestItemToolLinesUseFallbacksAndDiffRoles(t *testing.T) {
 					}
 				}
 			}
-			for _, want := range []string{"input:", "fallback input", "output:", "fallback output"} {
+			for _, want := range []string{"Input", "fallback input", "Output", "fallback output"} {
 				if !slices.Contains(texts, want) {
 					t.Errorf("item tool lines missing fallback %q: %#v", want, texts)
 				}
@@ -4316,14 +4354,14 @@ func TestItemToolLinesShowInputAndDiffBeforeOutput(t *testing.T) {
 			Input: "make build\nmake test", Diff: "+build target", Output: "build ready",
 		},
 	}, model.AgentCodex)
-	indexes := map[string]int{"input:": -1, "+build target": -1, "output:": -1}
+	indexes := map[string]int{"Input": -1, "+build target": -1, "Output": -1}
 	for index, line := range lines {
 		if _, ok := indexes[line.text]; ok {
 			indexes[line.text] = index
 		}
 	}
-	if indexes["input:"] < 0 || indexes["+build target"] < 0 || indexes["output:"] < 0 ||
-		indexes["input:"] >= indexes["output:"] || indexes["+build target"] >= indexes["output:"] {
+	if indexes["Input"] < 0 || indexes["+build target"] < 0 || indexes["Output"] < 0 ||
+		indexes["Input"] >= indexes["Output"] || indexes["+build target"] >= indexes["Output"] {
 		t.Fatalf("section indexes = %#v, want input and diff before output", indexes)
 	}
 }
@@ -4341,24 +4379,229 @@ func TestItemViewStartsWithPresentMetadataAndOmitsEmptyFields(t *testing.T) {
 		lines = append(lines, line.text)
 	}
 	for _, want := range []string{
-		"kind: tool-call",
-		"duration: 1.2s",
-		"model: gpt-5.6-sol",
-		"tool: exec_command",
-		"call-id: call-route",
-		"agent-id: agent-scout",
+		"Event",
+		"kind      tool-call",
+		"model     gpt-5.6-sol",
+		"tool      exec_command",
+		"call-id   call-route",
+		"agent-id  agent-scout",
+		"duration  1.2s",
 	} {
 		if !slices.Contains(lines, want) {
 			t.Errorf("item metadata missing %q: %#v", want, lines)
 		}
 	}
-	for _, omitted := range []string{"relative time:", "absolute time:"} {
+	for _, omitted := range []string{"relative time", "absolute time"} {
 		for _, line := range lines {
 			if strings.HasPrefix(line, omitted) {
 				t.Errorf("zero timestamp rendered %q", line)
 			}
 		}
 	}
+}
+
+func TestItemViewUsesOrderedDetailSections(t *testing.T) {
+	item := newItemView(model.Event{
+		Kind: model.EventToolCall, ToolName: "exec_command",
+		Detail: &model.ToolDetail{Input: "check route", Diff: "+route ready", Output: "checks passed"},
+	}, model.AgentCodex, nil, 80, 18, newStyles())
+
+	var headers []string
+	for _, line := range item.lines {
+		if line.role == detailHeader {
+			headers = append(headers, line.text)
+		}
+	}
+	want := []string{"Event", "Input", "Diff", "Output"}
+	if !slices.Equal(headers, want) {
+		t.Fatalf("item section headers = %#v, want %#v", headers, want)
+	}
+}
+
+func TestItemViewSeparatesToolContentFromPrecedingSections(t *testing.T) {
+	usage := model.Usage{Model: "model-a", InputTokens: 10}
+	for _, test := range []struct {
+		name  string
+		usage *model.Usage
+	}{
+		{name: "event only"},
+		{name: "request", usage: &usage},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			item := newItemView(model.Event{
+				Kind: model.EventToolCall, ToolName: "exec_command", Usage: test.usage,
+				ToolInput: "check route",
+			}, model.AgentCodex, nil, 80, 18, newStyles())
+
+			for index, line := range item.lines {
+				if line.role != detailHeader || line.text != "Input" {
+					continue
+				}
+				if index == 0 || item.lines[index-1].text != "" {
+					t.Fatalf("Input section is not separated:\n%s", itemLinesText(item.lines))
+				}
+				return
+			}
+			t.Fatalf("Input section missing:\n%s", itemLinesText(item.lines))
+		})
+	}
+}
+
+func TestItemRequestSectionShowsAuditableRateArithmetic(t *testing.T) {
+	usage := model.Usage{
+		Model: "model-a", InputTokens: 1_200, OutputTokens: 20,
+		CacheReadTokens: 1_000, InputIncludesCacheRead: true,
+	}
+	item := newItemView(model.Event{
+		Kind: model.EventAssistantText, Model: "model-a", Usage: &usage, Priced: true,
+		Cost: model.CostBreakdown{
+			Input:     model.CostBuckets{{RatePerToken: 0.000005, Tokens: 200}},
+			CacheRead: model.CostBuckets{{RatePerToken: 0.0000005, Tokens: 1_000}},
+			Output:    model.CostBuckets{{RatePerToken: 0.000030, Tokens: 20}},
+		},
+	}, model.AgentCodex, nil, 80, 18, newStyles())
+
+	text := ""
+	for _, line := range item.lines {
+		text += line.text + "\n"
+	}
+	for _, want := range []string{
+		"Request",
+		"tokens  ↑1000/0/200 ↓20 · ctx 1200",
+		"input         200 × $5/Mtok   = $0.001",
+		"cache read   1000 × $0.5/Mtok = $0.0005",
+		"output         20 × $30/Mtok  = $0.0006",
+		"total                         = $0.0021",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("Request section missing %q:\n%s", want, text)
+		}
+	}
+	equalsColumn := -1
+	for _, line := range strings.Split(text, "\n") {
+		if !strings.Contains(line, " = $") {
+			continue
+		}
+		if column := ansi.StringWidth(line[:strings.Index(line, "=")]); equalsColumn < 0 {
+			equalsColumn = column
+		} else if column != equalsColumn {
+			t.Errorf("Request arithmetic equals columns = %d and %d:\n%s", equalsColumn, column, text)
+		}
+	}
+}
+
+func TestItemRequestSectionShowsUnavailablePriceAndRequiresUsage(t *testing.T) {
+	usage := model.Usage{Model: "future-model", InputTokens: 25}
+	withUsage := newItemView(model.Event{
+		Kind: model.EventUsage, Model: "future-model", Usage: &usage,
+	}, model.AgentCodex, nil, 80, 14, newStyles())
+	withoutUsage := newItemView(model.Event{
+		Kind: model.EventAssistantText, Model: "future-model",
+	}, model.AgentCodex, nil, 80, 14, newStyles())
+
+	withText := itemLinesText(withUsage.lines)
+	if !strings.Contains(withText, "Request") || !strings.Contains(withText, "price unavailable for future-model") {
+		t.Fatalf("unpriced request did not name unavailable model:\n%s", withText)
+	}
+	if strings.Contains(itemLinesText(withoutUsage.lines), "Request") {
+		t.Fatalf("event without usage rendered a Request section:\n%s", itemLinesText(withoutUsage.lines))
+	}
+}
+
+func TestAggregateUsageItemExplainsScopeAndOmitsContext(t *testing.T) {
+	usage := model.Usage{Model: "model-a", InputTokens: 30}
+	item := newItemView(model.Event{
+		Kind: model.EventUsage, Model: "model-a", Usage: &usage, UsageAggregate: true,
+	}, model.AgentCodex, nil, 80, 14, newStyles())
+
+	text := itemLinesText(item.lines)
+	if !strings.Contains(text, "scope  session-level fallback usage, not one request") {
+		t.Fatalf("aggregate usage did not explain its scope:\n%s", text)
+	}
+	if strings.Contains(text, "ctx ") {
+		t.Fatalf("aggregate usage rendered per-request context:\n%s", text)
+	}
+}
+
+func TestItemRequestNamesSubstitutionOnlyWhenApplied(t *testing.T) {
+	usage := model.Usage{Model: "agents-a1", InputTokens: 10}
+	breakdown := model.CostBreakdown{Input: model.CostBuckets{{RatePerToken: 0.000005, Tokens: 10}}}
+	substituted := newItemView(model.Event{
+		Kind: model.EventAssistantText, Model: "agents-a1", Usage: &usage,
+		Cost: breakdown, Priced: true, CostEstimated: true, PricingModel: "gpt-5",
+	}, model.AgentCodex, nil, 80, 14, newStyles())
+	exactUsage := usage
+	exactUsage.Model = "gpt-5"
+	exact := newItemView(model.Event{
+		Kind: model.EventAssistantText, Model: "gpt-5", Usage: &exactUsage,
+		Cost: breakdown, Priced: true,
+	}, model.AgentCodex, nil, 80, 14, newStyles())
+
+	substitutedText := itemLinesText(substituted.lines)
+	if !strings.Contains(substitutedText, "rate  priced as gpt-5 — no published rate for agents-a1") ||
+		!strings.Contains(substitutedText, "~$0.00005") {
+		t.Fatalf("substituted request did not disclose its rate:\n%s", substitutedText)
+	}
+	exactText := itemLinesText(exact.lines)
+	if strings.Contains(exactText, "priced as") || strings.Contains(exactText, "published rate") || strings.Contains(exactText, "~$") {
+		t.Fatalf("exact request contained estimate language:\n%s", exactText)
+	}
+}
+
+func TestItemRequestWrapsWithinFortyColumns(t *testing.T) {
+	usage := model.Usage{
+		Model: "agents-a1", InputTokens: 450_000, OutputTokens: 20_000,
+		CacheReadTokens: 300_000, InputIncludesCacheRead: true,
+	}
+	item := newItemView(model.Event{
+		Kind: model.EventAssistantText, Model: "agents-a1", Usage: &usage,
+		Cost: model.CostBreakdown{
+			Input: model.CostBuckets{
+				{RatePerToken: 0.000005, Tokens: 100_000},
+				{RatePerToken: 0.000010, Tokens: 50_000, AboveThreshold: true},
+			},
+			CacheRead: model.CostBuckets{{RatePerToken: 0.0000005, Tokens: 300_000}},
+			Output:    model.CostBuckets{{RatePerToken: 0.000030, Tokens: 20_000}},
+		},
+		Priced: true, CostEstimated: true, PricingModel: "gpt-5",
+	}, model.AgentCodex, nil, 40, 18, newStyles())
+
+	view := ansi.Strip(item.view())
+	for number, line := range strings.Split(view, "\n") {
+		if width := ansi.StringWidth(line); width > 40 {
+			t.Fatalf("40-column item line %d width = %d: %q", number+1, width, line)
+		}
+	}
+	var wrappedBody strings.Builder
+	for _, line := range strings.Split(view, "\n") {
+		if strings.HasPrefix(line, "│") && strings.HasSuffix(line, "│") {
+			wrappedBody.WriteString(strings.TrimRight(strings.TrimSuffix(strings.TrimPrefix(line, "│"), "│"), " "))
+		}
+	}
+	if !strings.Contains(wrappedBody.String(), "rate  priced as gpt-5 — no published rate for agents-a1") {
+		t.Fatalf("40-column wrapped view lost rate substitution:\n%s", view)
+	}
+	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	unwrapped := ansi.Strip(item.view())
+	for number, line := range strings.Split(unwrapped, "\n") {
+		if width := ansi.StringWidth(line); width > 40 {
+			t.Fatalf("40-column unwrapped item line %d width = %d: %q", number+1, width, line)
+		}
+	}
+	if !strings.Contains(unwrapped, "rate  priced as gpt-5") {
+		t.Fatalf("40-column unwrapped view lost visible substitution prefix:\n%s", unwrapped)
+	}
+	if !strings.Contains(itemLinesText(item.lines), "rate  priced as gpt-5 — no published rate for agents-a1") {
+		t.Fatalf("40-column source lines lost rate substitution:\n%s", itemLinesText(item.lines))
+	}
+}
+
+func itemLinesText(lines []detailLine) string {
+	text := make([]string, len(lines))
+	for index, line := range lines {
+		text[index] = line.text
+	}
+	return strings.Join(text, "\n")
 }
 
 func TestItemViewShowsBothTimesAndLoadsRawRecordAsynchronously(t *testing.T) {
@@ -4372,7 +4615,7 @@ func TestItemViewShowsBothTimesAndLoadsRawRecordAsynchronously(t *testing.T) {
 	item.setNow(now)
 
 	plain := ansi.Strip(item.view())
-	for _, want := range []string{"relative time: 5m", "absolute time: Jan 2 11:55:00", "R raw"} {
+	for _, want := range []string{"relative time  5m", "absolute time  Jan 2 11:55:00", "R raw"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("item view missing %q before raw toggle:\n%s", want, plain)
 		}
@@ -4387,7 +4630,7 @@ func TestItemViewShowsBothTimesAndLoadsRawRecordAsynchronously(t *testing.T) {
 	}
 	item.update(cmd())
 	plain = ansi.Strip(item.view())
-	for _, want := range []string{"raw:", string(raw), "R hide raw"} {
+	for _, want := range []string{"Raw", string(raw), "R hide raw"} {
 		if !strings.Contains(plain, want) {
 			t.Fatalf("item view missing %q after raw toggle:\n%s", want, plain)
 		}
@@ -4504,7 +4747,7 @@ func TestItemViewReportsRawReadFailuresWithoutFallback(t *testing.T) {
 				texts = append(texts, line.text)
 			}
 			content := strings.Join(texts, "\n")
-			rawIndex := slices.Index(texts, "raw:")
+			rawIndex := slices.Index(texts, "Raw")
 			if rawIndex < 0 || rawIndex+1 >= len(texts) || texts[rawIndex+1] != "raw unavailable: read failed" {
 				t.Fatalf("item content did not name the read failure:\n%s", content)
 			}
@@ -4732,7 +4975,7 @@ func TestItemToolLinesKeepResultSummarySeparateFromFullOutput(t *testing.T) {
 	for _, line := range lines {
 		texts = append(texts, line.text)
 	}
-	for _, want := range []string{"output:", "route ready", "result-summary:", "exit 0"} {
+	for _, want := range []string{"Output", "route ready", "Result summary", "exit 0"} {
 		if !slices.Contains(texts, want) {
 			t.Errorf("tool item missing %q: %#v", want, texts)
 		}
@@ -4748,10 +4991,10 @@ func TestItemToolBodyRendersReadableContent(t *testing.T) {
 	for _, line := range lines {
 		roles[line.text] = line.role
 	}
-	// Labels stay dim chrome; the command and its output must render readable, not muted.
+	// Section titles use the Info-tab header role; bodies stay readable.
 	for text, want := range map[string]detailRole{
-		"input:": detailSecondary, "make build": detailRow,
-		"output:": detailSecondary, "build ready": detailRow,
+		"Input": detailHeader, "make build": detailRow,
+		"Output": detailHeader, "build ready": detailRow,
 	} {
 		if roles[text] != want {
 			t.Errorf("item body %q role = %v, want %v", text, roles[text], want)
@@ -4798,6 +5041,35 @@ func TestItemLabelsMatchTimelineRoles(t *testing.T) {
 				t.Errorf("itemEventLines() = %#v, want one line with role %v", lines, test.wantRole)
 			}
 		})
+	}
+}
+
+func TestItemContentSectionTitlesReflectKind(t *testing.T) {
+	tests := []struct {
+		event model.Event
+		want  string
+	}{
+		{event: model.Event{Kind: model.EventAssistantText}, want: "Message"},
+		{event: model.Event{Kind: model.EventUser}, want: "Prompt"},
+		{event: model.Event{Kind: model.EventUser, Harness: true}, want: "Harness"},
+		{event: model.Event{Kind: model.EventThinking}, want: "Thinking"},
+		{event: model.Event{Kind: model.EventAdvisor}, want: "Advisor"},
+		{event: model.Event{Kind: model.EventSystem}, want: "System"},
+		{event: model.Event{Kind: model.EventCompact}, want: "Compact"},
+		{event: model.Event{Kind: model.EventUsage}, want: "Usage"},
+	}
+	for _, test := range tests {
+		test.event.Text = "section body"
+		item := newItemView(test.event, model.AgentCodex, nil, 80, 12, newStyles())
+		var headers []string
+		for _, line := range item.lines {
+			if line.role == detailHeader {
+				headers = append(headers, line.text)
+			}
+		}
+		if !slices.Contains(headers, test.want) {
+			t.Errorf("%s item headers = %#v, want %q", test.event.Kind, headers, test.want)
+		}
 	}
 }
 
@@ -4884,8 +5156,8 @@ func TestItemViewScrollsWithStepAndEdgeKeys(t *testing.T) {
 		t.Fatalf("G did not reveal the final item row at offset %d:\n%s", item.viewport.YOffset, ansi.Strip(item.view()))
 	}
 	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
-	if item.viewport.YOffset != 0 || !strings.Contains(ansi.Strip(item.view()), "observation-00") {
-		t.Fatalf("g did not restore the first item row at offset %d:\n%s", item.viewport.YOffset, ansi.Strip(item.view()))
+	if item.viewport.YOffset != 0 || !strings.Contains(ansi.Strip(item.view()), "Event") {
+		t.Fatalf("g did not restore the first item section at offset %d:\n%s", item.viewport.YOffset, ansi.Strip(item.view()))
 	}
 }
 

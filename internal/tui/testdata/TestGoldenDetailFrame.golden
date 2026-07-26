@@ -1,7 +1,7 @@
 ╭─ Session · starship ─────────────────────────────────────────────────────────╮
 │Plan route                                                                    │
 │codex │ starship (/workspace/starship) │ gpt-5.6                              │
-│branch orbit/alpha │ Jan 02 05:44→Jan 02 06:04 │ total ~$1.16                 │
+│branch orbit/alpha │ Jan 02 05:44→Jan 02 06:04 │ total $1.16                  │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ [Timeline]  Subagents (1)  Info ────────────────────────────────────────────╮
 │   14m   you: Delegate the survey                                     ctx 120k│
@@ -9,7 +9,7 @@
 │   12m ▾ ⚙ Read(/workspace/starship/map.go) · 400ms                           │
 │         output:                                                              │
 │         map ready                                                            │
-│   11m   ◇ unattributed usage (gpt-5.6)    ↑0/0/120k ↓8000 · ~$0.84 · ctx 120k│
+│   11m   ◇ unattributed usage (gpt-5.6)     ↑0/0/120k ↓8000 · $0.84 · ctx 120k│
 │   11m   codex: Survey delegated                                              │
 │›  10m   ⑃ Task(Scout terrain) opus-4.8                            45k · $0.32│
 │                                                                              │

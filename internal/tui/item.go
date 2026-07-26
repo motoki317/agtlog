@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -224,10 +226,16 @@ func (i *itemView) styleLine(plain string, line detailLine) string {
 func (i *itemView) rebuildLines() {
 	metadata := itemMetadataLines(i.event, i.now, i.agent)
 	content := itemEventLines(i.event, i.agent)
-	i.lines = append(i.lines[:0], metadata...)
-	if len(content) > 0 {
-		i.lines = append(i.lines, detailLine{text: "", role: detailSecondary, agent: i.agent})
+	i.lines = i.lines[:0]
+	i.lines = appendItemLinesSection(i.lines, "Event", metadata, i.agent)
+	i.lines = appendItemLinesSection(i.lines, "Request", itemRequestLines(i.event, i.agent), i.agent)
+	if i.event.Kind == model.EventToolCall {
+		if len(content) > 0 && len(i.lines) > 0 {
+			i.lines = append(i.lines, detailLine{text: "", role: detailRow, agent: i.agent})
+		}
 		i.lines = append(i.lines, content...)
+	} else {
+		i.lines = appendItemLinesSection(i.lines, itemContentTitle(i.event), content, i.agent)
 	}
 	if i.showRaw && validRecordRef(i.event.RecordRef) {
 		raw := terminalSafeRawRecord(i.raw)
@@ -236,8 +244,7 @@ func (i *itemView) rebuildLines() {
 		} else if i.rawUnavailable != "" {
 			raw = i.rawUnavailable
 		}
-		i.lines = append(i.lines, detailLine{text: "", role: detailSecondary, agent: i.agent})
-		i.lines = appendItemSection(i.lines, "raw:", raw, detailRow, i.agent)
+		i.lines = appendItemSection(i.lines, "Raw", raw, detailRow, i.agent)
 	}
 }
 
@@ -247,30 +254,109 @@ func itemMetadataLines(event model.Event, now time.Time, agent model.AgentKind) 
 		value string
 	}{
 		{label: "kind", value: string(event.Kind)},
+		{label: "model", value: event.Model},
+		{label: "tool", value: event.ToolName},
+		{label: "call-id", value: event.CallID},
+		{label: "agent-id", value: event.AgentID},
+	}
+	if event.Duration > 0 {
+		fields = append(fields, struct{ label, value string }{label: "duration", value: formatDuration(event.Duration)})
 	}
 	if !event.Timestamp.IsZero() {
 		fields = append(fields,
-			struct{ label, value string }{label: "relative time", value: formatAge(now, event.Timestamp)},
 			struct{ label, value string }{label: "absolute time", value: formatDetailTime(event.Timestamp, true)},
+			struct{ label, value string }{label: "relative time", value: formatAge(now, event.Timestamp)},
 		)
 	}
-	if event.Kind == model.EventToolCall && event.Duration > 0 {
-		fields = append(fields, struct{ label, value string }{label: "duration", value: formatDuration(event.Duration)})
+	if event.Kind == model.EventCompact {
+		fields = append(fields, struct{ label, value string }{label: "trigger", value: event.CompactTrigger})
+		if event.CompactPostTokens > 0 {
+			fields = append(fields, struct{ label, value string }{label: "post tokens", value: humanTokens(event.CompactPostTokens)})
+		}
 	}
-	fields = append(fields,
-		struct{ label, value string }{label: "model", value: event.Model},
-		struct{ label, value string }{label: "tool", value: event.ToolName},
-		struct{ label, value string }{label: "call-id", value: event.CallID},
-		struct{ label, value string }{label: "agent-id", value: event.AgentID},
-	)
+	if event.UsageAggregate {
+		fields = append(fields, struct{ label, value string }{label: "scope", value: "session-level fallback usage, not one request"})
+	}
+	labelWidth := 0
+	for _, field := range fields {
+		if field.value != "" {
+			labelWidth = max(labelWidth, ansi.StringWidth(field.label))
+		}
+	}
 	lines := make([]detailLine, 0, len(fields))
 	for _, field := range fields {
 		if field.value == "" {
 			continue
 		}
-		lines = append(lines, detailLine{text: detailPlainText(field.label + ": " + field.value), role: detailSecondary, agent: agent})
+		lines = append(lines, detailLine{
+			text: detailPlainText(fmt.Sprintf("%-*s  %s", labelWidth, field.label, field.value)),
+			role: detailRow, agent: agent,
+		})
 	}
 	return lines
+}
+
+func itemRequestLines(event model.Event, agent model.AgentKind) []detailLine {
+	if event.Usage == nil {
+		return nil
+	}
+	tokenLine := "tokens  " + formatTokenFlow(*event.Usage)
+	if !event.UsageAggregate && event.Usage.PromptTokens() > 0 {
+		tokenLine += " · ctx " + humanTokens(event.Usage.PromptTokens())
+	}
+	lines := []detailLine{{text: detailPlainText(tokenLine), role: detailRow, agent: agent}}
+	if event.PricingModel != "" {
+		lines = append(lines, detailLine{
+			text: detailPlainText(fmt.Sprintf("rate  priced as %s — no published rate for %s",
+				displayModelName(event.PricingModel), displayModelName(event.Model))),
+			role: detailRow, agent: agent,
+		})
+	}
+	if !event.Priced || !validCostBreakdown(event.Cost) {
+		return append(lines, detailLine{
+			text: detailPlainText("price unavailable for " + displayModelName(event.Model)),
+			role: detailRow, agent: agent,
+		})
+	}
+	groups, termsWidth := formatCostRateGroups(costRateGroups(event.Cost))
+	for _, group := range groups {
+		if group.terms == "" {
+			continue
+		}
+		lines = append(lines, detailLine{
+			text: detailPlainText(fmt.Sprintf("  %-12s %-*s = %s",
+				group.label, termsWidth, group.terms, formatPreciseCost(group.buckets.Cost(), event.CostEstimated))),
+			role: detailRow, agent: agent,
+		})
+	}
+	lines = append(lines, detailLine{
+		text: detailPlainText(fmt.Sprintf("  %-12s %-*s = %s",
+			"total", termsWidth, "", formatPreciseCost(event.Cost.Total(), event.CostEstimated))),
+		role: detailRow, agent: agent,
+	})
+	return lines
+}
+
+func formatPreciseCost(usd float64, estimated bool) string {
+	prefix := "$"
+	if estimated {
+		prefix = "~$"
+	}
+	if math.IsInf(usd, 1) {
+		return prefix + "∞"
+	}
+	usd = normalizedUSD(usd)
+	text := strconv.FormatFloat(usd, 'f', 9, 64)
+	text = strings.TrimRight(strings.TrimRight(text, "0"), ".")
+	if usd > 0 && text == "0" {
+		text = strconv.FormatFloat(usd, 'f', -1, 64)
+	}
+	if dot := strings.IndexByte(text, '.'); dot < 0 {
+		text += ".00"
+	} else if decimals := len(text) - dot - 1; decimals < 2 {
+		text += strings.Repeat("0", 2-decimals)
+	}
+	return prefix + text
 }
 
 type rawRecordLoadedMsg struct {
@@ -427,8 +513,12 @@ func itemEventLines(event model.Event, agent model.AgentKind) []detailLine {
 		}
 	}
 	var lines []detailLine
-	lines = appendItemSection(lines, "input:", input, detailRow, agent)
+	lines = appendItemSection(lines, "Input", input, detailRow, agent)
 	if diff != "" {
+		if len(lines) > 0 {
+			lines = append(lines, detailLine{text: "", role: detailRow, agent: agent})
+		}
+		lines = append(lines, detailLine{text: "Diff", role: detailHeader, agent: agent})
 		for _, text := range strings.Split(diff, "\n") {
 			plain := detailPlainText(text)
 			role := detailDiffContext
@@ -440,22 +530,59 @@ func itemEventLines(event model.Event, agent model.AgentKind) []detailLine {
 			lines = append(lines, detailLine{text: plain, role: role, agent: agent})
 		}
 	}
-	lines = appendItemSection(lines, "output:", output, detailRow, agent)
+	lines = appendItemSection(lines, "Output", output, detailRow, agent)
 	if event.ResultSummary != "" && event.Detail != nil && event.Detail.Output != "" {
-		lines = appendItemSection(lines, "result-summary:", event.ResultSummary, detailRow, agent)
+		lines = appendItemSection(lines, "Result summary", event.ResultSummary, detailRow, agent)
 	}
 	return lines
 }
 
-func appendItemSection(lines []detailLine, label, text string, role detailRole, agent model.AgentKind) []detailLine {
+func appendItemSection(lines []detailLine, title, text string, role detailRole, agent model.AgentKind) []detailLine {
 	if text == "" {
 		return lines
 	}
-	lines = append(lines, detailLine{text: label, role: detailSecondary, agent: agent})
-	return append(lines, itemTextLines(text, role, agent)...)
+	return appendItemLinesSection(lines, title, itemTextLines(text, role, agent), agent)
+}
+
+func appendItemLinesSection(lines []detailLine, title string, content []detailLine, agent model.AgentKind) []detailLine {
+	if title == "" || len(content) == 0 {
+		return lines
+	}
+	if len(lines) > 0 {
+		lines = append(lines, detailLine{text: "", role: detailRow, agent: agent})
+	}
+	lines = append(lines, detailLine{text: title, role: detailHeader, agent: agent})
+	return append(lines, content...)
+}
+
+func itemContentTitle(event model.Event) string {
+	switch event.Kind {
+	case model.EventUser:
+		if event.Harness {
+			return "Harness"
+		}
+		return "Prompt"
+	case model.EventAssistantText:
+		return "Message"
+	case model.EventThinking:
+		return "Thinking"
+	case model.EventAdvisor:
+		return "Advisor"
+	case model.EventSystem:
+		return "System"
+	case model.EventCompact:
+		return "Compact"
+	case model.EventUsage:
+		return "Usage"
+	default:
+		return ""
+	}
 }
 
 func itemTextLines(text string, role detailRole, agent model.AgentKind) []detailLine {
+	if text == "" {
+		return nil
+	}
 	lines := strings.Split(text, "\n")
 	result := make([]detailLine, len(lines))
 	for index, line := range lines {

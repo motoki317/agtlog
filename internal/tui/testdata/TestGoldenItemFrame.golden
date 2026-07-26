@@ -1,31 +1,39 @@
 ╭─ starship › Plot route › Edit ───────────────────────────────────────────────╮
-│kind: tool-call                                                               │
-│relative time: 5m                                                             │
-│absolute time: Jan 2 05:59:00                                                 │
-│duration: 750ms                                                               │
-│model: claude-opus-4-8                                                        │
-│tool: Edit                                                                    │
-│call-id: call-route                                                           │
-│agent-id: agent-builder                                                       │
+│Event                                                                         │
+│kind           tool-call                                                      │
+│model          claude-opus-4-8                                                │
+│tool           Edit                                                           │
+│call-id        call-route                                                     │
+│agent-id       agent-builder                                                  │
+│duration       750ms                                                          │
+│absolute time  Jan 2 05:59:00                                                 │
+│relative time  5m                                                             │
 │                                                                              │
-│input:                                                                        │
+│Request                                                                       │
+│tokens  ↑32k/0/32k ↓4000 · ctx 64k                                            │
+│  input         32k × $5/Mtok   = $0.16                                       │
+│  cache read    32k × $0.5/Mtok = $0.016                                      │
+│  output       4000 × $25/Mtok  = $0.10                                       │
+│  total                         = $0.276                                      │
+│                                                                              │
+│Input                                                                         │
 │/workspace/starship/route.go                                                  │
+│                                                                              │
+│Diff                                                                          │
 │-burn = 3                                                                     │
 │ burn = estimate                                                              │
 │+burn = 4                                                                     │
-│output:                                                                       │
+│                                                                              │
+│Output                                                                        │
 │route updated                                                                 │
 │checks ready                                                                  │
-│result-summary:                                                               │
+│                                                                              │
+│Result summary                                                                │
 │route updated                                                                 │
 │                                                                              │
-│raw:                                                                          │
+│Raw                                                                           │
 │{"type":"assistant","message":{"model":"claude-opus-4-8","content":[{"type":"t│
 │ool_use","id":"call-route","name":"Edit"}]}}                                  │
-│                                                                              │
-│                                                                              │
-│                                                                              │
-│                                                                              │
 │                                                                              │
 │                                                                              │
 │                                                                              │

@@ -592,7 +592,7 @@ func sessionInfoLines(session *model.Session) []detailLine {
 		lines = append(lines, infoDetailLine(line, detailRow))
 	}
 	lines = append(lines,
-		infoDetailLine("Codex: always estimated from the default pricing model. Claude: logged or priced cost.", detailSecondary),
+		infoDetailLine("Both agents use the same rate table. ~ means the applied rate is not the logged model's own published rate.", detailSecondary),
 		infoDetailLine("", detailRow),
 		infoDetailLine("Definitions", detailHeader),
 		infoDetailLine("own: this session's own turns", detailRow),
@@ -706,6 +706,10 @@ func ownModelCostLines(session *model.Session) []string {
 	for _, name := range session.Cost.MissingPricingModels {
 		missing[name] = true
 	}
+	estimatedRates := make(map[string]string, len(session.Cost.EstimatedRates))
+	for _, rate := range session.Cost.EstimatedRates {
+		estimatedRates[rate.Model] = rate.PricingModel
+	}
 	lines := make([]string, 0, len(order)*6)
 	for _, name := range order {
 		usage := byModel[name]
@@ -715,54 +719,39 @@ func ownModelCostLines(session *model.Session) []string {
 		if missing[name] {
 			header += "!"
 		}
-		if session.Cost.Estimated {
-			header += " (est.)"
+		pricingModel, modelEstimated := estimatedRates[name]
+		if modelEstimated {
+			header += " (est. · priced as " + displayModelName(pricingModel) + ")"
 		}
 		lines = append(lines, header)
 		cacheWrite := model.Usage{
 			CacheCreation5mTokens: usage.CacheCreation5mTokens,
 			CacheCreation1hTokens: usage.CacheCreation1hTokens,
 		}.TotalTokens()
-		groups := []struct {
-			label   string
-			tokens  int64
-			buckets model.CostBuckets
-			terms   string
-		}{
-			{label: "input", tokens: usage.InputTokens, buckets: breakdown.Input},
-			{label: "cache write", tokens: cacheWrite, buckets: breakdown.CacheWrite},
-			{label: "cache read", tokens: usage.CacheReadTokens, buckets: breakdown.CacheRead},
-			{label: "output", tokens: usage.OutputTokens, buckets: breakdown.Output},
-		}
+		groups := costRateGroups(breakdown)
+		groupTokens := []int64{usage.InputTokens, cacheWrite, usage.CacheReadTokens, usage.OutputTokens}
 		if priced {
-			for _, group := range groups {
-				if group.buckets.TotalTokens() != group.tokens {
+			for index, group := range groups {
+				if group.buckets.TotalTokens() != groupTokens[index] {
 					priced = false
 					break
 				}
 			}
 		}
-		bucketTokenWidth, termsWidth := 0, 0
+		termsWidth := 0
 		if priced {
-			for _, group := range groups {
-				for _, bucket := range group.buckets {
-					bucketTokenWidth = max(bucketTokenWidth, ansi.StringWidth(humanTokens(bucket.Tokens)))
-				}
-			}
-			for index := range groups {
-				groups[index].terms = formatRateTerms(groups[index].buckets, bucketTokenWidth)
-				termsWidth = max(termsWidth, ansi.StringWidth(groups[index].terms))
-			}
+			groups, termsWidth = formatCostRateGroups(groups)
 		}
-		for _, group := range groups {
-			if group.tokens <= 0 {
+		for index, group := range groups {
+			tokens := groupTokens[index]
+			if tokens <= 0 {
 				continue
 			}
 			if !priced {
-				lines = append(lines, fmt.Sprintf("  %-12s %s · price unavailable", group.label, humanTokens(group.tokens)))
+				lines = append(lines, fmt.Sprintf("  %-12s %s · price unavailable", group.label, humanTokens(tokens)))
 				continue
 			}
-			groupCost := model.Cost{USD: group.buckets.Cost(), Estimated: session.Cost.Estimated}
+			groupCost := model.Cost{USD: group.buckets.Cost(), Estimated: modelEstimated}
 			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s",
 				group.label, termsWidth, group.terms, formatCost(groupCost)))
 		}
@@ -779,17 +768,17 @@ func ownModelCostLines(session *model.Session) []string {
 					break
 				}
 			}
-			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s", label, termsWidth, "", formatCost(model.Cost{USD: modelUSD, Estimated: session.Cost.Estimated})))
+			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s", label, termsWidth, "", formatCost(model.Cost{USD: modelUSD, Estimated: modelEstimated})))
 		}
 		if duplicatedUSD > 0 {
-			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s", "replayed", termsWidth, "", formatReplayedCost(duplicatedUSD, session.Cost.Estimated)))
+			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s", "replayed", termsWidth, "", formatReplayedCost(duplicatedUSD, modelEstimated)))
 		}
 		if priced {
 			ownedUSD := max(0, modelUSD-duplicatedUSD)
-			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s", "subtotal", termsWidth, "", formatCost(model.Cost{USD: ownedUSD, Estimated: session.Cost.Estimated})))
+			lines = append(lines, fmt.Sprintf("  %-12s %-*s = %s", "subtotal", termsWidth, "", formatCost(model.Cost{USD: ownedUSD, Estimated: modelEstimated})))
 		} else if duplicatedUSD > 0 {
 			ownedUSD := max(0, modelUSD-duplicatedUSD)
-			lines = append(lines, fmt.Sprintf("  %-12s = %s", "subtotal", formatCost(model.Cost{USD: ownedUSD, Estimated: session.Cost.Estimated})))
+			lines = append(lines, fmt.Sprintf("  %-12s = %s", "subtotal", formatCost(model.Cost{USD: ownedUSD, Estimated: modelEstimated})))
 		}
 	}
 	return lines
@@ -830,6 +819,38 @@ func formatRateTerms(buckets model.CostBuckets, tokenWidth int) string {
 		terms = append(terms, fmt.Sprintf("%*s × %s", tokenWidth, humanTokens(bucket.Tokens), formatMillionRate(bucket.RatePerToken)))
 	}
 	return strings.Join(terms, " + ")
+}
+
+type costRateGroup struct {
+	label   string
+	buckets model.CostBuckets
+	terms   string
+}
+
+func costRateGroups(breakdown model.CostBreakdown) []costRateGroup {
+	return []costRateGroup{
+		{label: "input", buckets: breakdown.Input},
+		{label: "cache write", buckets: breakdown.CacheWrite},
+		{label: "cache read", buckets: breakdown.CacheRead},
+		{label: "output", buckets: breakdown.Output},
+	}
+}
+
+func formatCostRateGroups(groups []costRateGroup) ([]costRateGroup, int) {
+	tokenWidth := 0
+	for _, group := range groups {
+		for _, bucket := range group.buckets {
+			if bucket.Tokens > 0 {
+				tokenWidth = max(tokenWidth, ansi.StringWidth(humanTokens(bucket.Tokens)))
+			}
+		}
+	}
+	termsWidth := 0
+	for index := range groups {
+		groups[index].terms = formatRateTerms(groups[index].buckets, tokenWidth)
+		termsWidth = max(termsWidth, ansi.StringWidth(groups[index].terms))
+	}
+	return groups, termsWidth
 }
 
 func sessionCostTree(session *model.Session) []string {
