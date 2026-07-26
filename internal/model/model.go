@@ -97,7 +97,15 @@ func saturatingAdd(left, right int64) int64 {
 type Cost struct {
 	USD                  float64
 	Estimated            bool
+	EstimatedRates       []EstimatedRate
 	MissingPricingModels []string
+}
+
+// EstimatedRate records a logged model priced at another model's published rate.
+// Naming the stand-in is what makes an estimate reviewable.
+type EstimatedRate struct {
+	Model        string
+	PricingModel string
 }
 
 type CostBucket struct {
@@ -242,10 +250,12 @@ type Event struct {
 	UsageAggregate bool
 	// Cost is the priced breakdown of that same request, kept beside Usage so the
 	// timeline can split input-side from output-side cost. Empty when Priced is
-	// false. CostEstimated marks a rate estimate (always so for Codex).
+	// false. CostEstimated marks a substituted rate; PricingModel names the
+	// published stand-in and is empty when Model has its own rate.
 	Cost          CostBreakdown
 	Priced        bool
 	CostEstimated bool
+	PricingModel  string `json:"-"`
 	// Harness marks a user-role record the agent harness injected rather than a
 	// human typing: skill bodies, task notifications, compaction summaries, and
 	// slash-command echoes. Both agents log these as user turns, so the timeline
@@ -329,6 +339,11 @@ func (s Session) OwnedUsage() Usage {
 
 func (s Session) TotalCost() Cost {
 	total := s.Cost
+	total.EstimatedRates = append([]EstimatedRate(nil), s.Cost.EstimatedRates...)
+	estimated := make(map[EstimatedRate]bool, len(total.EstimatedRates))
+	for _, rate := range total.EstimatedRates {
+		estimated[rate] = true
+	}
 	seen := make(map[string]bool, len(total.MissingPricingModels))
 	for _, name := range total.MissingPricingModels {
 		seen[name] = true
@@ -337,6 +352,12 @@ func (s Session) TotalCost() Cost {
 		subtotal := subagent.TotalCost()
 		total.USD += subtotal.USD
 		total.Estimated = total.Estimated || subtotal.Estimated
+		for _, rate := range subtotal.EstimatedRates {
+			if !estimated[rate] {
+				total.EstimatedRates = append(total.EstimatedRates, rate)
+				estimated[rate] = true
+			}
+		}
 		for _, name := range subtotal.MissingPricingModels {
 			if !seen[name] {
 				total.MissingPricingModels = append(total.MissingPricingModels, name)
@@ -349,7 +370,12 @@ func (s Session) TotalCost() Cost {
 
 func (s Session) OwnedCost() Cost {
 	total := s.Cost
+	total.EstimatedRates = append([]EstimatedRate(nil), s.Cost.EstimatedRates...)
 	total.USD -= s.DuplicatedUSD
+	estimated := make(map[EstimatedRate]bool, len(total.EstimatedRates))
+	for _, rate := range total.EstimatedRates {
+		estimated[rate] = true
+	}
 	seen := make(map[string]bool, len(total.MissingPricingModels))
 	for _, name := range total.MissingPricingModels {
 		seen[name] = true
@@ -358,6 +384,12 @@ func (s Session) OwnedCost() Cost {
 		subtotal := subagent.OwnedCost()
 		total.USD += subtotal.USD
 		total.Estimated = total.Estimated || subtotal.Estimated
+		for _, rate := range subtotal.EstimatedRates {
+			if !estimated[rate] {
+				total.EstimatedRates = append(total.EstimatedRates, rate)
+				estimated[rate] = true
+			}
+		}
 		for _, name := range subtotal.MissingPricingModels {
 			if !seen[name] {
 				total.MissingPricingModels = append(total.MissingPricingModels, name)

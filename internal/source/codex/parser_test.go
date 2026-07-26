@@ -50,8 +50,8 @@ func parseTieredSession(t *testing.T, events ...string) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v21:") {
-		t.Fatalf("CacheFingerprint() = %q, want v21 finalized request ledger", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v22:") {
+		t.Fatalf("CacheFingerprint() = %q, want v22 estimate metadata", got)
 	}
 }
 
@@ -153,6 +153,34 @@ func TestLoadEventsPricesUsageFromStringSummaryTurnContextModel(t *testing.T) {
 	}
 	if got := event.Cost.Total(); got != 200 {
 		t.Fatalf("event cost = %v, want 200 from gpt-5.6 pricing", got)
+	}
+	if event.PricingModel != "gpt-5.6" {
+		t.Fatalf("event pricing model = %q, want gpt-5.6", event.PricingModel)
+	}
+}
+
+func TestLoadEventsLeavesOwnPublishedRateExact(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-exact-event.jsonl")
+	lines := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"agent_message","message":"Route ready"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120},"last_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parser := NewParser(cost.NewCalculator(cost.Table{
+		"gpt-5.6-sol": {Input: 2, Output: 3},
+	}), "gpt-5")
+	session, err := parser.Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if err := parser.LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 1 || session.Events[0].CostEstimated {
+		t.Fatalf("LoadEvents().Events = %#v, want one exactly priced event", session.Events)
 	}
 }
 
@@ -816,6 +844,21 @@ func TestParseCalculatesEstimatedCodexCost(t *testing.T) {
 	}
 }
 
+func TestParseLeavesOwnPublishedCodexRatesExact(t *testing.T) {
+	cacheRead := 0.5
+	parser := NewParser(cost.NewCalculator(cost.Table{
+		"gpt-5.6-sol": {Input: 2, Output: 3, CacheRead: &cacheRead},
+	}), "gpt-5")
+
+	session, err := parser.Parse(fixture("rollout-session-main.jsonl"))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if session.Cost.USD != 515 || session.Cost.Estimated || len(session.Cost.EstimatedRates) != 0 {
+		t.Fatalf("Parse().Cost = %#v, want exact USD 515", session.Cost)
+	}
+}
+
 func TestParseDoesNotAlterCleanRootAccounting(t *testing.T) {
 	session := parseTieredSession(t,
 		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000,"output_tokens":100,"reasoning_output_tokens":40},"last_token_usage":{"input_tokens":150000,"output_tokens":100,"reasoning_output_tokens":40}}}}`,
@@ -1135,13 +1178,13 @@ func TestParseBuildsInlineSubagentTree(t *testing.T) {
 	}
 }
 
-func TestParseMarksEmptySessionCostEstimated(t *testing.T) {
+func TestParseLeavesEmptySessionCostExact(t *testing.T) {
 	session, err := testParser().Parse(filepath.Join("testdata", "rollout-no-usage.jsonl"))
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	if !session.Cost.Estimated || session.Cost.USD != 0 {
-		t.Fatalf("Parse().Cost = %#v, want estimated zero", session.Cost)
+	if session.Cost.Estimated || session.Cost.USD != 0 {
+		t.Fatalf("Parse().Cost = %#v, want exact zero", session.Cost)
 	}
 }
 
@@ -1170,6 +1213,28 @@ func TestParseAttributesPerTurnUsageToActiveModel(t *testing.T) {
 	}
 	if session.Cost.USD != 50 || !session.Cost.Estimated {
 		t.Fatalf("Parse().Cost = %#v, want USD 50 estimated", session.Cost)
+	}
+}
+
+func TestParseRecordsOnlySubstitutedRates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-mixed-pricing.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+		`{"timestamp":"2026-01-02T03:06:00Z","type":"turn_context","payload":{"model":"agents-a1"}}`,
+		`{"timestamp":"2026-01-02T03:07:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30},"last_token_usage":{"input_tokens":20}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	want := []model.EstimatedRate{{Model: "agents-a1", PricingModel: "gpt-5"}}
+	if !session.Cost.Estimated || !reflect.DeepEqual(session.Cost.EstimatedRates, want) {
+		t.Fatalf("Parse().Cost = %#v, want one agents-a1 to gpt-5 substitution", session.Cost)
 	}
 }
 

@@ -26,7 +26,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v21:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
+	return "codex-parser-v22:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
 }
 
 type tokenUsage struct {
@@ -121,7 +121,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 		replaySecond = replayCandidates[0]
 	}
 
-	session := &model.Session{Agent: model.AgentCodex, Path: path, Cost: model.Cost{Estimated: true}}
+	session := &model.Session{Agent: model.AgentCodex, Path: path}
 	var currentModel string
 	var lastTotal *tokenUsage
 	var lastTotalModel string
@@ -282,6 +282,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 		session.Usage = append(session.Usage, codexUsage(usageModel, *usageByModel[usageModel]))
 	}
 	missingPricing := make(map[string]bool)
+	estimatedRates := make(map[model.EstimatedRate]bool)
 	for _, record := range pricingRecords {
 		usage := codexUsage(record.model, record.usage)
 		calculated := p.calculator.CalculateCodex(usage, p.defaultPricingModel)
@@ -298,7 +299,13 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 			session.ModelCostBreakdowns[usage.Model] = current.Add(p.calculator.BreakdownCodex(usage, p.defaultPricingModel))
 		}
 		session.Cost.USD += calculated.USD
-		session.Cost.Estimated = true
+		session.Cost.Estimated = session.Cost.Estimated || calculated.Estimated
+		for _, rate := range calculated.EstimatedRates {
+			if !estimatedRates[rate] {
+				session.Cost.EstimatedRates = append(session.Cost.EstimatedRates, rate)
+				estimatedRates[rate] = true
+			}
+		}
 		for _, name := range calculated.MissingPricingModels {
 			if !missingPricing[name] {
 				session.Cost.MissingPricingModels = append(session.Cost.MissingPricingModels, name)

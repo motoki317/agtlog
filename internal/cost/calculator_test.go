@@ -18,6 +18,9 @@ func TestCalculateUsesBaseInputAndOutputRates(t *testing.T) {
 	if math.Abs(got.USD-want) > 1e-12 {
 		t.Fatalf("Calculate().USD = %v, want %v", got.USD, want)
 	}
+	if got.Estimated || len(got.EstimatedRates) != 0 {
+		t.Fatalf("Calculate() = %#v, want no Claude-side estimate metadata", got)
+	}
 }
 
 func TestCalculateUsesExplicitCacheRates(t *testing.T) {
@@ -216,6 +219,19 @@ func TestCalculateCodexMarksMappedCostEstimated(t *testing.T) {
 	got := calculator.CalculateCodex(model.Usage{Model: "gpt-5.6-sol", InputTokens: 3}, "gpt-5")
 	if got.USD != 6 || !got.Estimated || len(got.MissingPricingModels) != 0 {
 		t.Fatalf("CalculateCodex() = %#v, want USD 6 estimated", got)
+	}
+	wantRates := []model.EstimatedRate{{Model: "gpt-5.6-sol", PricingModel: "gpt-5.6"}}
+	if !reflect.DeepEqual(got.EstimatedRates, wantRates) {
+		t.Fatalf("CalculateCodex().EstimatedRates = %#v, want %#v", got.EstimatedRates, wantRates)
+	}
+}
+
+func TestCalculateCodexLeavesOwnPublishedRateExact(t *testing.T) {
+	calculator := NewCalculator(Table{"gpt-5.6-sol": {Input: 2}})
+
+	got := calculator.CalculateCodex(model.Usage{Model: "gpt-5.6-sol", InputTokens: 3}, "gpt-5")
+	if got.USD != 6 || got.Estimated || len(got.MissingPricingModels) != 0 {
+		t.Fatalf("CalculateCodex() = %#v, want USD 6 exact", got)
 	}
 }
 

@@ -11,7 +11,8 @@ import (
 
 func TestEventRecordRefIsNotSerialized(t *testing.T) {
 	event := Event{
-		Kind: EventUser,
+		Kind:         EventUser,
+		PricingModel: "fictional-pricing-model",
 		RecordRef: RecordRef{
 			Path:   "/fictional/session.jsonl",
 			Offset: 17,
@@ -24,8 +25,26 @@ func TestEventRecordRefIsNotSerialized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "fictional") || strings.Contains(string(encoded), "Offset") || strings.Contains(string(encoded), "Digest") {
-		t.Fatalf("json.Marshal(Event) included RecordRef: %s", encoded)
+	if strings.Contains(string(encoded), "fictional") || strings.Contains(string(encoded), "Offset") ||
+		strings.Contains(string(encoded), "Digest") || strings.Contains(string(encoded), "PricingModel") {
+		t.Fatalf("json.Marshal(Event) included lazy detail metadata: %s", encoded)
+	}
+}
+
+func TestCostSerializationCarriesEstimatedRates(t *testing.T) {
+	want := Cost{Estimated: true, EstimatedRates: []EstimatedRate{{
+		Model: "variant-a", PricingModel: "model-a",
+	}}}
+	data, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Cost
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Cost JSON round trip = %#v, want %#v; JSON %s", got, want, data)
 	}
 }
 
@@ -126,16 +145,20 @@ func TestCostBreakdownAddAndTotal(t *testing.T) {
 
 func TestSessionTotalCostIncludesNestedSubagents(t *testing.T) {
 	session := Session{
-		Cost: Cost{USD: 1, MissingPricingModels: []string{"unknown-a"}},
+		Cost: Cost{USD: 1, EstimatedRates: []EstimatedRate{{Model: "variant-a", PricingModel: "model-a"}}, MissingPricingModels: []string{"unknown-a"}},
 		Subagents: []*Session{{
-			Cost: Cost{USD: 2, Estimated: true},
+			Cost: Cost{USD: 2, Estimated: true, EstimatedRates: []EstimatedRate{{Model: "variant-b", PricingModel: "model-b"}}},
 			Subagents: []*Session{{
-				Cost: Cost{USD: 3, MissingPricingModels: []string{"unknown-a", "unknown-b"}},
+				Cost: Cost{USD: 3, EstimatedRates: []EstimatedRate{{Model: "variant-a", PricingModel: "model-a"}}, MissingPricingModels: []string{"unknown-a", "unknown-b"}},
 			}},
 		}},
 	}
 
-	want := Cost{USD: 6, Estimated: true, MissingPricingModels: []string{"unknown-a", "unknown-b"}}
+	want := Cost{
+		USD: 6, Estimated: true,
+		EstimatedRates:       []EstimatedRate{{Model: "variant-a", PricingModel: "model-a"}, {Model: "variant-b", PricingModel: "model-b"}},
+		MissingPricingModels: []string{"unknown-a", "unknown-b"},
+	}
 	if got := session.TotalCost(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("TotalCost() = %#v, want %#v", got, want)
 	}

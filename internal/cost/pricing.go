@@ -294,23 +294,22 @@ func (t Table) Resolve(modelName string) (string, Pricing, bool) {
 	return "", Pricing{}, false
 }
 
-func (t Table) ResolveCodex(modelName, defaultModel string) (string, Pricing, bool) {
-	if modelName == "gpt-5.6-sol" {
-		// The -sol slug is a Codex runtime variant; gpt-5.6 is the nearest
-		// public API price and keeps the resulting subscription cost estimated.
-		return t.Resolve("gpt-5.6")
+// ResolveCodex reports the pricing entry to apply and whether it is the logged
+// model's own published rate. A substituted or default rate is an estimate.
+func (t Table) ResolveCodex(modelName, defaultModel string) (string, Pricing, bool, bool) {
+	if key, pricing, ok := t.Resolve(modelName); ok {
+		return key, pricing, true, true
 	}
-	if strings.HasPrefix(modelName, "gpt-5") {
-		if key, pricing, ok := t.Resolve(modelName); ok {
-			return key, pricing, true
-		}
+	codexModelName := strings.TrimPrefix(modelName, "openai/")
+	if strings.HasPrefix(codexModelName, "gpt-5") {
 		for _, suffix := range []string{"-sol", "-terra", "-luna"} {
 			if base, found := strings.CutSuffix(modelName, suffix); found {
 				if key, pricing, ok := t.Resolve(base); ok {
-					return key, pricing, true
+					return key, pricing, false, true
 				}
 			}
 		}
 	}
-	return t.Resolve(defaultModel)
+	key, pricing, ok := t.Resolve(defaultModel)
+	return key, pricing, false, ok
 }

@@ -45,19 +45,22 @@ func (c Calculator) Fingerprint() string {
 }
 
 func (c Calculator) CalculateCodex(usage model.Usage, defaultModel string) model.Cost {
-	pricingModel, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
+	pricingModel, _, exact, ok := c.table.ResolveCodex(usage.Model, defaultModel)
 	if !ok {
 		return model.Cost{Estimated: true, MissingPricingModels: []string{usage.Model}}
 	}
 	mapped := usage
 	mapped.Model = pricingModel
 	calculated := c.Calculate(mapped)
-	calculated.Estimated = true
+	calculated.Estimated = !exact
+	if !exact {
+		calculated.EstimatedRates = []model.EstimatedRate{{Model: usage.Model, PricingModel: pricingModel}}
+	}
 	return calculated
 }
 
 func (c Calculator) BreakdownCodex(usage model.Usage, defaultModel string) model.CostBreakdown {
-	pricingModel, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
+	pricingModel, _, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
 	if !ok {
 		return model.CostBreakdown{}
 	}
@@ -67,7 +70,7 @@ func (c Calculator) BreakdownCodex(usage model.Usage, defaultModel string) model
 }
 
 func (c Calculator) HasCodexPricing(usage model.Usage, defaultModel string) bool {
-	_, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
+	_, _, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
 	return ok
 }
 

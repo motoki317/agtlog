@@ -24,7 +24,7 @@ func TestEmbeddedTableContainsSupportedModels(t *testing.T) {
 		t.Fatalf("EmbeddedTable() error = %v", err)
 	}
 
-	models := []string{"claude-opus-4-8", "claude-fable-5", "claude-sonnet-5", "gpt-5.6"}
+	models := []string{"claude-opus-4-8", "claude-fable-5", "claude-sonnet-5", "gpt-5.6", "gpt-5.6-sol"}
 	for _, name := range models {
 		if _, ok := table[name]; !ok {
 			t.Errorf("EmbeddedTable() missing %q", name)
@@ -583,19 +583,58 @@ func TestTableResolveUsesProviderQualifiedModel(t *testing.T) {
 	}
 }
 
-func TestCodexResolutionMapsSolToPublicGPT56(t *testing.T) {
-	table := Table{"gpt-5.6": {Input: 2}}
+func TestCodexResolutionUsesOwnPublishedSolRate(t *testing.T) {
+	table := Table{
+		"gpt-5.6":     {Input: 2},
+		"gpt-5.6-sol": {Input: 3},
+	}
 
-	key, pricing, ok := table.ResolveCodex("gpt-5.6-sol", "gpt-5")
-	if !ok || key != "gpt-5.6" || pricing.Input != 2 {
+	key, pricing, _, ok := table.ResolveCodex("gpt-5.6-sol", "gpt-5")
+	if !ok || key != "gpt-5.6-sol" || pricing.Input != 3 {
 		t.Fatalf("ResolveCodex() = %q, %#v, %v", key, pricing, ok)
+	}
+}
+
+func TestCodexResolutionReportsExactness(t *testing.T) {
+	table := Table{
+		"gpt-5":          {Input: 1},
+		"gpt-5.7":        {Input: 2},
+		"gpt-5.6-sol":    {Input: 3},
+		"openai/gpt-5.5": {Input: 4},
+		"gpt-5.3-codex":  {Input: 5},
+		"gpt-5.6-luna":   {Input: 6},
+		"openai/gpt-5.8": {Input: 7},
+	}
+	tests := []struct {
+		name      string
+		model     string
+		wantKey   string
+		wantExact bool
+	}{
+		{name: "sol entry", model: "gpt-5.6-sol", wantKey: "gpt-5.6-sol", wantExact: true},
+		{name: "provider-prefixed entry", model: "gpt-5.5", wantKey: "openai/gpt-5.5", wantExact: true},
+		{name: "codex entry", model: "gpt-5.3-codex", wantKey: "gpt-5.3-codex", wantExact: true},
+		{name: "luna entry", model: "gpt-5.6-luna", wantKey: "gpt-5.6-luna", wantExact: true},
+		{name: "suffix fallback", model: "gpt-5.7-sol", wantKey: "gpt-5.7", wantExact: false},
+		{name: "provider suffix fallback", model: "openai/gpt-5.8-sol", wantKey: "openai/gpt-5.8", wantExact: false},
+		{name: "default fallback", model: "future-model", wantKey: "gpt-5", wantExact: false},
+		{name: "empty model", wantKey: "gpt-5", wantExact: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			key, _, exact, ok := table.ResolveCodex(test.model, "gpt-5")
+			if !ok || key != test.wantKey || exact != test.wantExact {
+				t.Fatalf("ResolveCodex(%q) = %q, exact %t, ok %t; want %q, exact %t, ok true",
+					test.model, key, exact, ok, test.wantKey, test.wantExact)
+			}
+		})
 	}
 }
 
 func TestCodexResolutionKeepsPublicGPT5Models(t *testing.T) {
 	table := Table{"gpt-5.4": {Input: 2}}
 
-	key, _, ok := table.ResolveCodex("gpt-5.4", "gpt-5")
+	key, _, _, ok := table.ResolveCodex("gpt-5.4", "gpt-5")
 	if !ok || key != "gpt-5.4" {
 		t.Fatalf("ResolveCodex() = %q, _, %v, want public model", key, ok)
 	}
@@ -604,7 +643,7 @@ func TestCodexResolutionKeepsPublicGPT5Models(t *testing.T) {
 func TestCodexResolutionStripsPrivateGPT5Variant(t *testing.T) {
 	table := Table{"gpt-5.4": {Input: 2}}
 
-	key, _, ok := table.ResolveCodex("gpt-5.4-sol", "gpt-5")
+	key, _, _, ok := table.ResolveCodex("gpt-5.4-sol", "gpt-5")
 	if !ok || key != "gpt-5.4" {
 		t.Fatalf("ResolveCodex() = %q, _, %v, want base public model", key, ok)
 	}
@@ -613,7 +652,7 @@ func TestCodexResolutionStripsPrivateGPT5Variant(t *testing.T) {
 func TestCodexResolutionUsesConfiguredDefault(t *testing.T) {
 	table := Table{"gpt-5": {Input: 2}}
 
-	key, _, ok := table.ResolveCodex("future-codex-model", "gpt-5")
+	key, _, _, ok := table.ResolveCodex("future-codex-model", "gpt-5")
 	if !ok || key != "gpt-5" {
 		t.Fatalf("ResolveCodex() = %q, _, %v, want configured default", key, ok)
 	}

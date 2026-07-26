@@ -389,9 +389,14 @@ func codexUsageTarget(kind model.EventKind) bool {
 
 func (p Parser) setCodexEventUsage(event *model.Event, usage model.Usage) {
 	event.Usage = &usage
+	calculated := p.calculator.CalculateCodex(usage, p.defaultPricingModel)
 	event.Cost = p.calculator.BreakdownCodex(usage, p.defaultPricingModel)
 	event.Priced = p.calculator.HasCodexPricing(usage, p.defaultPricingModel)
-	event.CostEstimated = true
+	event.CostEstimated = calculated.Estimated
+	event.PricingModel = ""
+	if len(calculated.EstimatedRates) > 0 {
+		event.PricingModel = calculated.EstimatedRates[0].PricingModel
+	}
 }
 
 func appendCodexMessage(session *model.Session, event model.Event, preferred bool, dedupText string, dedupTextByEvent map[int][32]byte) {
@@ -426,6 +431,7 @@ func appendCodexMessage(session *model.Session, event model.Event, preferred boo
 			event.Cost = existing.Cost
 			event.Priced = existing.Priced
 			event.CostEstimated = existing.CostEstimated
+			event.PricingModel = existing.PricingModel
 			session.Events[index] = event
 			if dedupTextByEvent != nil {
 				dedupTextByEvent[index] = dedupKey
