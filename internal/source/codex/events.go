@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -53,16 +55,29 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 		normalizeExecOutput bool
 		applyPatch          bool
 	}
+	type pendingUsage struct {
+		event model.Event
+		usage model.Usage
+	}
 	calls := make(map[string]pendingCall)
 	dedupTextByEvent := make(map[int][32]byte)
+	requestsByOffset := make(map[int64]model.RequestUsage, len(session.Requests))
+	for _, request := range session.Requests {
+		if request.Offset >= 0 {
+			requestsByOffset[request.Offset] = request
+		}
+	}
 	currentModel := ""
-	// requestStart marks where the current billed request's events begin, so a
-	// token_count closing that request can attribute its usage to the first
-	// event it produced. Each token_count opens the next request's window.
-	requestStart := 0
+	candidateIndex := -1
 	isSubagent := session.AgentPath != ""
-	active := !isSubagent
-	err = jsonl.ForEachContextWithOffset(ctx, file, func(line []byte, offset, length int64) {
+	waitingForBridge := isSubagent
+	initialEventLengths := codexEventLengths(session)
+	var preBridgeUsage []pendingUsage
+	var reader io.Reader = file
+	if session.SourceSize > 0 {
+		reader = io.LimitReader(file, session.SourceSize)
+	}
+	err = jsonl.ForEachContextWithOffset(ctx, reader, func(line []byte, offset, length int64) {
 		var record struct {
 			Timestamp string `json:"timestamp"`
 			Type      string `json:"type"`
@@ -82,9 +97,6 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				ThreadSource string           `json:"thread_source"`
 				Content      []codexTextBlock `json:"content"`
 				Summary      []codexTextBlock `json:"summary"`
-				Info         struct {
-					Last *tokenUsage `json:"last_token_usage"`
-				} `json:"info"`
 			} `json:"payload"`
 		}
 		if err := json.Unmarshal(line, &record); err != nil {
@@ -101,26 +113,31 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 		timestamp, _ := time.Parse(time.RFC3339Nano, record.Timestamp)
 		if record.Type == "session_meta" {
 			if record.Payload.ThreadSource == "subagent" {
-				isSubagent, active = true, false
+				isSubagent, waitingForBridge = true, true
 			}
 			return
 		}
 		if record.Type == "inter_agent_communication_metadata" {
-			if isSubagent {
-				active = true
+			if isSubagent && waitingForBridge {
+				restoreCodexEventLengths(initialEventLengths)
+				for _, pending := range preBridgeUsage {
+					p.appendCodexUsageEvent(session, pending.event, pending.usage)
+				}
+				initialEventLengths = nil
+				preBridgeUsage = nil
+				calls = make(map[string]pendingCall)
+				dedupTextByEvent = make(map[int][32]byte)
+				candidateIndex = -1
+				waitingForBridge = false
 			}
 			return
 		}
-		// turn_context precedes the subagent bridge record that flips active,
-		// so the model must be tracked before the gate or subagent rows lose it.
 		if record.Type == "turn_context" {
 			currentModel = record.Payload.Model
 			return
 		}
-		if !active {
-			return
-		}
 		event := model.Event{Timestamp: timestamp, Model: currentModel, RecordRef: recordRef}
+		eventCount := len(session.Events)
 		preferredMessage := true
 		if record.Type == "event_msg" {
 			switch record.Payload.Type {
@@ -141,19 +158,31 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: "context compacted", RecordRef: recordRef, Model: currentModel})
 				return
 			case "token_count":
-				if usage := codexDisplayUsage(record.Payload.Info.Last); usage != nil {
-					usage.Model = currentModel
-					for index := requestStart; index < len(session.Events); index++ {
-						if session.Events[index].Kind != model.EventUser {
-							session.Events[index].Usage = usage
-							session.Events[index].Cost = p.calculator.BreakdownCodex(*usage, p.defaultPricingModel)
-							session.Events[index].Priced = p.calculator.HasCodexPricing(*usage, p.defaultPricingModel)
-							session.Events[index].CostEstimated = true
-							break
-						}
+				if request, ok := requestsByOffset[offset]; ok {
+					delete(requestsByOffset, offset)
+					usage := request.Usage
+					if waitingForBridge {
+						preBridgeUsage = append(preBridgeUsage, pendingUsage{event: model.Event{
+							Timestamp: timestamp,
+							Kind:      model.EventUsage,
+							Text:      "unattributed usage",
+							RecordRef: recordRef,
+							Model:     usage.Model,
+						}, usage: usage})
+					}
+					if candidateIndex >= 0 {
+						p.setCodexEventUsage(&session.Events[candidateIndex], usage)
+					} else {
+						p.appendCodexUsageEvent(session, model.Event{
+							Timestamp: timestamp,
+							Kind:      model.EventUsage,
+							Text:      "unattributed usage",
+							RecordRef: recordRef,
+							Model:     usage.Model,
+						}, usage)
 					}
 				}
-				requestStart = len(session.Events)
+				candidateIndex = -1
 				return
 			default:
 				return
@@ -261,9 +290,39 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				session.Events = append(session.Events, event)
 			}
 		}
+		if candidateIndex < 0 {
+			for index := eventCount; index < len(session.Events); index++ {
+				if codexUsageTarget(session.Events[index].Kind) {
+					candidateIndex = index
+					break
+				}
+			}
+		}
 	})
 	if err != nil {
 		return err
+	}
+	for _, request := range session.Requests {
+		if request.Offset >= 0 {
+			if _, unmatched := requestsByOffset[request.Offset]; !unmatched {
+				continue
+			}
+			p.appendCodexUsageEvent(session, model.Event{
+				Timestamp: session.UpdatedAt,
+				Kind:      model.EventUsage,
+				Text:      "unattributed usage",
+				RecordRef: model.RecordRef{Path: path, Offset: request.Offset},
+				Model:     request.Usage.Model,
+			}, request.Usage)
+		} else {
+			p.appendCodexUsageEvent(session, model.Event{
+				Timestamp:      session.UpdatedAt,
+				Kind:           model.EventUsage,
+				Text:           "session usage",
+				Model:          request.Usage.Model,
+				UsageAggregate: true,
+			}, request.Usage)
+		}
 	}
 	for _, subagent := range session.Subagents {
 		if subagent.Path == "" || strings.Contains(subagent.Path, "#") {
@@ -274,6 +333,65 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 		}
 	}
 	return nil
+}
+
+func codexEventLengths(root *model.Session) map[*model.Session]int {
+	lengths := make(map[*model.Session]int)
+	var visit func(*model.Session)
+	visit = func(session *model.Session) {
+		if session == nil {
+			return
+		}
+		if _, seen := lengths[session]; seen {
+			return
+		}
+		lengths[session] = len(session.Events)
+		for _, child := range session.Subagents {
+			visit(child)
+		}
+	}
+	visit(root)
+	return lengths
+}
+
+func restoreCodexEventLengths(lengths map[*model.Session]int) {
+	for session, length := range lengths {
+		if len(session.Events) > length {
+			if length == 0 {
+				clear(session.Events)
+				session.Events = nil
+				continue
+			}
+			retained := slices.Clone(session.Events[:length])
+			clear(session.Events)
+			session.Events = retained
+		}
+	}
+}
+
+func (p Parser) appendCodexUsageEvent(session *model.Session, event model.Event, usage model.Usage) {
+	session.Events = append(session.Events, p.codexUsageEvent(event, usage))
+}
+
+func (p Parser) codexUsageEvent(event model.Event, usage model.Usage) model.Event {
+	p.setCodexEventUsage(&event, usage)
+	return event
+}
+
+func codexUsageTarget(kind model.EventKind) bool {
+	switch kind {
+	case model.EventAssistantText, model.EventThinking, model.EventToolCall, model.EventAdvisor:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p Parser) setCodexEventUsage(event *model.Event, usage model.Usage) {
+	event.Usage = &usage
+	event.Cost = p.calculator.BreakdownCodex(usage, p.defaultPricingModel)
+	event.Priced = p.calculator.HasCodexPricing(usage, p.defaultPricingModel)
+	event.CostEstimated = true
 }
 
 func appendCodexMessage(session *model.Session, event model.Event, preferred bool, dedupText string, dedupTextByEvent map[int][32]byte) {
@@ -304,6 +422,10 @@ func appendCodexMessage(session *model.Session, event model.Event, preferred boo
 			if event.Kind == model.EventUser {
 				event.Harness = event.Harness && existing.Harness
 			}
+			event.Usage = existing.Usage
+			event.Cost = existing.Cost
+			event.Priced = existing.Priced
+			event.CostEstimated = existing.CostEstimated
 			session.Events[index] = event
 			if dedupTextByEvent != nil {
 				dedupTextByEvent[index] = dedupKey

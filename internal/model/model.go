@@ -27,8 +27,11 @@ type Usage struct {
 type RequestUsage struct {
 	MessageID string
 	RequestID string
-	Usage     Usage
-	USD       float64
+	// Offset locates the source record when an adapter has one. Codex uses a
+	// negative offset for an authoritative aggregate with no physical record.
+	Offset int64
+	Usage  Usage
+	USD    float64
 }
 
 func (u Usage) Add(other Usage) Usage {
@@ -197,6 +200,7 @@ const (
 	EventAdvisor       EventKind = "advisor"
 	EventSystem        EventKind = "system"
 	EventCompact       EventKind = "compact"
+	EventUsage         EventKind = "usage"
 )
 
 // ToolDetail is the full tool payload shown when a tool call is expanded.
@@ -233,6 +237,9 @@ type Event struct {
 	// produces so a turn can sum FlowTokens and read the last PromptTokens without
 	// double counting. Nil for events without their own request.
 	Usage *Usage
+	// UsageAggregate marks session-level fallback usage that must not be borrowed
+	// as the context of a preceding user request.
+	UsageAggregate bool
 	// Cost is the priced breakdown of that same request, kept beside Usage so the
 	// timeline can split input-side from output-side cost. Empty when Priced is
 	// false. CostEstimated marks a rate estimate (always so for Codex).
@@ -260,22 +267,26 @@ type DuplicateOwner struct {
 }
 
 type Session struct {
-	ID        string
-	Agent     AgentKind
-	Path      string
-	CWD       string
-	Project   string
-	Title     string
-	Models    []string
-	StartedAt time.Time
-	UpdatedAt time.Time
-	GitBranch string
-	AgentPath string
-	ParentID  string
-	HasError  bool
-	Messages  int
-	Usage     []Usage
-	// Requests intentionally repeats Usage until all gross readers can derive their aggregates from the request ledger.
+	ID    string
+	Agent AgentKind
+	Path  string
+	// SourceSize bounds detail loading to the snapshot consumed by summary
+	// parsing. Zero means the bound is unavailable.
+	SourceSize int64
+	CWD        string
+	Project    string
+	Title      string
+	Models     []string
+	StartedAt  time.Time
+	UpdatedAt  time.Time
+	GitBranch  string
+	AgentPath  string
+	ParentID   string
+	HasError   bool
+	Messages   int
+	Usage      []Usage
+	// Requests is the serialized billed ledger. Codex stores per-request entries
+	// for clean partitions and authoritative per-model aggregates otherwise.
 	Requests            []RequestUsage
 	ModelCosts          map[string]float64
 	ModelCostBreakdowns map[string]CostBreakdown

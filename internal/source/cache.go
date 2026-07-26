@@ -53,7 +53,7 @@ func (r *Registry) storeCached(adapter Source, path, fingerprint string, session
 		return
 	}
 	data, err := json.Marshal(cacheEntry{Version: cacheVersion, Agent: adapter.Agent(), Fingerprint: fingerprint, Session: session})
-	if err != nil || os.MkdirAll(r.options.CacheDir, 0o700) != nil {
+	if err != nil || len(data) > maxSummaryCacheBytes || os.MkdirAll(r.options.CacheDir, 0o700) != nil {
 		return
 	}
 	if !r.cacheDirSafe() {

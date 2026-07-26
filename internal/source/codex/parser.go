@@ -26,7 +26,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v20:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
+	return "codex-parser-v21:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
 }
 
 type tokenUsage struct {
@@ -38,8 +38,9 @@ type tokenUsage struct {
 }
 
 type tokenUsageRecord struct {
-	model string
-	usage tokenUsage
+	model  string
+	usage  tokenUsage
+	offset int64
 }
 
 type logRecord struct {
@@ -134,7 +135,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	hasLast := false
 	seenModels := make(map[string]bool)
 	metaSeen = false
-	err = jsonl.ForEach(file, func(line []byte) {
+	err = jsonl.ForEachContextWithOffset(context.Background(), file, func(line []byte, offset, _ int64) {
 		var envelope struct {
 			Timestamp string `json:"timestamp"`
 			Type      string `json:"type"`
@@ -245,13 +246,18 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 			}
 			usageByModel[currentModel] = &modelTotal
 			summedLast = allModelsTotal
-			pricingRecords = append(pricingRecords, tokenUsageRecord{model: currentModel, usage: *record.Payload.Info.Last})
+			pricingRecords = append(pricingRecords, tokenUsageRecord{model: currentModel, usage: *record.Payload.Info.Last, offset: offset})
 			hasLast = true
 		}
 	})
 	if err != nil {
 		return nil, err
 	}
+	sourceSize, err := file.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return nil, err
+	}
+	session.SourceSize = sourceSize
 	var ownTotal *tokenUsage
 	if lastTotal != nil {
 		candidate := *lastTotal
@@ -269,7 +275,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	if !cleanPartition {
 		pricingRecords = pricingRecords[:0]
 		for _, usageModel := range usageOrder {
-			pricingRecords = append(pricingRecords, tokenUsageRecord{model: usageModel, usage: *usageByModel[usageModel]})
+			pricingRecords = append(pricingRecords, tokenUsageRecord{model: usageModel, usage: *usageByModel[usageModel], offset: -1})
 		}
 	}
 	for _, usageModel := range usageOrder {
@@ -279,6 +285,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	for _, record := range pricingRecords {
 		usage := codexUsage(record.model, record.usage)
 		calculated := p.calculator.CalculateCodex(usage, p.defaultPricingModel)
+		session.Requests = append(session.Requests, model.RequestUsage{Offset: record.offset, Usage: usage, USD: calculated.USD})
 		if session.ModelCosts == nil {
 			session.ModelCosts = make(map[string]float64)
 		}
@@ -313,26 +320,6 @@ func codexUsage(usageModel string, selected tokenUsage) model.Usage {
 		CacheReadTokens:        selected.CachedInputTokens,
 		InputIncludesCacheRead: true,
 	}
-}
-
-// codexDisplayUsage maps a token_count's per-request usage to the timeline's
-// display usage. Input already folds in the cached prompt, and output already
-// includes reasoning. Returns nil when the request has no tokens, so it never
-// clobbers a turn's real context.
-func codexDisplayUsage(last *tokenUsage) *model.Usage {
-	if last == nil || !validTokenUsage(last) {
-		return nil
-	}
-	usage := model.Usage{
-		InputTokens:            last.InputTokens,
-		OutputTokens:           last.OutputTokens,
-		CacheReadTokens:        last.CachedInputTokens,
-		InputIncludesCacheRead: true,
-	}
-	if usage.PromptTokens() == 0 && usage.FlowTokens() == 0 {
-		return nil
-	}
-	return &usage
 }
 
 func titleFromUserMessage(message string) string {

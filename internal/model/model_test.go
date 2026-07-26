@@ -253,6 +253,42 @@ func TestSessionJSONCachesRequestsButNotOwnership(t *testing.T) {
 	}
 }
 
+func TestRequestUsageJSONCarriesSourceOffset(t *testing.T) {
+	var request RequestUsage
+	if err := json.Unmarshal([]byte(`{"Offset":42}`), &request); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if got := fields["Offset"]; got != float64(42) {
+		t.Fatalf("cached request offset = %#v, want 42", got)
+	}
+}
+
+func TestSessionJSONCarriesSourceSize(t *testing.T) {
+	var session Session
+	if err := json.Unmarshal([]byte(`{"SourceSize":8192}`), &session); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if got := fields["SourceSize"]; got != float64(8192) {
+		t.Fatalf("cached source size = %#v, want 8192", got)
+	}
+}
+
 func TestCleanTitleRemovesClosingXMLTag(t *testing.T) {
 	if got := CleanTitle("<command-name>/goal</command-name>"); got != "/goal" {
 		t.Fatalf("CleanTitle() = %q, want command title without XML", got)

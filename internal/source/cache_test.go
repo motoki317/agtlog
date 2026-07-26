@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/motoki317/agtlog/internal/model"
@@ -77,6 +78,25 @@ func TestRegistryReusesUnchangedCachedSummary(t *testing.T) {
 	}
 	if adapter.parses != 1 {
 		t.Fatalf("Parse() called %d times, want once for unchanged file", adapter.parses)
+	}
+}
+
+func TestRegistrySkipsOversizedSummaryCacheEntry(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "oversized.jsonl")
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
+	session := &model.Session{
+		ID:    "oversized",
+		Agent: model.AgentClaude,
+		Path:  path,
+		Title: strings.Repeat("x", maxSummaryCacheBytes),
+	}
+
+	registry.storeCached(adapter, path, "fingerprint", session)
+
+	if _, err := os.Stat(registry.cachePath(adapter, path)); !os.IsNotExist(err) {
+		t.Fatalf("oversized cache path error = %v, want not exist", err)
 	}
 }
 

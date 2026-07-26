@@ -50,8 +50,8 @@ func parseTieredSession(t *testing.T, events ...string) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v20:") {
-		t.Fatalf("CacheFingerprint() = %q, want v20 apply_patch filename summaries", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v21:") {
+		t.Fatalf("CacheFingerprint() = %q, want v21 finalized request ledger", got)
 	}
 }
 
@@ -98,13 +98,15 @@ func TestLoadEventsAttachesTokenCountUsageToAssistantTurn(t *testing.T) {
 		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}`,
 		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"user_message","message":"Chart the route"}}`,
 		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"agent_message","message":"Route ready"}}`,
-		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":45000,"cached_input_tokens":37000,"output_tokens":4000,"reasoning_output_tokens":1000,"total_tokens":49000}}}}`,
+		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":45000,"cached_input_tokens":37000,"output_tokens":4000,"reasoning_output_tokens":1000,"total_tokens":49000},"last_token_usage":{"input_tokens":45000,"cached_input_tokens":37000,"output_tokens":4000,"reasoning_output_tokens":1000,"total_tokens":49000}}}}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	session := &model.Session{Path: path, Agent: model.AgentCodex}
-
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
 	if err := testParser().LoadEvents(context.Background(), session); err != nil {
 		t.Fatalf("LoadEvents() error = %v", err)
 	}
@@ -130,13 +132,15 @@ func TestLoadEventsPricesUsageFromStringSummaryTurnContextModel(t *testing.T) {
 	lines := strings.Join([]string{
 		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"summary":"auto","model":"gpt-5.6-sol"}}`,
 		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"agent_message","message":"Route ready"}}`,
-		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":120}}}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":120},"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":120}}}}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	session := &model.Session{Path: path, Agent: model.AgentCodex}
-
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
 	if err := testParser().LoadEvents(context.Background(), session); err != nil {
 		t.Fatalf("LoadEvents() error = %v", err)
 	}
@@ -164,12 +168,15 @@ func TestLoadEventsKeepsSubagentTurnContextModel(t *testing.T) {
 		`{"timestamp":"2026-01-02T03:04:01Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}`,
 		`{"timestamp":"2026-01-02T03:04:02Z","type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}`,
 		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"agent_message","message":"Survey ready"}}`,
-		`{"timestamp":"2026-01-02T03:04:04Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}}}`,
+		`{"timestamp":"2026-01-02T03:04:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120},"last_token_usage":{"input_tokens":100,"output_tokens":20,"total_tokens":120}}}}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(childPath, []byte(childLines), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	child := &model.Session{Path: childPath, Agent: model.AgentCodex, AgentPath: "/root/scout"}
+	child, err := testParser().Parse(childPath)
+	if err != nil {
+		t.Fatalf("Parse(child) error = %v", err)
+	}
 	session := &model.Session{
 		Path: rootPath, Agent: model.AgentCodex, Subagents: []*model.Session{child},
 	}
@@ -183,6 +190,364 @@ func TestLoadEventsKeepsSubagentTurnContextModel(t *testing.T) {
 	event := child.Events[0]
 	if event.Model != "gpt-5.6-sol" || event.Usage.Model != "gpt-5.6-sol" {
 		t.Fatalf("subagent event model = %q, usage model = %q, want gpt-5.6-sol", event.Model, event.Usage.Model)
+	}
+}
+
+func TestLoadEventsSuppressesDuplicateTokenCountFromLedger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-duplicate-usage.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"agent_message","message":"First route"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"agent_message","message":"Mirrored route"}}`,
+		`{"timestamp":"2026-01-02T03:04:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	var rows, input int64
+	for _, event := range session.Events {
+		if event.Usage != nil {
+			rows++
+			input += event.Usage.InputTokens
+		}
+	}
+	if rows != 1 || input != 10 {
+		t.Fatalf("usage rows = %d with %d input tokens, want one ledger-selected row with 10", rows, input)
+	}
+}
+
+func TestLoadEventsStopsAtParsedSourceSize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-growing.jsonl")
+	snapshot := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"agent_message","message":"Snapshot reply"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(snapshot), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	growth := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"agent_message","message":"Later reply"}}`,
+		`{"timestamp":"2026-01-02T03:04:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20},"last_token_usage":{"input_tokens":10}}}}`,
+	}, "\n") + "\n"
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(growth); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 1 || session.Events[0].Text != "Snapshot reply" {
+		t.Fatalf("LoadEvents().Events = %#v, want only the parsed snapshot", session.Events)
+	}
+}
+
+func TestLoadEventsRendersUsageWithoutEligibleTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-unattributed.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"user_message","message":"Map the pass"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	var usageEvents []model.Event
+	for _, event := range session.Events {
+		if event.Usage != nil {
+			usageEvents = append(usageEvents, event)
+		}
+	}
+	if len(usageEvents) != 1 || usageEvents[0].Kind != model.EventKind("usage") ||
+		usageEvents[0].Usage.InputTokens != 10 || usageEvents[0].Cost.Total() != session.Cost.USD {
+		t.Fatalf("usage events = %#v, want one reconciling unattributed row", usageEvents)
+	}
+}
+
+func TestLoadEventsNeverAttributesUsageToCompaction(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-compact-usage.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"context_compacted"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 2 || session.Events[0].Kind != model.EventCompact || session.Events[0].Usage != nil ||
+		session.Events[1].Kind != model.EventUsage || session.Events[1].Usage == nil {
+		t.Fatalf("LoadEvents().Events = %#v, want unpriced compaction followed by usage row", session.Events)
+	}
+}
+
+func TestLoadEventsNeverAttributesUsageToSubagent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-subagent-usage.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"sub_agent_activity","agent_thread_id":"thread-scout","agent_path":"/root/scout","kind":"started"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+
+	if len(session.Events) != 2 || session.Events[0].Kind != model.EventSubagent || session.Events[0].Usage != nil ||
+		session.Events[1].Kind != model.EventUsage || session.Events[1].Usage == nil {
+		t.Fatalf("LoadEvents().Events = %#v, want unpriced subagent and explicit usage row", session.Events)
+	}
+}
+
+func TestLoadEventsNeverAttributesUsageToToolResult(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-tool-result-usage.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-route","output":"route data"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"Route ready"}]}}`,
+		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 2 || session.Events[0].Kind != model.EventToolResult ||
+		session.Events[0].Usage != nil || session.Events[1].Kind != model.EventAssistantText ||
+		session.Events[1].Usage == nil {
+		t.Fatalf("LoadEvents().Events = %#v, want usage only on model output", session.Events)
+	}
+}
+
+func TestLoadEventsIgnoresParentInjectedSystemUsageTarget(t *testing.T) {
+	dir := t.TempDir()
+	rootPath := filepath.Join(dir, "rollout-thread-root.jsonl")
+	childPath := filepath.Join(dir, "rollout-thread-scout.jsonl")
+	rootContent := `{"timestamp":"2026-01-02T03:04:00Z","type":"event_msg","payload":{"type":"sub_agent_activity","agent_path":"/root/scout","agent_thread_id":"thread-scout","kind":"completed"}}` + "\n"
+	if err := os.WriteFile(rootPath, []byte(rootContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	childContent := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent","agent_path":"/root/scout"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}`,
+		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(childPath, []byte(childContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	child, err := testParser().Parse(childPath)
+	if err != nil {
+		t.Fatalf("Parse(child) error = %v", err)
+	}
+	root := &model.Session{Path: rootPath, Agent: model.AgentCodex, Subagents: []*model.Session{child}}
+
+	if err := testParser().LoadEvents(context.Background(), root); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(child.Events) != 2 || child.Events[0].Kind != model.EventSystem || child.Events[0].Usage != nil ||
+		child.Events[1].Kind != model.EventUsage || child.Events[1].Usage == nil {
+		t.Fatalf("child events = %#v, want unpriced parent system row and explicit child usage", child.Events)
+	}
+}
+
+func TestLoadEventsPreservesUsageAcrossPreWindowMessageDedup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-dedup-usage.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"agent_message","message":"Route ready"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+		`{"timestamp":"2026-01-02T03:04:03Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"Route ready"}]}}`,
+		`{"timestamp":"2026-01-02T03:04:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":25},"last_token_usage":{"input_tokens":15}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 2 || session.Events[0].Kind != model.EventAssistantText ||
+		session.Events[0].Usage == nil || session.Events[0].Usage.InputTokens != 10 ||
+		session.Events[1].Kind != model.EventUsage || session.Events[1].Usage == nil ||
+		session.Events[1].Usage.InputTokens != 15 {
+		t.Fatalf("LoadEvents().Events = %#v, want first request on deduped reply and second request orphaned", session.Events)
+	}
+}
+
+func TestLoadEventsRollsBackBridgePrefixWithoutDroppingUsage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-thread-bridge.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent","agent_path":"/root/scout"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"response_item","payload":{"type":"function_call","call_id":"call-shared","name":"exec","arguments":"{\"cmd\":\"survey\"}"}}`,
+		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+		`{"timestamp":"2026-01-02T03:04:04Z","type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}`,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-shared","output":"survey data"}}`,
+		`{"timestamp":"2026-01-02T03:04:06Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"text":"Survey ready"}]}}`,
+		`{"timestamp":"2026-01-02T03:04:07Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":25},"last_token_usage":{"input_tokens":15}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 3 || session.Events[0].Kind != model.EventUsage ||
+		session.Events[0].Usage == nil || session.Events[0].Usage.InputTokens != 10 ||
+		session.Events[1].Kind != model.EventToolResult || session.Events[1].Usage != nil ||
+		session.Events[2].Kind != model.EventAssistantText || session.Events[2].Usage == nil ||
+		session.Events[2].Usage.InputTokens != 15 {
+		t.Fatalf("LoadEvents().Events = %#v, want preserved prefix usage and clean post-bridge state", session.Events)
+	}
+}
+
+func TestLoadEventsRendersUncleanPartitionAsAggregateUsage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-unclean-usage.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"agent_message","message":"First route"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"agent_message","message":"Final route"}}`,
+		`{"timestamp":"2026-01-02T03:04:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 3 || session.Events[0].Usage != nil || session.Events[1].Usage != nil ||
+		session.Events[2].Kind != model.EventUsage || session.Events[2].Usage == nil ||
+		session.Events[2].Usage.InputTokens != 30 || session.Events[2].Cost.Total() != session.Cost.USD {
+		t.Fatalf("LoadEvents().Events = %#v, want unpriced requests and one aggregate usage row", session.Events)
+	}
+}
+
+func TestLoadEventsRendersLedgerOffsetMissingFromSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-missing-ledger-offset.jsonl")
+	content := `{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updatedAt := time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC)
+	session := &model.Session{
+		Path:       path,
+		Agent:      model.AgentCodex,
+		SourceSize: int64(len(content)),
+		UpdatedAt:  updatedAt,
+		Requests: []model.RequestUsage{{
+			Offset: 4096,
+			Usage:  model.Usage{Model: "gpt-5.4", InputTokens: 10, InputIncludesCacheRead: true},
+			USD:    10,
+		}},
+	}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 1 || session.Events[0].Kind != model.EventUsage ||
+		session.Events[0].RecordRef.Path != path || session.Events[0].RecordRef.Offset != 4096 ||
+		session.Events[0].Usage == nil || session.Events[0].Usage.InputTokens != 10 {
+		t.Fatalf("LoadEvents().Events = %#v, want explicit row for unmatched ledger offset", session.Events)
+	}
+}
+
+func TestRestoreCodexEventLengthsReleasesSpeculativeSuffix(t *testing.T) {
+	session := &model.Session{Events: []model.Event{
+		{Kind: model.EventUser, Text: "retained"},
+		{Kind: model.EventAssistantText, Text: "discarded", Detail: &model.ToolDetail{Output: "large output"}},
+	}}
+	backing := session.Events
+
+	restoreCodexEventLengths(map[*model.Session]int{session: 1})
+
+	if len(session.Events) != 1 || cap(session.Events) != 1 {
+		t.Fatalf("restored events len/cap = %d/%d, want 1/1", len(session.Events), cap(session.Events))
+	}
+	if backing[1].Kind != "" || backing[1].Text != "" || backing[1].Detail != nil {
+		t.Fatalf("discarded backing event = %#v, want cleared", backing[1])
+	}
+}
+
+func TestLoadEventsTreatsBridgeLessSidecarAsActive(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-thread-scout.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent","agent_path":"/root/scout"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"agent_message","message":"Survey ready"}}`,
+		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 1 || session.Events[0].Kind != model.EventAssistantText ||
+		session.Events[0].Text != "Survey ready" || session.Events[0].Usage == nil {
+		t.Fatalf("LoadEvents().Events = %#v, want active bridge-less child timeline", session.Events)
 	}
 }
 
@@ -208,6 +573,50 @@ func TestParseUsesLastCumulativeTokenCount(t *testing.T) {
 	}
 }
 
+func TestParseFinalizesCleanRequestLedger(t *testing.T) {
+	turnContext := `{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`
+	tokenCount := `{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":120},"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"total_tokens":120}}}}`
+	path := filepath.Join(t.TempDir(), "rollout-ledger.jsonl")
+	if err := os.WriteFile(path, []byte(turnContext+"\n"+tokenCount+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	want := []model.RequestUsage{{
+		Offset: int64(len(turnContext) + 1),
+		Usage: model.Usage{
+			Model:                  "gpt-5.4",
+			InputTokens:            100,
+			OutputTokens:           20,
+			CacheReadTokens:        40,
+			InputIncludesCacheRead: true,
+		},
+		USD: 100,
+	}}
+	if !reflect.DeepEqual(session.Requests, want) {
+		t.Fatalf("Parse().Requests = %#v, want finalized ledger %#v", session.Requests, want)
+	}
+}
+
+func TestParseRecordsConsumedSourceSize(t *testing.T) {
+	content := `{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}` + "\n"
+	path := filepath.Join(t.TempDir(), "rollout-snapshot.jsonl")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if session.SourceSize != int64(len(content)) {
+		t.Fatalf("Parse().SourceSize = %d, want consumed byte length %d", session.SourceSize, len(content))
+	}
+}
+
 func TestCodexUsageCountsReasoningWithinOutput(t *testing.T) {
 	got := codexUsage("gpt-5.6-sol", tokenUsage{
 		OutputTokens:          100,
@@ -220,23 +629,6 @@ func TestCodexUsageCountsReasoningWithinOutput(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("codexUsage() = %#v, want %#v", got, want)
-	}
-}
-
-func TestCodexDisplayUsageCountsReasoningWithinOutput(t *testing.T) {
-	got := codexDisplayUsage(&tokenUsage{
-		InputTokens:           200,
-		OutputTokens:          100,
-		ReasoningOutputTokens: 40,
-		TotalTokens:           300,
-	})
-	want := &model.Usage{
-		InputTokens:            200,
-		OutputTokens:           100,
-		InputIncludesCacheRead: true,
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("codexDisplayUsage() = %#v, want %#v", got, want)
 	}
 }
 
@@ -838,6 +1230,14 @@ func TestParsePrefersCumulativeTotalWhenDeltasAreIncomplete(t *testing.T) {
 	}
 	if len(session.Usage) != 1 || session.Usage[0].InputTokens != 30 {
 		t.Fatalf("Parse().Usage = %#v, want final cumulative 30", session.Usage)
+	}
+	wantRequests := []model.RequestUsage{{
+		Offset: -1,
+		Usage:  model.Usage{Model: "gpt-5.4", InputTokens: 30, InputIncludesCacheRead: true},
+		USD:    30,
+	}}
+	if !reflect.DeepEqual(session.Requests, wantRequests) {
+		t.Fatalf("Parse().Requests = %#v, want aggregate fallback %#v", session.Requests, wantRequests)
 	}
 }
 
