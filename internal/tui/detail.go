@@ -729,7 +729,7 @@ func ownModelCostLines(session *model.Session) []string {
 			CacheCreation1hTokens: usage.CacheCreation1hTokens,
 		}.TotalTokens()
 		groups := costRateGroups(breakdown)
-		groupTokens := []int64{usage.InputTokens, cacheWrite, usage.CacheReadTokens, usage.OutputTokens}
+		groupTokens := []int64{usage.CacheReadTokens, cacheWrite, usage.InputTokens, usage.OutputTokens}
 		if priced {
 			for index, group := range groups {
 				if group.buckets.TotalTokens() != groupTokens[index] {
@@ -828,10 +828,11 @@ type costRateGroup struct {
 }
 
 func costRateGroups(breakdown model.CostBreakdown) []costRateGroup {
+	// Same order as the ↑read/write/input ↓output flow summary.
 	return []costRateGroup{
-		{label: "input", buckets: breakdown.Input},
-		{label: "cache write", buckets: breakdown.CacheWrite},
 		{label: "cache read", buckets: breakdown.CacheRead},
+		{label: "cache write", buckets: breakdown.CacheWrite},
+		{label: "input", buckets: breakdown.Input},
 		{label: "output", buckets: breakdown.Output},
 	}
 }

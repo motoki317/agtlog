@@ -10,9 +10,9 @@
 │                                                                                                                      │
 │  Own model costs · $0.84                                                                                             │
 │  claude-opus-4-8                                                                                                     │
-│    input        120k × $5/Mtok    = $0.60                                                                            │
-│    cache write  4000 × $6.25/Mtok = $0.03                                                                            │
 │    cache read    30k × $0.5/Mtok  = $0.01                                                                            │
+│    cache write  4000 × $6.25/Mtok = $0.03                                                                            │
+│    input        120k × $5/Mtok    = $0.60                                                                            │
 │    output       8000 × $25/Mtok   = $0.20                                                                            │
 │    subtotal                       = $0.84                                                                            │
 │  Both agents use the same rate table. ~ means the applied rate is not the logged model's own published rate.         │

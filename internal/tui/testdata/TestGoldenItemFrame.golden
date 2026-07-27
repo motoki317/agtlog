@@ -11,8 +11,8 @@
 │                                                                              │
 │Request                                                                       │
 │tokens  ↑32k/0/32k ↓4000 · ctx 64k                                            │
-│  input         32k × $5/Mtok   = $0.16                                       │
 │  cache read    32k × $0.5/Mtok = $0.016                                      │
+│  input         32k × $5/Mtok   = $0.16                                       │
 │  output       4000 × $25/Mtok  = $0.10                                       │
 │  total                         = $0.276                                      │
 │                                                                              │

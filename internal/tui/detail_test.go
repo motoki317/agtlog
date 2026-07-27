@@ -803,10 +803,10 @@ func TestInfoModelMathHandlesInclusiveCacheAndMissingPricing(t *testing.T) {
 			t.Errorf("Info model math missing %q:\n%s", want, text)
 		}
 	}
-	inputAt := strings.Index(text, "input        80")
 	readAt := strings.Index(text, "cache read   20")
+	inputAt := strings.Index(text, "input        80")
 	outputAt := strings.Index(text, "output       10")
-	if inputAt < 0 || readAt <= inputAt || outputAt <= readAt || strings.Contains(text, "effective") || strings.Contains(text, "/token") {
+	if readAt < 0 || inputAt <= readAt || outputAt <= inputAt || strings.Contains(text, "effective") || strings.Contains(text, "/token") {
 		t.Fatalf("Info model groups are out of order or retained a blended rate:\n%s", text)
 	}
 }
