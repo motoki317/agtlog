@@ -96,18 +96,18 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				Kind         string           `json:"kind"`
 				ThreadSource string           `json:"thread_source"`
 				Content      []codexTextBlock `json:"content"`
-				Summary      []codexTextBlock `json:"summary"`
+				// Codex reuses "summary" across payload variants with different
+				// shapes: an array of blocks under reasoning, a bare string under
+				// turn_context. Decoding it lazily keeps a turn_context line from
+				// failing the whole record, which would lose the model and
+				// mis-price the session. encoding/json does not guarantee the
+				// remaining fields are filled after a type error, so the shape
+				// must not conflict in the first place.
+				Summary json.RawMessage `json:"summary"`
 			} `json:"payload"`
 		}
-		if err := json.Unmarshal(line, &record); err != nil {
-			// Codex reuses field names across payload variants with different
-			// shapes (turn_context.summary is a string, reasoning.summary an
-			// array). encoding/json still fills every other field, so dropping
-			// the record would lose the model and mis-price the whole session.
-			var typeErr *json.UnmarshalTypeError
-			if !errors.As(err, &typeErr) {
-				return
-			}
+		if json.Unmarshal(line, &record) != nil {
+			return
 		}
 		recordRef := model.RecordRef{Path: path, Offset: offset, Length: length, Digest: sha256.Sum256(line)}
 		timestamp, _ := time.Parse(time.RFC3339Nano, record.Timestamp)
@@ -215,7 +215,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 					return
 				}
 			case "reasoning":
-				event.Kind, event.Text = model.EventThinking, joinCodexText(record.Payload.Summary)
+				event.Kind, event.Text = model.EventThinking, joinCodexText(codexTextBlocks(record.Payload.Summary))
 			case "function_call", "custom_tool_call":
 				event.Kind, event.CallID, event.ToolName = model.EventToolCall, record.Payload.CallID, record.Payload.Name
 				input := record.Payload.Arguments
@@ -498,6 +498,14 @@ func appendCodexSubagentEvent(root *model.Session, agentPath, agentID, activity 
 		}
 		parent = child
 	}
+}
+
+func codexTextBlocks(raw json.RawMessage) []codexTextBlock {
+	var blocks []codexTextBlock
+	if json.Unmarshal(raw, &blocks) != nil {
+		return nil
+	}
+	return blocks
 }
 
 func joinCodexText(blocks []codexTextBlock) string {
