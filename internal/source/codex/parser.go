@@ -2,7 +2,6 @@ package codex
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -89,7 +88,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	scanComplete := false
 	err = jsonl.ForEachContext(scanCtx, file, func(line []byte) {
 		var record logRecord
-		if json.Unmarshal(line, &record) != nil {
+		if jsonl.Unmarshal(line, &record) != nil {
 			return
 		}
 		if record.Type == "session_meta" && !metaSeen {
@@ -143,7 +142,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 				Type string `json:"type"`
 			} `json:"payload"`
 		}
-		if json.Unmarshal(line, &envelope) != nil {
+		if jsonl.Unmarshal(line, &envelope) != nil {
 			return
 		}
 		if timestamp, parseErr := time.Parse(time.RFC3339Nano, envelope.Timestamp); parseErr == nil {
@@ -159,7 +158,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 			return
 		}
 		var record logRecord
-		if json.Unmarshal(line, &record) != nil {
+		if jsonl.Unmarshal(line, &record) != nil {
 			return
 		}
 		second, validSecond := codexTimestampSecond(record.Timestamp)
@@ -195,7 +194,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 			(record.Payload.Type == "user_message" || record.Payload.Type == "agent_message") {
 			if session.Title == "" && record.Payload.Type == "user_message" {
 				var user userMessageRecord
-				if json.Unmarshal(line, &user) == nil {
+				if jsonl.Unmarshal(line, &user) == nil {
 					session.Title = titleFromUserMessage(user.Payload.Message)
 				}
 			}

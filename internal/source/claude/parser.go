@@ -203,22 +203,10 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 				PostTokens int64  `json:"postTokens"`
 			} `json:"compactMetadata"`
 		}
-		if json.Unmarshal(line, &record) != nil {
+		// One decode per record on the hot path: a record carries the tool's whole
+		// output, so every extra pass over the line rescans all of it.
+		if jsonl.Unmarshal(line, &record) != nil {
 			return
-		}
-		var markers struct {
-			IsMeta           bool            `json:"isMeta"`
-			IsCompactSummary bool            `json:"isCompactSummary"`
-			PromptSource     string          `json:"promptSource"`
-			Origin           json.RawMessage `json:"origin"`
-		}
-		// Advisory: a malformed marker must not drop an otherwise readable record.
-		_ = json.Unmarshal(line, &markers)
-		var origin *struct {
-			Kind string `json:"kind"`
-		}
-		if json.Unmarshal(markers.Origin, &origin) != nil {
-			origin = nil
 		}
 		recordRef := model.RecordRef{Path: session.Path, Offset: offset, Length: length, Digest: sha256.Sum256(line)}
 		timestamp, _ := time.Parse(time.RFC3339Nano, record.Timestamp)
@@ -240,6 +228,23 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 		}
 		if record.Type == "user" {
 			if text := userText(record.Message.Content); text != "" {
+				// Markers are read in their own pass, and only here: a malformed
+				// marker must not drop an otherwise readable record. Tool results
+				// are user records too but yield no text, so the records that reach
+				// this second pass are prompts — small, and a minority of the log.
+				var markers struct {
+					IsMeta           bool            `json:"isMeta"`
+					IsCompactSummary bool            `json:"isCompactSummary"`
+					PromptSource     string          `json:"promptSource"`
+					Origin           json.RawMessage `json:"origin"`
+				}
+				_ = jsonl.Unmarshal(line, &markers)
+				var origin *struct {
+					Kind string `json:"kind"`
+				}
+				if jsonl.Unmarshal(markers.Origin, &origin) != nil {
+					origin = nil
+				}
 				session.Events = append(session.Events, model.Event{
 					Timestamp: timestamp,
 					Kind:      model.EventUser,
@@ -260,7 +265,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 			Content   json.RawMessage `json:"content"`
 			IsError   bool            `json:"is_error"`
 		}
-		if json.Unmarshal(record.Message.Content, &blocks) != nil {
+		if jsonl.Unmarshal(record.Message.Content, &blocks) != nil {
 			return
 		}
 		turnStart := len(session.Events)
@@ -304,11 +309,16 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 					if call.Detail != nil && block.ToolUseID != "" {
 						call.Detail.Output = model.ElideEncrypted(claudeResultText(block.Content))
 					}
-					if agentID := toolResultAgentID(record.ToolUseResult); call.Kind == model.EventSubagent && agentID != "" {
-						if subagent := subagentByID(session.Subagents, agentID); subagent != nil {
-							delete(linkedSubagents, call.Subagent)
-							call.Subagent, call.AgentID = subagent, subagent.ID
-							linkedSubagents[subagent] = true
+					// Only a subagent result carries an agentId, and toolUseResult holds
+					// the tool's whole output — scanning it for every tool result would
+					// re-read most of the log.
+					if call.Kind == model.EventSubagent {
+						if agentID := toolResultAgentID(record.ToolUseResult); agentID != "" {
+							if subagent := subagentByID(session.Subagents, agentID); subagent != nil {
+								delete(linkedSubagents, call.Subagent)
+								call.Subagent, call.AgentID = subagent, subagent.ID
+								linkedSubagents[subagent] = true
+							}
 						}
 					}
 					event.Text = model.ElideEncrypted(claudeResultSummary(call.ToolName, event.Text, block.IsError))
@@ -395,14 +405,21 @@ func toolResultAgentID(result json.RawMessage) string {
 	var fields struct {
 		AgentID string `json:"agentId"`
 	}
-	_ = json.Unmarshal(result, &fields)
+	_ = jsonl.Unmarshal(result, &fields)
 	return fields.AgentID
 }
 
 func matchClaudeSubagent(subagents []*model.Session, input json.RawMessage, linked map[*model.Session]bool) *model.Session {
-	var fields map[string]string
-	_ = json.Unmarshal(input, &fields)
-	candidates := []string{fields["name"], fields["description"], fields["subagent_type"]}
+	// Named fields rather than map[string]string: a Task input carries other keys
+	// whose values are not strings, and decoding stops at the first one that does
+	// not fit the target, which would lose the name that identifies the subagent.
+	var fields struct {
+		Name         string `json:"name"`
+		Description  string `json:"description"`
+		SubagentType string `json:"subagent_type"`
+	}
+	_ = jsonl.Unmarshal(input, &fields)
+	candidates := []string{fields.Name, fields.Description, fields.SubagentType}
 	for _, subagent := range subagents {
 		if linked[subagent] {
 			continue
@@ -466,12 +483,12 @@ func claudeUserIsHarness(isMeta, isCompactSummary bool, promptSource string, ori
 
 func claudeToolInput(name string, input json.RawMessage) string {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(input, &fields) == nil {
+	if jsonl.Unmarshal(input, &fields) == nil {
 		if name == "Edit" {
 			var path, oldText, newText string
-			_ = json.Unmarshal(fields["file_path"], &path)
-			_ = json.Unmarshal(fields["old_string"], &oldText)
-			_ = json.Unmarshal(fields["new_string"], &newText)
+			_ = jsonl.Unmarshal(fields["file_path"], &path)
+			_ = jsonl.Unmarshal(fields["old_string"], &oldText)
+			_ = jsonl.Unmarshal(fields["new_string"], &newText)
 			return fmt.Sprintf("%s · +%d −%d", path, textLineCount(newText), textLineCount(oldText))
 		}
 		key := ""
@@ -485,7 +502,7 @@ func claudeToolInput(name string, input json.RawMessage) string {
 		}
 		if key != "" {
 			var value string
-			if json.Unmarshal(fields[key], &value) == nil {
+			if jsonl.Unmarshal(fields[key], &value) == nil {
 				return value
 			}
 		}
@@ -504,7 +521,7 @@ func claudeToolDetail(name string, input json.RawMessage) *model.ToolDetail {
 			Old string `json:"old_string"`
 			New string `json:"new_string"`
 		}
-		if json.Unmarshal(input, &fields) != nil {
+		if jsonl.Unmarshal(input, &fields) != nil {
 			detail.Input = model.ElideEncrypted(string(input))
 			return detail
 		}
@@ -513,7 +530,7 @@ func claudeToolDetail(name string, input json.RawMessage) *model.ToolDetail {
 		var fields struct {
 			Edits json.RawMessage `json:"edits"`
 		}
-		if json.Unmarshal(input, &fields) != nil {
+		if jsonl.Unmarshal(input, &fields) != nil {
 			detail.Input = model.ElideEncrypted(string(input))
 			return detail
 		}
@@ -527,7 +544,7 @@ func claudeToolDetail(name string, input json.RawMessage) *model.ToolDetail {
 		var fields struct {
 			Content string `json:"content"`
 		}
-		if json.Unmarshal(input, &fields) != nil {
+		if jsonl.Unmarshal(input, &fields) != nil {
 			detail.Input = model.ElideEncrypted(string(input))
 			return detail
 		}
@@ -536,7 +553,7 @@ func claudeToolDetail(name string, input json.RawMessage) *model.ToolDetail {
 		var fields struct {
 			Command string `json:"command"`
 		}
-		if json.Unmarshal(input, &fields) != nil {
+		if jsonl.Unmarshal(input, &fields) != nil {
 			detail.Input = model.ElideEncrypted(string(input))
 			return detail
 		}
@@ -547,7 +564,7 @@ func claudeToolDetail(name string, input json.RawMessage) *model.ToolDetail {
 			Offset   *int   `json:"offset"`
 			Limit    *int   `json:"limit"`
 		}
-		if json.Unmarshal(input, &fields) != nil {
+		if jsonl.Unmarshal(input, &fields) != nil {
 			detail.Input = model.ElideEncrypted(string(input))
 			return detail
 		}
@@ -682,7 +699,7 @@ func textLineCount(text string) int {
 
 func rawText(value json.RawMessage) string {
 	var text string
-	if json.Unmarshal(value, &text) == nil {
+	if jsonl.Unmarshal(value, &text) == nil {
 		return strings.Join(strings.Fields(text), " ")
 	}
 	return strings.Join(strings.Fields(string(value)), " ")
@@ -696,7 +713,7 @@ func claudeResultText(content json.RawMessage) string {
 	var output strings.Builder
 	if raw[0] == '"' {
 		var text string
-		if json.Unmarshal(raw, &text) != nil {
+		if jsonl.Unmarshal(raw, &text) != nil {
 			return string(content)
 		}
 		output.WriteString(text)
@@ -705,19 +722,15 @@ func claudeResultText(content json.RawMessage) string {
 	if raw[0] != '[' {
 		return string(content)
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	if _, err := decoder.Token(); err != nil {
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if jsonl.Unmarshal(raw, &blocks) != nil {
 		return string(content)
 	}
 	first := true
-	for decoder.More() {
-		var block struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
-		}
-		if decoder.Decode(&block) != nil {
-			return string(content)
-		}
+	for _, block := range blocks {
 		if block.Type != "text" {
 			continue
 		}
@@ -726,9 +739,6 @@ func claudeResultText(content json.RawMessage) string {
 		}
 		output.WriteString(block.Text)
 		first = false
-	}
-	if _, err := decoder.Token(); err != nil {
-		return string(content)
 	}
 	return output.String()
 }
@@ -811,7 +821,7 @@ func sessionIDFromFile(path string) string {
 		var envelope struct {
 			SessionID string `json:"sessionId"`
 		}
-		if json.Unmarshal(line, &envelope) == nil {
+		if jsonl.Unmarshal(line, &envelope) == nil {
 			sessionID = envelope.SessionID
 		}
 	})
@@ -837,7 +847,7 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 			Type      string `json:"type"`
 			Timestamp string `json:"timestamp"`
 		}
-		if json.Unmarshal(line, &envelope) != nil {
+		if jsonl.Unmarshal(line, &envelope) != nil {
 			return
 		}
 		if timestamp, parseErr := time.Parse(time.RFC3339Nano, envelope.Timestamp); parseErr == nil {
@@ -853,14 +863,14 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 			return
 		}
 		var record logRecord
-		if json.Unmarshal(line, &record) != nil {
+		if jsonl.Unmarshal(line, &record) != nil {
 			return
 		}
 		if record.Type == "ai-title" {
 			session.Title = model.CleanTitle(record.AITitle)
 		} else if record.Type == "user" {
 			var content userContentRecord
-			if json.Unmarshal(line, &content) == nil {
+			if jsonl.Unmarshal(line, &content) == nil {
 				if text := userText(content.Message.Content); text != "" {
 					messages++
 					if session.Title == "" {
@@ -961,7 +971,7 @@ func assistantTextBlocks(content json.RawMessage) int {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
-	if json.Unmarshal(content, &blocks) != nil {
+	if jsonl.Unmarshal(content, &blocks) != nil {
 		return 0
 	}
 	count := 0
@@ -996,14 +1006,14 @@ func validUsage(usage model.Usage) bool {
 
 func userText(content json.RawMessage) string {
 	var text string
-	if json.Unmarshal(content, &text) == nil {
+	if jsonl.Unmarshal(content, &text) == nil {
 		return model.CleanTimelineText(text)
 	}
 	var blocks []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
-	if json.Unmarshal(content, &blocks) != nil {
+	if jsonl.Unmarshal(content, &blocks) != nil {
 		return ""
 	}
 	parts := make([]string, 0, len(blocks))

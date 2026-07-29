@@ -106,7 +106,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				Summary json.RawMessage `json:"summary"`
 			} `json:"payload"`
 		}
-		if json.Unmarshal(line, &record) != nil {
+		if jsonl.Unmarshal(line, &record) != nil {
 			return
 		}
 		recordRef := model.RecordRef{Path: path, Offset: offset, Length: length, Digest: sha256.Sum256(line)}
@@ -502,7 +502,7 @@ func appendCodexSubagentEvent(root *model.Session, agentPath, agentID, activity 
 
 func codexTextBlocks(raw json.RawMessage) []codexTextBlock {
 	var blocks []codexTextBlock
-	if json.Unmarshal(raw, &blocks) != nil {
+	if jsonl.Unmarshal(raw, &blocks) != nil {
 		return nil
 	}
 	return blocks
@@ -527,30 +527,22 @@ func codexOutputText(output json.RawMessage) string {
 	}
 	if raw[0] == '"' {
 		var text string
-		if json.Unmarshal(raw, &text) != nil {
+		if jsonl.Unmarshal(raw, &text) != nil {
 			return strings.TrimSpace(string(output))
 		}
 		return text
 	}
 	if raw[0] == '[' {
-		decoder := json.NewDecoder(bytes.NewReader(raw))
-		if _, err := decoder.Token(); err == nil {
+		var blocks []codexTextBlock
+		if jsonl.Unmarshal(raw, &blocks) == nil {
 			var text strings.Builder
-			first := true
-			for decoder.More() {
-				var block codexTextBlock
-				if decoder.Decode(&block) != nil {
-					return strings.TrimSpace(string(output))
-				}
-				if !first {
+			for index, block := range blocks {
+				if index > 0 {
 					text.WriteByte('\n')
 				}
 				text.WriteString(block.Text)
-				first = false
 			}
-			if _, err := decoder.Token(); err == nil {
-				return text.String()
-			}
+			return text.String()
 		}
 	}
 	return strings.TrimSpace(string(output))
@@ -573,7 +565,7 @@ func codexToolInput(name, input string) string {
 		return fmt.Sprintf("+%d −%d", added, removed)
 	}
 	var fields map[string]json.RawMessage
-	if json.Unmarshal([]byte(input), &fields) == nil {
+	if jsonl.Unmarshal([]byte(input), &fields) == nil {
 		key := ""
 		switch name {
 		case "exec_command":
@@ -583,7 +575,7 @@ func codexToolInput(name, input string) string {
 		}
 		if key != "" {
 			var value string
-			if json.Unmarshal(fields[key], &value) == nil {
+			if jsonl.Unmarshal(fields[key], &value) == nil {
 				return value
 			}
 		}
@@ -604,7 +596,7 @@ func codexToolDetail(name, input string) *model.ToolDetail {
 		var fields struct {
 			Command string `json:"cmd"`
 		}
-		if json.Unmarshal([]byte(input), &fields) == nil {
+		if jsonl.Unmarshal([]byte(input), &fields) == nil {
 			detail.Input = codexElideEncrypted(fields.Command)
 		} else {
 			detail.Input = codexElideEncrypted(input)

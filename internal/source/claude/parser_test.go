@@ -563,6 +563,34 @@ func TestLoadEventsLinksAndLoadsSubagentAtSpawn(t *testing.T) {
 	}
 }
 
+// A Task input carries keys beyond the identifying ones, and their values are
+// not all strings. Decoding stops at the first value that does not fit the
+// target, so a non-string ahead of subagent_type must not cost the match.
+func TestLoadEventsMatchesSpawnPastNonStringToolInput(t *testing.T) {
+	dir := t.TempDir()
+	parentPath := filepath.Join(dir, "session-detail.jsonl")
+	for _, name := range []string{"builder", "scout"} {
+		path := filepath.Join(dir, "agent-"+name+".jsonl")
+		if err := os.WriteFile(path, []byte(`{"type":"user","message":{"content":"Work"}}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parent := `{"type":"assistant","timestamp":"2026-01-02T03:00:01Z","message":{"content":[{"type":"tool_use","id":"tool-agent","name":"Agent","input":{"run_in_background":true,"max_turns":12,"subagent_type":"Scout"}}]}}` + "\n"
+	if err := os.WriteFile(parentPath, []byte(parent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	builder := &model.Session{ID: "builder", Title: "Build", Path: filepath.Join(dir, "agent-builder.jsonl"), Agent: model.AgentClaude}
+	scout := &model.Session{ID: "scout", Title: "Scout", Path: filepath.Join(dir, "agent-scout.jsonl"), Agent: model.AgentClaude}
+	session := &model.Session{Path: parentPath, Agent: model.AgentClaude, Subagents: []*model.Session{builder, scout}}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if session.Events[0].Subagent != scout {
+		t.Fatalf("spawn linked to %#v, want scout matched by subagent_type", session.Events[0].Subagent)
+	}
+}
+
 func TestLoadEventsUsesAgentIDToDisambiguateSpawn(t *testing.T) {
 	dir := t.TempDir()
 	parentPath := filepath.Join(dir, "session-detail.jsonl")
