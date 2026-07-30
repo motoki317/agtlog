@@ -141,22 +141,23 @@ The header panel uses three lines:
 
 The timeline is one flat chronological list, expanded by default. A session is one continuous log,
 so every event — prompt, thinking summary, tool call, compaction, system note, unattributed usage,
-subagent spawn — is a sibling row. Request rows state their tokens, cost, and the context window
-they were sent with. Usage fallback rows include the model; aggregate `session usage` rows omit
-context because they do not represent one request:
+subagent spawn — is a sibling row. Request rows state their tokens, cost, and total context after
+their output. Usage fallback rows include the model; aggregate `session usage` rows omit context
+because they do not represent one request:
 
 ```text
 ▸ you: Investigate the failing watcher                                    ctx 62k
-  ◇ thinking: The lock is held across the reload      ↑61k/0/1200 ↓340 · ctx 62k
-▾ ⚙ Edit(watch.go) → updated · 0.4s                  ↑62k/0/900 ↓1100 · ctx 63k
+  ◇ thinking: The lock is held across the reload      ↑61k/0/1200 ↓340 · ctx 63k
+▾ ⚙ Edit(watch.go) → updated · 0.4s                  ↑62k/0/900 ↓1100 · ctx 64k
     output: watcher tests passed
-  codex: The race is fixed                           ↑63k/0/800 ↓2000 · ctx 64k
-  ◇ unattributed usage (gpt-5.6)                     ↑64k/0/0 ↓800 · ctx 64k
+  codex: The race is fixed                           ↑63k/0/800 ↓2000 · ctx 66k
+  ◇ unattributed usage (gpt-5.6)                     ↑64k/0/0 ↓800 · ctx 65k
   ⑃ Task(inspect watcher) opus-4.8                              420k · $1.02
 ```
 
-A user prompt bills nothing itself, so its row reports only the window the request it triggered was
-sent with. Reading down, the context column therefore only grows until a compaction resets it.
+A user prompt bills nothing itself, so its row reports the starting context of the request it
+triggered. Each billed request then reports its post-output total. These request-local figures can
+fall without a compaction; a compaction row reports its logged post-compaction value.
 When a billed request has no eligible content row, a muted `unattributed usage` row carries its
 model, tokens, cost, and context. If cumulative usage cannot be partitioned safely into request
 deltas, ordinary request rows remain unpriced and one `session usage` row per model carries the
@@ -200,10 +201,10 @@ event, or usage event opens a pushed item view. Item views use the Info tab's se
 and order: Event, Request when the row carries usage, kind-specific content, then Raw when the row
 has a source record.
 Event presents metadata as aligned label and value columns. Request shows token flow, request
-context where one exists, and the same per-bucket rate terms used by Info before closing with a
-precise total. A substituted rate names both the published stand-in and the logged model before
-the arithmetic. Aggregate usage identifies itself as session-level fallback usage and carries no
-request context.
+context after output where one exists, and the same per-bucket rate terms used by Info before
+closing with a precise total. A substituted rate names both the published stand-in and the logged
+model before the arithmetic. Aggregate usage identifies itself as session-level fallback usage and
+carries no request context.
 
 A tool item shows its full Input, Diff, Output, and Result summary sections, bounded only by the
 model's per-field limit rather than the timeline preview cap. Other content sections use Message,

@@ -1894,14 +1894,14 @@ func TestTimelineIsOneFlatChronologicalList(t *testing.T) {
 		got = append(got, row{strings.TrimSpace(line.text), line.metrics})
 	}
 	// Every event is a sibling at one indent, and each row states its own request:
-	// the tool reaching 25k of context, the reply reaching 40k. The subagent keeps
-	// its own session totals, which the parent log never bills.
+	// the tool ending at 26k of context, the reply ending at 44k. The subagent
+	// keeps its own session totals, which the parent log never bills.
 	want := []row{
 		{"you: Chart the route", "ctx 25k"},
 		{"◇ thinking: Compare routes", ""},
-		{"⚙ Read(/workspace/lunar/map.go)", "↑20k/0/5000 ↓1000 · $0.02 · ctx 25k"},
+		{"⚙ Read(/workspace/lunar/map.go)", "↑20k/0/5000 ↓1000 · $0.02 · ctx 26k"},
 		{"⑃ Task(Scout ridge) opus-4.8", "45k · $0.32"},
-		{"claude: Route ready", "↑37k/0/3000 ↓4000 · ctx 40k"},
+		{"claude: Route ready", "↑37k/0/3000 ↓4000 · ctx 44k"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("timeline rows = %d, want %d:\n%s", len(got), len(want), strings.Join(timelineLineTexts(detail.lines), "\n"))
@@ -1946,14 +1946,13 @@ func TestHarnessPromptKeepsNextRequestContext(t *testing.T) {
 	}
 }
 
-// TestContextColumnNeverShrinksDownAnExpandedTimeline pins the reading order the
-// context column promises: every row reports the window it was sent with, so an
-// expanded timeline grows top to bottom and a grouped row never overstates where
-// its own children start.
+// TestContextColumnNeverShrinksDownAnExpandedTimeline pins how a sequential
+// expanded timeline reads: each prompt reports the next request's starting
+// context, followed by each request's post-output total.
 func TestContextColumnNeverShrinksDownAnExpandedTimeline(t *testing.T) {
 	request := func(kind model.EventKind, context int64) model.Event {
 		return model.Event{Kind: kind, ToolName: "Read", Text: "Route ready",
-			Usage: &model.Usage{InputTokens: 1_000, OutputTokens: 500, CacheReadTokens: context - 1_000}}
+			Usage: &model.Usage{InputTokens: 1_000, OutputTokens: 1_000, CacheReadTokens: context - 1_000}}
 	}
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/lunar/session.jsonl", Events: []model.Event{
 		{Kind: model.EventUser, Text: "Chart the route"},
@@ -1973,9 +1972,9 @@ func TestContextColumnNeverShrinksDownAnExpandedTimeline(t *testing.T) {
 		}
 		got = append(got, context)
 	}
-	// Each prompt borrows the window of the request it triggered, then every request
-	// reports its own: 10k and 20k in the first turn, 30k and 40k in the second.
-	want := []string{"10k", "10k", "20k", "30k", "30k", "40k"}
+	// Each prompt borrows the starting context of the request it triggered, then
+	// each request reports its post-output total.
+	want := []string{"10k", "11k", "21k", "30k", "31k", "41k"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("context column = %v, want %v:\n%s", got, want, strings.Join(timelineLineTexts(detail.lines), "\n"))
 	}
@@ -2004,14 +2003,14 @@ func TestEventRowsShowTheirOwnRequestMetrics(t *testing.T) {
 			reply = line
 		}
 	}
-	// Each request's metrics ride its row's right-aligned column. The tool call heads
-	// a request reaching 60k of context; the reply heads one reaching 70k.
+	// Each request's metrics ride its row's right-aligned column. The tool call ends
+	// at 60k of context after rounding; the reply ends at 73k.
 	for _, want := range []string{"↓400", "ctx 60k"} {
 		if !strings.Contains(tool.metrics, want) {
 			t.Fatalf("tool metrics = %q, want %q", tool.metrics, want)
 		}
 	}
-	for _, want := range []string{"↓3134", "ctx 70k"} {
+	for _, want := range []string{"↓3134", "ctx 73k"} {
 		if !strings.Contains(reply.metrics, want) {
 			t.Fatalf("reply metrics = %q, want %q", reply.metrics, want)
 		}
@@ -2091,7 +2090,7 @@ func TestUsageRowShowsStandardMetricsWithSystemPromptRole(t *testing.T) {
 		!strings.Contains(lines[0].text, "unattributed usage") ||
 		!strings.Contains(lines[0].text, "gpt-5.6") ||
 		!strings.Contains(lines[0].metrics, "↓20") ||
-		!strings.Contains(lines[0].metrics, "ctx 100") ||
+		!strings.Contains(lines[0].metrics, "ctx 120") ||
 		!strings.Contains(lines[0].metrics, "~$0.01") {
 		t.Fatalf("usage row = %#v, want system row with request metrics", lines)
 	}
@@ -4489,7 +4488,7 @@ func TestItemRequestSectionShowsAuditableRateArithmetic(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Request",
-		"tokens  ↑1000/0/200 ↓20 · ctx 1200",
+		"tokens  ↑1000/0/200 ↓20 · ctx 1220",
 		"input         200 × $5/Mtok   = $0.001",
 		"cache read   1000 × $0.5/Mtok = $0.0005",
 		"output         20 × $30/Mtok  = $0.0006",
@@ -4509,6 +4508,11 @@ func TestItemRequestSectionShowsAuditableRateArithmetic(t *testing.T) {
 		} else if column != equalsColumn {
 			t.Errorf("Request arithmetic equals columns = %d and %d:\n%s", equalsColumn, column, text)
 		}
+	}
+
+	outputOnly := model.Event{Usage: &model.Usage{OutputTokens: 20}}
+	if text := itemLinesText(itemRequestLines(outputOnly, model.AgentCodex)); !strings.Contains(text, "ctx 20") {
+		t.Fatalf("output-only Request section omitted post-output context:\n%s", text)
 	}
 }
 

@@ -9,7 +9,7 @@
 │   12m ▾ ⚙ Read(/workspace/starship/map.go) · 400ms                           │
 │         output:                                                              │
 │         map ready                                                            │
-│   11m   ◇ unattributed usage (gpt-5.6)     ↑0/0/120k ↓8000 · $0.84 · ctx 120k│
+│   11m   ◇ unattributed usage (gpt-5.6)     ↑0/0/120k ↓8000 · $0.84 · ctx 128k│
 │   11m   codex: Survey delegated                                              │
 │›  10m   ⑃ Task(Scout terrain) opus-4.8                            45k · $0.32│
 │                                                                              │

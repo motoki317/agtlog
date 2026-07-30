@@ -318,8 +318,8 @@ func itemRequestLines(event model.Event, agent model.AgentKind) []detailLine {
 		return nil
 	}
 	tokenLine := "tokens  " + formatTokenFlow(*event.Usage)
-	if !event.UsageAggregate && event.Usage.PromptTokens() > 0 {
-		tokenLine += " · ctx " + humanTokens(event.Usage.PromptTokens())
+	if !event.UsageAggregate && event.Usage.TotalTokens() > 0 {
+		tokenLine += " · ctx " + humanTokens(event.Usage.TotalTokens())
 	}
 	lines := []detailLine{{text: detailPlainText(tokenLine), role: detailRow, agent: agent}}
 	if event.PricingModel != "" {

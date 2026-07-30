@@ -1329,8 +1329,8 @@ func nextRequestContext(events []model.Event, userIndex int) int64 {
 	return 0
 }
 
-// contextPart renders the window a request reached, omitted when the log carries
-// no usage for it.
+// contextPart renders a positive context-token figure. Request rows pass their
+// post-output total; prompt rows pass the next request's starting context.
 func contextPart(tokens int64) (string, bool) {
 	if tokens <= 0 {
 		return "", false
@@ -1348,8 +1348,8 @@ func costPart(usd float64, priced, estimated bool) (string, bool) {
 }
 
 // eventMetricParts renders one billed request's own figures for the event that
-// carries its usage: the input/output breakdown, priced cost, and the context the
-// request reached (which grows through the turn and drops after a compaction).
+// carries its usage: the input/output breakdown, priced cost, and the context
+// after its output.
 func eventMetricParts(event model.Event) []string {
 	if event.Usage == nil {
 		return nil
@@ -1360,7 +1360,7 @@ func eventMetricParts(event model.Event) []string {
 		parts = append(parts, part)
 	}
 	if !event.UsageAggregate {
-		if part, ok := contextPart(usage.PromptTokens()); ok {
+		if part, ok := contextPart(usage.TotalTokens()); ok {
 			parts = append(parts, part)
 		}
 	}
