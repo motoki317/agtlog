@@ -873,8 +873,8 @@ func sessionCostTreeWithLabels(session *model.Session, gross bool) []string {
 }
 
 // appendSessionCostChildren renders the own-versus-subagents split under a node.
-// The own row appears only when subagents share the total; without subagents own
-// equals the node's total, so a lone own row would just repeat its parent line.
+// Leaf nodes omit a redundant own row, and group nodes omit it because their
+// totals consist only of child sessions.
 func appendSessionCostChildren(lines []string, session *model.Session, prefix string, gross bool) []string {
 	if len(session.Subagents) == 0 {
 		return lines
@@ -883,8 +883,10 @@ func appendSessionCostChildren(lines []string, session *model.Session, prefix st
 	if gross {
 		ownLabel = "gross own"
 	}
-	// Subagents always follow the own row, so it is never the last child.
-	lines = append(lines, fmt.Sprintf("%s├─ %s · %s / %s", prefix, ownLabel, formatTokenFlow(ownSessionFlowUsage(session)), formatCost(session.Cost)))
+	if !session.Group {
+		// Subagents follow the own row, so it is never the last child.
+		lines = append(lines, fmt.Sprintf("%s├─ %s · %s / %s", prefix, ownLabel, formatTokenFlow(ownSessionFlowUsage(session)), formatCost(session.Cost)))
+	}
 	for index, child := range session.Subagents {
 		connector, childPrefix := "├─ ", prefix+"│  "
 		if index == len(session.Subagents)-1 {
@@ -1491,11 +1493,18 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 		}
 		childKey := key + "/subagent/" + sessionIdentity(event.Subagent)
 		title := firstLine(event.ToolInput)
+		toolName := "Task"
+		if event.ToolName == "Workflow" {
+			toolName = event.ToolName
+			if workflowName := firstLine(event.Subagent.Title); workflowName != "" {
+				title = workflowName
+			}
+		}
 		if title == "" {
 			title = firstLine(event.Subagent.Title)
 		}
 		title = ansi.Truncate(title, 28, "…")
-		typeLabel := glyphSubagent + " Task"
+		typeLabel := glyphSubagent + " " + toolName
 		text := padding + childMarker + typeLabel + "(" + title + ")"
 		if model := terminalText(shortModels(event.Subagent), 96); model != "" {
 			text += " " + model

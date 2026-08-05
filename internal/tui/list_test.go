@@ -323,6 +323,15 @@ func TestSessionListOmitsTokensAndKeepsSubagentCount(t *testing.T) {
 	}
 }
 
+func TestSessionListExcludesWorkflowGroupsFromSubagentCount(t *testing.T) {
+	group := &model.Session{ID: "wf-river-run", Group: true, Subagents: []*model.Session{{ID: "mapper"}, {ID: "reviewer"}}}
+	session := &model.Session{ID: "session-workflow", Agent: model.AgentClaude, Subagents: []*model.Session{group}}
+
+	if got := subagentCount(session); got != 2 {
+		t.Fatalf("subagentCount() = %d, want two agents excluding workflow group", got)
+	}
+}
+
 func TestNumericCellsFitStandardColumns(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	now := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)

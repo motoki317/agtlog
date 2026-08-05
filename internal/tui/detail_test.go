@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -1909,6 +1910,44 @@ func TestTimelineIsOneFlatChronologicalList(t *testing.T) {
 	for index, line := range got {
 		if line != want[index] {
 			t.Errorf("row %d = %+v, want %+v", index, line, want[index])
+		}
+	}
+}
+
+func TestTimelineLabelsWorkflowAndTaskSubagents(t *testing.T) {
+	direct := &model.Session{ID: "direct-scout", Agent: model.AgentClaude, Title: "Inspect shoreline"}
+	group := &model.Session{ID: "wf-river-run", Agent: model.AgentClaude, Title: "River survey", Group: true}
+	session := &model.Session{ID: "session-workflow", Agent: model.AgentClaude, Subagents: []*model.Session{direct, group}, Events: []model.Event{
+		{Kind: model.EventSubagent, ToolName: "Agent", ToolInput: "Inspect shoreline", Subagent: direct},
+		{Kind: model.EventSubagent, ToolName: "Workflow", ToolInput: `{"workflow":"unresolved-input"}`, Subagent: group},
+	}}
+	detail := newDetailState(session, 100, 20, newStyles())
+	text := strings.Join(timelineLineTexts(detail.lines), "\n")
+	if !strings.Contains(text, "Task(Inspect shoreline)") {
+		t.Fatalf("Task row changed:\n%s", text)
+	}
+	if !strings.Contains(text, "Workflow(River survey)") || strings.Contains(text, "Task({\"workflow\"") {
+		t.Fatalf("Workflow row did not use its type and linked title:\n%s", text)
+	}
+}
+
+func TestWorkflowGroupCostTreeOmitsOwnAndRollsUpChildren(t *testing.T) {
+	first := &model.Session{ID: "mapper", Agent: model.AgentClaude, Usage: []model.Usage{{InputTokens: 40, OutputTokens: 10}}, Cost: model.Cost{USD: 0.10}}
+	second := &model.Session{ID: "reviewer", Agent: model.AgentClaude, Usage: []model.Usage{{InputTokens: 20, OutputTokens: 5}}, Cost: model.Cost{USD: 0.20}}
+	group := &model.Session{ID: "wf-river-run", Agent: model.AgentClaude, Group: true, Subagents: []*model.Session{first, second}}
+	if got := group.TotalUsage(); got.InputTokens != 60 || got.OutputTokens != 15 {
+		t.Fatalf("group usage = %#v, want child sum", got)
+	}
+	if got := group.TotalCost().USD; math.Abs(got-0.30) > 1e-12 {
+		t.Fatalf("group cost = %v, want child sum 0.30", got)
+	}
+	text := strings.Join(sessionCostTree(group), "\n")
+	if strings.Contains(text, "own ·") {
+		t.Fatalf("workflow group rendered a synthetic own row:\n%s", text)
+	}
+	for _, want := range []string{"↑0/0/60 ↓15 / $0.30", "subagent mapper", "subagent reviewer"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("workflow group cost tree missing %q:\n%s", want, text)
 		}
 	}
 }

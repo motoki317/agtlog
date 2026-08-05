@@ -262,11 +262,7 @@ func sessionIdentity(session *model.Session) string {
 }
 
 func subagentCount(session *model.Session) int {
-	total := 0
-	for _, subagent := range session.Subagents {
-		total += 1 + subagentCount(subagent)
-	}
-	return total
+	return session.DescendantAgentCount()
 }
 
 func shortModels(session *model.Session) string {
