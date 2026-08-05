@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-03-04T05:01:00Z","sessionId":"session-expedition","agentId":"delta","cwd":"/workspace/coastal-atlas","message":{"content":"# Shared expedition brief\nUse the verified nautical charts\n# Survey the delta marsh"}}
+{"type":"assistant","timestamp":"2026-03-04T05:02:00Z","sessionId":"session-expedition","agentId":"delta","requestId":"request-delta","message":{"id":"message-delta","model":"claude-opus-4-8","usage":{"input_tokens":2,"output_tokens":1}}}

@@ -1642,6 +1642,19 @@ func TestSubagentsRowsShowAgeAndDropItBeforeUsage(t *testing.T) {
 	}
 }
 
+func TestSubagentsRendersModelessWorkflowGroup(t *testing.T) {
+	group := &model.Session{
+		ID: "wf-expedition", Agent: model.AgentClaude, Title: "Coastal expedition", Group: true,
+		Subagents: []*model.Session{{ID: "observer", Agent: model.AgentClaude, Title: "Observe the inlet"}},
+	}
+	detail := newDetailState(&model.Session{ID: "route", Subagents: []*model.Session{group}}, 100, 14, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+
+	if len(detail.lines) < 2 || !strings.Contains(detail.lines[1].text, "—") {
+		t.Fatalf("modeless workflow row = %#v, want model placeholder", detail.lines)
+	}
+}
+
 func TestSubagentsHeaderNamesAndAlignsColumns(t *testing.T) {
 	now := time.Date(2026, 1, 2, 6, 0, 0, 0, time.UTC)
 	child := &model.Session{

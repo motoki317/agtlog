@@ -336,6 +336,22 @@ func TestCleanTitleBoundsRepeatedClosingTags(t *testing.T) {
 	}
 }
 
+func TestCleanUniqueTitleUsesFirstUnsharedLine(t *testing.T) {
+	value := "# Shared expedition brief\n\n## Map the eastern inlet\nIgnore later detail"
+	shared := map[string]bool{"Shared expedition brief": true}
+	if got := CleanUniqueTitle(value, shared); got != "Map the eastern inlet" {
+		t.Fatalf("CleanUniqueTitle() = %q, want first unshared cleaned line", got)
+	}
+}
+
+func TestCleanUniqueTitleFallsBackToFirstTitle(t *testing.T) {
+	value := "# Shared expedition brief\n## Shared survey method"
+	shared := map[string]bool{"Shared expedition brief": true, "Shared survey method": true}
+	if got := CleanUniqueTitle(value, shared); got != CleanTitle(value) {
+		t.Fatalf("CleanUniqueTitle() = %q, want existing title %q", got, CleanTitle(value))
+	}
+}
+
 func TestBoundedDetailTextKeepsBothEnds(t *testing.T) {
 	value := "first\n" + strings.Repeat("x", 10_000) + "\nlast"
 	got := BoundedDetailText(value)

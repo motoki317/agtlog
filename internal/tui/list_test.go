@@ -861,6 +861,13 @@ func TestShortModelsUsesCostliestModel(t *testing.T) {
 	}
 }
 
+func TestShortModelsHandlesModelessWorkflowGroup(t *testing.T) {
+	group := &model.Session{Group: true, Subagents: []*model.Session{{ID: "observer"}}}
+	if got := shortModels(group); got != "—" {
+		t.Fatalf("shortModels() = %q, want modeless workflow placeholder", got)
+	}
+}
+
 func TestMissingPricingIsFlaggedInRowAndFooter(t *testing.T) {
 	session := &model.Session{
 		ID: "lunar", Agent: model.AgentClaude, Project: "starship", Models: []string{"unknown-model"},

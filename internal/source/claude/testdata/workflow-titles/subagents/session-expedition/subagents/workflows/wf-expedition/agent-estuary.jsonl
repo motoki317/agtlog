@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-03-04T05:01:10Z","sessionId":"session-expedition","agentId":"estuary","cwd":"/workspace/coastal-atlas","message":{"content":"# Shared expedition brief\nUse the verified nautical charts\n# Survey the estuary mouth"}}
+{"type":"assistant","timestamp":"2026-03-04T05:02:10Z","sessionId":"session-expedition","agentId":"estuary","requestId":"request-estuary","message":{"id":"message-estuary","model":"claude-fable-5","usage":{"input_tokens":3,"output_tokens":2}}}

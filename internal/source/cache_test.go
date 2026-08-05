@@ -82,6 +82,24 @@ func TestRegistryReusesUnchangedCachedSummary(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsClaudeParserV15CacheFingerprint(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
+	registry.storeCached(adapter, path, "claude-parser-v15:pricing", &model.Session{ID: "cached-session"}, nil)
+
+	if _, _, ok := registry.loadCached(adapter, path, "claude-parser-v16:pricing"); ok {
+		t.Fatal("loadCached() accepted a claude-parser-v15 entry under v16")
+	}
+	if cacheVersion != 4 {
+		t.Fatalf("cacheVersion = %d, want unchanged schema version 4", cacheVersion)
+	}
+}
+
 func TestRegistrySkipsOversizedSummaryCacheEntry(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "oversized.jsonl")

@@ -137,15 +137,17 @@ func NewParser(calculator cost.Calculator) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v15:" + p.calculator.Fingerprint()
+	return "claude-parser-v16:" + p.calculator.Fingerprint()
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
-	return p.parse(path, 0, make(map[string]bool), nil)
+	session, _, err := p.parse(path, 0, make(map[string]bool), nil)
+	return session, err
 }
 
 func (p Parser) ParseWithDiagnostics(path string, report func(string, error)) (*model.Session, error) {
-	return p.parse(path, 0, make(map[string]bool), report)
+	session, _, err := p.parse(path, 0, make(map[string]bool), report)
+	return session, err
 }
 
 func (p Parser) LoadEvents(ctx context.Context, session *model.Session) error {
@@ -805,32 +807,35 @@ func claudeResultText(content json.RawMessage) string {
 }
 
 const maxSubagentDepth = 64
+const maxRetainedTitlePromptBytes = 16 << 10
+const maxRetainedTitlePromptLines = 128
 
-func (p Parser) parse(path string, depth int, visited map[string]bool, report func(string, error)) (*model.Session, error) {
+func (p Parser) parse(path string, depth int, visited map[string]bool, report func(string, error)) (*model.Session, string, error) {
 	if depth > maxSubagentDepth {
-		return nil, fmt.Errorf("subagent nesting exceeds %d levels", maxSubagentDepth)
+		return nil, "", fmt.Errorf("subagent nesting exceeds %d levels", maxSubagentDepth)
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, errors.New("session path is not a regular file")
+		return nil, "", errors.New("session path is not a regular file")
 	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	if visited[absolute] {
-		return nil, errors.New("subagent cycle detected")
+		return nil, "", errors.New("subagent cycle detected")
 	}
 	visited[absolute] = true
 	defer delete(visited, absolute)
 
-	session, workflowNames, err := p.parseFile(path)
+	session, workflowNames, titlePrompt, err := p.parseFile(path)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
+	titlePrompts := make(map[*model.Session]string)
 	subagentDir := filepath.Join(strings.TrimSuffix(path, filepath.Ext(path)), "subagents")
 	if info, statErr := os.Lstat(subagentDir); statErr == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
 		groups := make(map[string]*model.Session)
@@ -851,7 +856,7 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 					return filepath.SkipDir
 				}
 				if subagentPath != subagentDir && subagentTranscriptCandidate(subagentPath, subagentDir) {
-					if _, parseErr := p.parse(subagentPath, depth+1, visited, report); parseErr != nil && report != nil {
+					if _, _, parseErr := p.parse(subagentPath, depth+1, visited, report); parseErr != nil && report != nil {
 						report(subagentPath, parseErr)
 					}
 					return filepath.SkipDir
@@ -862,12 +867,15 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 				return nil
 			}
 			parentDir := filepath.Dir(subagentPath)
-			subagent, parseErr := p.parse(subagentPath, depth+1, visited, report)
+			subagent, subagentTitlePrompt, parseErr := p.parse(subagentPath, depth+1, visited, report)
 			if parseErr != nil {
 				if report != nil {
 					report(subagentPath, parseErr)
 				}
 				return nil
+			}
+			if subagentTitlePrompt != "" {
+				titlePrompts[subagent] = subagentTitlePrompt
 			}
 			if parentDir == subagentDir {
 				children = append(children, subagent)
@@ -888,7 +896,7 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 			return nil
 		})
 		if walkErr != nil {
-			return nil, walkErr
+			return nil, "", walkErr
 		}
 		for _, child := range children {
 			attachSubagent(session, child)
@@ -900,15 +908,76 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 			if sessionIDFromFile(legacyPath) != session.ID {
 				continue
 			}
-			subagent, parseErr := p.parse(legacyPath, depth+1, visited, report)
+			subagent, subagentTitlePrompt, parseErr := p.parse(legacyPath, depth+1, visited, report)
 			if parseErr == nil {
+				if subagentTitlePrompt != "" {
+					titlePrompts[subagent] = subagentTitlePrompt
+				}
 				attachSubagent(session, subagent)
 			} else if report != nil {
 				report(legacyPath, parseErr)
 			}
 		}
 	}
-	return session, nil
+	for _, child := range session.Subagents {
+		if child.Group {
+			resolveSiblingTitleCollisions(child.Subagents, titlePrompts)
+		}
+	}
+	resolveSiblingTitleCollisions(session.Subagents, titlePrompts)
+	return session, titlePrompt, nil
+}
+
+func resolveSiblingTitleCollisions(siblings []*model.Session, titlePrompts map[*model.Session]string) {
+	byTitle := make(map[string][]*model.Session)
+	hasCollision := false
+	for _, sibling := range siblings {
+		byTitle[sibling.Title] = append(byTitle[sibling.Title], sibling)
+		if len(byTitle[sibling.Title]) == 2 {
+			hasCollision = true
+		}
+	}
+	if !hasCollision {
+		return
+	}
+	lineCounts := make(map[string]int)
+	for _, sibling := range siblings {
+		seen := make(map[string]bool)
+		if prompt := titlePrompts[sibling]; prompt != "" {
+			for len(prompt) > 0 {
+				line, rest, found := strings.Cut(prompt, "\n")
+				if !found {
+					rest = ""
+				}
+				if title := model.CleanTitle(line); title != "" {
+					seen[title] = true
+				}
+				prompt = rest
+			}
+		} else if sibling.Title != "" {
+			seen[sibling.Title] = true
+		}
+		for title := range seen {
+			lineCounts[title]++
+		}
+	}
+	shared := make(map[string]bool)
+	for title, count := range lineCounts {
+		if count > 1 {
+			shared[title] = true
+		}
+	}
+	for title, collisions := range byTitle {
+		if len(collisions) < 2 {
+			continue
+		}
+		shared[title] = true
+		for _, sibling := range collisions {
+			if prompt := titlePrompts[sibling]; prompt != "" {
+				sibling.Title = model.CleanUniqueTitle(prompt, shared)
+			}
+		}
+	}
 }
 
 func subagentTranscriptCandidate(path, root string) bool {
@@ -926,6 +995,24 @@ func transcriptOwnsCompanionDir(path string) bool {
 
 func attachSubagent(parent, subagent *model.Session) {
 	parent.Subagents = append(parent.Subagents, subagent)
+	if parent.Group {
+		seenModels := make(map[string]bool, len(parent.Models))
+		for _, name := range parent.Models {
+			seenModels[name] = true
+		}
+		for _, name := range subagent.Models {
+			if !seenModels[name] {
+				parent.Models = append(parent.Models, name)
+				seenModels[name] = true
+			}
+		}
+		for name, childCost := range subagent.ModelCosts {
+			if parent.ModelCosts == nil {
+				parent.ModelCosts = make(map[string]float64)
+			}
+			parent.ModelCosts[name] += childCost
+		}
+	}
 	if parent.Group && !subagent.StartedAt.IsZero() && (parent.StartedAt.IsZero() || subagent.StartedAt.Before(parent.StartedAt)) {
 		parent.StartedAt = subagent.StartedAt
 	}
@@ -955,15 +1042,17 @@ func sessionIDFromFile(path string) string {
 	return sessionID
 }
 
-func (p Parser) parseFile(path string) (*model.Session, map[string]string, error) {
+func (p Parser) parseFile(path string) (*model.Session, map[string]string, string, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	defer file.Close()
 
 	session := &model.Session{Agent: model.AgentClaude, Path: path}
 	workflowNames := make(map[string]string)
+	var titlePrompt string
+	hasAITitle := false
 	var usageRecords []usageRecord
 	// messages counts this session's own conversation turns: user prompts (records
 	// carrying text, not tool-result-only) plus assistant text replies. It matches
@@ -999,19 +1088,27 @@ func (p Parser) parseFile(path string) (*model.Session, map[string]string, error
 				workflowNames[runID] = model.CleanTitle(title)
 			}
 		}
-		if record.Type == "ai-title" {
-			session.Title = model.CleanTitle(record.AITitle)
-		} else if record.Type == "user" {
+		switch record.Type {
+		case "ai-title":
+			if title := model.CleanTitle(record.AITitle); title != "" {
+				session.Title = title
+				hasAITitle = true
+				titlePrompt = ""
+			}
+		case "user":
 			var content userContentRecord
 			if jsonl.Unmarshal(line, &content) == nil {
 				if text := userText(content.Message.Content); text != "" {
 					messages++
-					if session.Title == "" {
+					if session.Title == "" && !hasAITitle {
 						session.Title = model.CleanTitle(text)
+						if session.Title != "" {
+							titlePrompt = retainedTitlePrompt(text)
+						}
 					}
 				}
 			}
-		} else if record.Type == "assistant" {
+		case "assistant":
 			messages += assistantTextBlocks(record.Message.Content)
 		}
 		if record.Type == "assistant" && (record.IsAPIErrorMessage || meaningfulJSON(record.Error) || meaningfulJSON(record.APIErrorStatus)) {
@@ -1055,7 +1152,7 @@ func (p Parser) parseFile(path string) (*model.Session, map[string]string, error
 		}
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	seenModels := make(map[string]bool)
 	missingPricing := make(map[string]bool)
@@ -1093,7 +1190,14 @@ func (p Parser) parseFile(path string) (*model.Session, map[string]string, error
 		}
 	}
 	session.Messages = messages
-	return session, workflowNames, nil
+	return session, workflowNames, titlePrompt, nil
+}
+
+func retainedTitlePrompt(prompt string) string {
+	if len(prompt) > maxRetainedTitlePromptBytes || strings.Count(prompt, "\n") >= maxRetainedTitlePromptLines {
+		return ""
+	}
+	return prompt
 }
 
 // assistantTextBlocks counts the text blocks in an assistant message that the

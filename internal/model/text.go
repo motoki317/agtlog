@@ -25,6 +25,21 @@ func CleanTitle(value string) string {
 	return ""
 }
 
+func CleanUniqueTitle(value string, shared map[string]bool) string {
+	fallback := CleanTitle(value)
+	for len(value) > 0 {
+		line, rest, found := strings.Cut(value, "\n")
+		if !found {
+			rest = ""
+		}
+		if title := cleanTitleLine(line); title != "" && !shared[title] {
+			return title
+		}
+		value = rest
+	}
+	return fallback
+}
+
 func cleanTitleLine(line string) string {
 	line = strings.TrimSpace(line)
 	for strings.HasPrefix(line, "<") {

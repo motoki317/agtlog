@@ -1,0 +1,3 @@
+{"type":"user","timestamp":"2026-03-04T05:01:20Z","sessionId":"session-expedition","agentId":"curator","cwd":"/workspace/coastal-atlas","message":{"content":"# Shared expedition brief\nUse the verified nautical charts\n# Curate the final atlas"}}
+{"type":"ai-title","timestamp":"2026-03-04T05:01:21Z","sessionId":"session-expedition","agentId":"curator","aiTitle":"Shared expedition brief"}
+{"type":"assistant","timestamp":"2026-03-04T05:02:20Z","sessionId":"session-expedition","agentId":"curator","requestId":"request-curator","message":{"id":"message-curator","model":"claude-opus-4-8","usage":{"input_tokens":1,"output_tokens":1}}}

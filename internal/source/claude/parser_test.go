@@ -35,9 +35,271 @@ func workflowFixture() string {
 	return filepath.Join("testdata", "workflow", "subagents", "session-workflow.jsonl")
 }
 
+func workflowTitleFixture() string {
+	return filepath.Join("testdata", "workflow-titles", "subagents", "session-expedition.jsonl")
+}
+
+type titlePromptFixture struct {
+	id      string
+	prompt  string
+	aiTitle string
+	records []string
+}
+
+func parseTitlePromptFixture(t *testing.T, children []titlePromptFixture) *model.Session {
+	t.Helper()
+	session := parseTitlePromptSession(t, children, true)
+	if len(session.Subagents) != 1 || !session.Subagents[0].Group {
+		t.Fatalf("workflow groups = %#v, want one", session.Subagents)
+	}
+	return session.Subagents[0]
+}
+
+func parseDirectTitlePromptFixture(t *testing.T, children []titlePromptFixture) []*model.Session {
+	t.Helper()
+	return parseTitlePromptSession(t, children, false).Subagents
+}
+
+func parseTitlePromptSession(t *testing.T, children []titlePromptFixture, grouped bool) *model.Session {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session-expedition.jsonl")
+	parent := `{"type":"user","sessionId":"session-expedition","message":{"content":"Coordinate the expedition"}}` + "\n"
+	if err := os.WriteFile(path, []byte(parent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runDir := filepath.Join(dir, "session-expedition", "subagents")
+	if grouped {
+		runDir = filepath.Join(runDir, "workflows", "wf-expedition")
+	}
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, child := range children {
+		lines := child.records
+		if len(lines) == 0 {
+			lines = []string{`{"type":"user","sessionId":"session-expedition","agentId":` + strconv.Quote(child.id) + `,"message":{"content":` + strconv.Quote(child.prompt) + `}}`}
+			if child.aiTitle != "" {
+				lines = append(lines, `{"type":"ai-title","sessionId":"session-expedition","agentId":`+strconv.Quote(child.id)+`,"aiTitle":`+strconv.Quote(child.aiTitle)+`}`)
+			}
+		}
+		childPath := filepath.Join(runDir, "agent-"+child.id+".jsonl")
+		if err := os.WriteFile(childPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return session
+}
+
+func titlesByID(sessions []*model.Session) map[string]string {
+	titles := make(map[string]string, len(sessions))
+	for _, session := range sessions {
+		titles[session.ID] = session.Title
+	}
+	return titles
+}
+
 func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v15:") {
-		t.Fatalf("CacheFingerprint() = %q, want v15 workflow discovery", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v16:") {
+		t.Fatalf("CacheFingerprint() = %q, want v16 sibling titles", got)
+	}
+}
+
+func TestParseUsesFirstUniqueWorkflowSiblingTitle(t *testing.T) {
+	session, err := testParser().Parse(workflowTitleFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Subagents) != 1 || !session.Subagents[0].Group {
+		t.Fatalf("workflow groups = %#v, want one", session.Subagents)
+	}
+	group := session.Subagents[0]
+	wantTitles := map[string]string{
+		"curator": "Shared expedition brief",
+		"delta":   "Survey the delta marsh",
+		"estuary": "Survey the estuary mouth",
+	}
+	if got := titlesByID(group.Subagents); !reflect.DeepEqual(got, wantTitles) {
+		t.Fatalf("workflow titles = %#v, want %#v", got, wantTitles)
+	}
+	wantCosts := make(map[string]float64)
+	for _, child := range group.Subagents {
+		for name, childCost := range child.ModelCosts {
+			wantCosts[name] += childCost
+		}
+	}
+	if wantModels := []string{"claude-opus-4-8", "claude-fable-5"}; !reflect.DeepEqual(group.Models, wantModels) {
+		t.Fatalf("workflow models = %#v, want %#v", group.Models, wantModels)
+	}
+	if !reflect.DeepEqual(group.ModelCosts, wantCosts) {
+		t.Fatalf("workflow model costs = %#v, want %#v", group.ModelCosts, wantCosts)
+	}
+}
+
+func TestParseLeavesDistinctSiblingTitlesUnchanged(t *testing.T) {
+	children := parseDirectTitlePromptFixture(t, []titlePromptFixture{
+		{id: "cartographer", prompt: "Map the western ridge\nLater cartography detail"},
+		{id: "auditor", prompt: "Audit the eastern ridge\nLater audit detail"},
+	})
+	want := map[string]string{"cartographer": "Map the western ridge", "auditor": "Audit the eastern ridge"}
+	if got := titlesByID(children); !reflect.DeepEqual(got, want) {
+		t.Fatalf("distinct titles = %#v, want byte-identical %#v", got, want)
+	}
+}
+
+func TestParseUsesFirstUniqueDirectSiblingTitle(t *testing.T) {
+	children := parseDirectTitlePromptFixture(t, []titlePromptFixture{
+		{id: "cartographer", prompt: "# Shared expedition brief\n# Map the western ridge"},
+		{id: "auditor", prompt: "# Shared expedition brief\n# Audit the eastern ridge"},
+	})
+	want := map[string]string{"cartographer": "Map the western ridge", "auditor": "Audit the eastern ridge"}
+	if got := titlesByID(children); !reflect.DeepEqual(got, want) {
+		t.Fatalf("direct sibling titles = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseTitleIsUniqueAmongEverySibling(t *testing.T) {
+	group := parseTitlePromptFixture(t, []titlePromptFixture{
+		{id: "north", prompt: "# Shared expedition brief\n# Inspect the common inlet\n# Survey the northern shoal"},
+		{id: "south", prompt: "# Shared expedition brief\n# Survey the southern shoal"},
+		{id: "observer", prompt: "# Inspect the common inlet\n# Record tidal conditions"},
+	})
+	want := map[string]string{
+		"north":    "Survey the northern shoal",
+		"south":    "Survey the southern shoal",
+		"observer": "Inspect the common inlet",
+	}
+	if got := titlesByID(group.Subagents); !reflect.DeepEqual(got, want) {
+		t.Fatalf("globally unique titles = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseAITitleWinsInEveryRecordOrder(t *testing.T) {
+	user := `{"type":"user","sessionId":"session-expedition","agentId":"captain","message":{"content":"# Shared expedition brief\n# Private captain instruction"}}`
+	aiTitle := `{"type":"ai-title","sessionId":"session-expedition","agentId":"captain","aiTitle":"Shared expedition brief"}`
+	for _, test := range []struct {
+		name    string
+		records []string
+	}{
+		{name: "before prompt", records: []string{aiTitle, user}},
+		{name: "after prompt", records: []string{user, aiTitle}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			group := parseTitlePromptFixture(t, []titlePromptFixture{
+				{id: "captain", records: test.records},
+				{id: "observer", prompt: "# Shared expedition brief\n# Survey the eastern shoal"},
+			})
+			want := map[string]string{"captain": "Shared expedition brief", "observer": "Survey the eastern shoal"}
+			if got := titlesByID(group.Subagents); !reflect.DeepEqual(got, want) {
+				t.Fatalf("ai-title ordering titles = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestParseEmptyAITitleKeepsPromptFallback(t *testing.T) {
+	children := make([]titlePromptFixture, 0, 2)
+	for _, direction := range []string{"north", "south"} {
+		children = append(children, titlePromptFixture{
+			id: direction,
+			records: []string{
+				`{"type":"ai-title","sessionId":"session-expedition","agentId":` + strconv.Quote(direction) + `,"aiTitle":""}`,
+				`{"type":"user","sessionId":"session-expedition","agentId":` + strconv.Quote(direction) + `,"message":{"content":"# Shared expedition brief\n# Survey ` + direction + `"}}`,
+			},
+		})
+	}
+	group := parseTitlePromptFixture(t, children)
+	want := map[string]string{"north": "Survey north", "south": "Survey south"}
+	if got := titlesByID(group.Subagents); !reflect.DeepEqual(got, want) {
+		t.Fatalf("empty ai-title fallback = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseFallsBackWhenNoSiblingLineIsUnique(t *testing.T) {
+	prompt := "# Shared expedition brief\nUse the verified nautical charts"
+	group := parseTitlePromptFixture(t, []titlePromptFixture{
+		{id: "north", prompt: prompt},
+		{id: "south", prompt: prompt},
+	})
+	for id, title := range titlesByID(group.Subagents) {
+		if title != "Shared expedition brief" {
+			t.Errorf("%s title = %q, want existing shared title", id, title)
+		}
+	}
+}
+
+func TestParseFallsBackPastTitlePromptRetentionCaps(t *testing.T) {
+	tests := []struct {
+		name   string
+		prompt string
+	}{
+		{name: "bytes", prompt: "# Shared expedition brief\n" + strings.Repeat("x", maxRetainedTitlePromptBytes) + "\n# Survey the southern shoal"},
+		{name: "lines", prompt: "# Shared expedition brief\n" + strings.Repeat("Use the verified chart\n", maxRetainedTitlePromptLines) + "# Survey the southern shoal"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			group := parseTitlePromptFixture(t, []titlePromptFixture{
+				{id: "north", prompt: "# Shared expedition brief\n# Survey the northern shoal"},
+				{id: "south", prompt: test.prompt},
+			})
+			want := map[string]string{"north": "Survey the northern shoal", "south": "Shared expedition brief"}
+			if got := titlesByID(group.Subagents); !reflect.DeepEqual(got, want) {
+				t.Fatalf("capped titles = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestParseRetainsIndividuallyBoundedSiblingPrompts(t *testing.T) {
+	padding := strings.Repeat("x", maxRetainedTitlePromptBytes/2)
+	const childCount = 132
+	children := make([]titlePromptFixture, 0, childCount)
+	for index := range childCount {
+		children = append(children, titlePromptFixture{
+			id:     fmt.Sprintf("observer-%03d", index),
+			prompt: fmt.Sprintf("# Shared expedition brief\n%s\n# Survey sector %03d", padding, index),
+		})
+	}
+	group := parseTitlePromptFixture(t, children)
+	for id, title := range titlesByID(group.Subagents) {
+		want := "Survey sector " + strings.TrimPrefix(id, "observer-")
+		if title != want {
+			t.Errorf("%s title = %q, want %q within per-child caps", id, title, want)
+		}
+	}
+}
+
+func TestRetainedTitlePromptBoundaries(t *testing.T) {
+	exactBytes := strings.Repeat("x", maxRetainedTitlePromptBytes)
+	overBytes := exactBytes + "x"
+	exactLines := strings.Repeat("x\n", maxRetainedTitlePromptLines-1) + "x"
+	overLines := exactLines + "\nx"
+	for _, test := range []struct {
+		name   string
+		prompt string
+		want   bool
+	}{
+		{name: "exact bytes", prompt: exactBytes, want: true},
+		{name: "over bytes", prompt: overBytes, want: false},
+		{name: "exact lines", prompt: exactLines, want: true},
+		{name: "over lines", prompt: overLines, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := retainedTitlePrompt(test.prompt); (got != "") != test.want {
+				t.Fatalf("retainedTitlePrompt() retained = %t, want %t", got != "", test.want)
+			}
+		})
+	}
+}
+
+func TestParseGroupWithModelessChildrenKeepsEmptyModelMetadata(t *testing.T) {
+	group := parseTitlePromptFixture(t, []titlePromptFixture{{id: "observer", prompt: "Observe the inlet"}})
+	if len(group.Models) != 0 || len(group.ModelCosts) != 0 {
+		t.Fatalf("modeless workflow metadata = %#v / %#v, want empty", group.Models, group.ModelCosts)
 	}
 }
 
