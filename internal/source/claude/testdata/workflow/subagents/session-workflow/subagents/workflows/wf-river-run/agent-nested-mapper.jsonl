@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-02-03T04:02:30Z","sessionId":"session-workflow","agentId":"nested-mapper","cwd":"/workspace/river-lab","message":{"content":"Map the river channels"}}
+{"type":"assistant","timestamp":"2026-02-03T04:04:00Z","sessionId":"session-workflow","agentId":"nested-mapper","requestId":"request-nested","message":{"id":"message-nested","model":"claude-opus-4-8","usage":{"input_tokens":3,"output_tokens":2}}}

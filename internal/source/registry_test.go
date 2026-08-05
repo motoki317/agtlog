@@ -196,6 +196,10 @@ func TestRegistryReportsClaudeSubagentDiagnosticsFromCache(t *testing.T) {
 	if err := os.MkdirAll(brokenPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	nestedBrokenPath := filepath.Join(project, "session-root", "subagents", "workflows", "wf-river-run", "agent-nested-broken.jsonl")
+	if err := os.MkdirAll(nestedBrokenPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	adapter := claude.NewSource(claude.NewParser(cost.NewCalculator(cost.Table{})), []string{root})
 	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1, CacheDir: t.TempDir()})
 	for attempt := range 2 {
@@ -203,7 +207,9 @@ func TestRegistryReportsClaudeSubagentDiagnosticsFromCache(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(sessions) != 1 || len(diagnostics) != 1 || !strings.HasSuffix(diagnostics[0].Path, filepath.Join("project-orbit", "session-root", "subagents", "agent-broken.jsonl")) {
+		if len(sessions) != 1 || len(diagnostics) != 2 ||
+			!strings.HasSuffix(diagnostics[0].Path, filepath.Join("project-orbit", "session-root", "subagents", "agent-broken.jsonl")) ||
+			!strings.HasSuffix(diagnostics[1].Path, filepath.Join("project-orbit", "session-root", "subagents", "workflows", "wf-river-run", "agent-nested-broken.jsonl")) {
 			t.Fatalf("attempt %d: sessions = %#v, diagnostics = %#v", attempt, sessions, diagnostics)
 		}
 	}

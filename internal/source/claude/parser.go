@@ -20,6 +20,7 @@ import (
 
 type Parser struct {
 	calculator cost.Calculator
+	walk       func(string, filepath.WalkFunc) error
 }
 
 type logRecord struct {
@@ -34,6 +35,7 @@ type logRecord struct {
 	IsSidechain       bool            `json:"isSidechain"`
 	Speed             string          `json:"speed"`
 	CostUSD           *float64        `json:"costUSD"`
+	ToolUseResult     json.RawMessage `json:"toolUseResult"`
 	Error             json.RawMessage `json:"error"`
 	APIErrorStatus    json.RawMessage `json:"apiErrorStatus"`
 	IsAPIErrorMessage bool            `json:"isApiErrorMessage"`
@@ -131,11 +133,11 @@ type userContentRecord struct {
 }
 
 func NewParser(calculator cost.Calculator) Parser {
-	return Parser{calculator: calculator}
+	return Parser{calculator: calculator, walk: filepath.Walk}
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v14:" + p.calculator.Fingerprint()
+	return "claude-parser-v15:" + p.calculator.Fingerprint()
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
@@ -160,6 +162,17 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 	}
 	visited[session] = true
 	defer delete(visited, session)
+	if session.Group {
+		session.Events = nil
+		if recursive {
+			for _, subagent := range session.Subagents {
+				if err := p.loadEvents(ctx, subagent, depth+1, visited, true); err != nil {
+					continue
+				}
+			}
+		}
+		return nil
+	}
 
 	info, err := os.Lstat(session.Path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
@@ -300,9 +313,11 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 				event.Kind, event.CallID, event.ToolName = model.EventToolCall, block.ID, block.Name
 				event.ToolInput = model.ElideEncrypted(claudeToolInput(block.Name, block.Input))
 				event.Detail = claudeToolDetail(block.Name, block.Input)
-				if block.Name == "Agent" || block.Name == "Task" {
+				if block.Name == "Agent" || block.Name == "Task" || block.Name == "Workflow" {
 					event.Kind = model.EventSubagent
-					event.Subagent = matchClaudeSubagent(session.Subagents, block.Input, linkedSubagents)
+					if block.Name != "Workflow" {
+						event.Subagent = matchClaudeSubagent(session.Subagents, block.Input, linkedSubagents)
+					}
 					if event.Subagent != nil {
 						event.AgentID = event.Subagent.ID
 						linkedSubagents[event.Subagent] = true
@@ -321,7 +336,18 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 					// the tool's whole output — scanning it for every tool result would
 					// re-read most of the log.
 					if call.Kind == model.EventSubagent {
-						if agentID := toolResultAgentID(record.ToolUseResult); agentID != "" {
+						if call.ToolName == "Workflow" {
+							if runID := toolResultRunID(record.ToolUseResult); runID != "" {
+								if subagent := workflowGroupByID(session.Subagents, runID); subagent != nil {
+									delete(linkedSubagents, call.Subagent)
+									call.Subagent, call.AgentID = subagent, subagent.ID
+									linkedSubagents[subagent] = true
+									if title := toolResultWorkflowName(record.ToolUseResult); title != "" {
+										subagent.Title = model.CleanTitle(title)
+									}
+								}
+							}
+						} else if agentID := toolResultAgentID(record.ToolUseResult); agentID != "" {
 							if subagent := subagentByID(session.Subagents, agentID); subagent != nil {
 								delete(linkedSubagents, call.Subagent)
 								call.Subagent, call.AgentID = subagent, subagent.ID
@@ -411,12 +437,37 @@ func subagentByID(subagents []*model.Session, id string) *model.Session {
 	return nil
 }
 
+func workflowGroupByID(subagents []*model.Session, id string) *model.Session {
+	for _, subagent := range subagents {
+		if subagent.Group && subagent.ID == id {
+			return subagent
+		}
+	}
+	return nil
+}
+
 func toolResultAgentID(result json.RawMessage) string {
 	var fields struct {
 		AgentID string `json:"agentId"`
 	}
 	_ = jsonl.Unmarshal(result, &fields)
 	return fields.AgentID
+}
+
+func toolResultRunID(result json.RawMessage) string {
+	var fields struct {
+		RunID string `json:"runId"`
+	}
+	_ = jsonl.Unmarshal(result, &fields)
+	return fields.RunID
+}
+
+func toolResultWorkflowName(result json.RawMessage) string {
+	var fields struct {
+		WorkflowName string `json:"workflowName"`
+	}
+	_ = jsonl.Unmarshal(result, &fields)
+	return fields.WorkflowName
 }
 
 func matchClaudeSubagent(subagents []*model.Session, input json.RawMessage, linked map[*model.Session]bool) *model.Session {
@@ -441,7 +492,7 @@ func matchClaudeSubagent(subagents []*model.Session, input json.RawMessage, link
 		}
 	}
 	for _, subagent := range subagents {
-		if !linked[subagent] {
+		if !subagent.Group && !linked[subagent] {
 			return subagent
 		}
 	}
@@ -776,26 +827,71 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 	visited[absolute] = true
 	defer delete(visited, absolute)
 
-	session, err := p.parseFile(path)
+	session, workflowNames, err := p.parseFile(path)
 	if err != nil {
 		return nil, err
 	}
 	subagentDir := filepath.Join(strings.TrimSuffix(path, filepath.Ext(path)), "subagents")
 	if info, statErr := os.Lstat(subagentDir); statErr == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
-		subagentPattern := filepath.Join(subagentDir, "*.jsonl")
-		subagentPaths, globErr := filepath.Glob(subagentPattern)
-		if globErr != nil {
-			return nil, globErr
+		groups := make(map[string]*model.Session)
+		children := make([]*model.Session, 0)
+		walk := p.walk
+		if walk == nil {
+			walk = filepath.Walk
 		}
-		for _, subagentPath := range subagentPaths {
+		walkErr := walk(subagentDir, func(subagentPath string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				if report != nil {
+					report(subagentPath, walkErr)
+				}
+				return nil
+			}
+			if info.IsDir() {
+				if subagentPath != subagentDir && transcriptOwnsCompanionDir(subagentPath) {
+					return filepath.SkipDir
+				}
+				if subagentPath != subagentDir && subagentTranscriptCandidate(subagentPath, subagentDir) {
+					if _, parseErr := p.parse(subagentPath, depth+1, visited, report); parseErr != nil && report != nil {
+						report(subagentPath, parseErr)
+					}
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !subagentTranscriptCandidate(subagentPath, subagentDir) {
+				return nil
+			}
+			parentDir := filepath.Dir(subagentPath)
 			subagent, parseErr := p.parse(subagentPath, depth+1, visited, report)
 			if parseErr != nil {
 				if report != nil {
 					report(subagentPath, parseErr)
 				}
-				continue
+				return nil
 			}
-			attachSubagent(session, subagent)
+			if parentDir == subagentDir {
+				children = append(children, subagent)
+				return nil
+			}
+			groupID := filepath.Base(parentDir)
+			group := groups[parentDir]
+			if group == nil {
+				groupTitle := workflowNames[groupID]
+				if groupTitle == "" {
+					groupTitle = groupID
+				}
+				group = &model.Session{ID: groupID, Agent: session.Agent, Path: path + "#" + groupID, Title: groupTitle, Group: true}
+				groups[parentDir] = group
+				children = append(children, group)
+			}
+			attachSubagent(group, subagent)
+			return nil
+		})
+		if walkErr != nil {
+			return nil, walkErr
+		}
+		for _, child := range children {
+			attachSubagent(session, child)
 		}
 	}
 	if depth == 0 {
@@ -815,8 +911,24 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 	return session, nil
 }
 
+func subagentTranscriptCandidate(path, root string) bool {
+	if filepath.Dir(path) == root {
+		return filepath.Ext(path) == ".jsonl"
+	}
+	base := filepath.Base(path)
+	return strings.HasPrefix(base, "agent-") && filepath.Ext(base) == ".jsonl"
+}
+
+func transcriptOwnsCompanionDir(path string) bool {
+	info, err := os.Lstat(path + ".jsonl")
+	return err == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular()
+}
+
 func attachSubagent(parent, subagent *model.Session) {
 	parent.Subagents = append(parent.Subagents, subagent)
+	if parent.Group && !subagent.StartedAt.IsZero() && (parent.StartedAt.IsZero() || subagent.StartedAt.Before(parent.StartedAt)) {
+		parent.StartedAt = subagent.StartedAt
+	}
 	if subagent.UpdatedAt.After(parent.UpdatedAt) {
 		parent.UpdatedAt = subagent.UpdatedAt
 	}
@@ -843,14 +955,15 @@ func sessionIDFromFile(path string) string {
 	return sessionID
 }
 
-func (p Parser) parseFile(path string) (*model.Session, error) {
+func (p Parser) parseFile(path string) (*model.Session, map[string]string, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer file.Close()
 
 	session := &model.Session{Agent: model.AgentClaude, Path: path}
+	workflowNames := make(map[string]string)
 	var usageRecords []usageRecord
 	// messages counts this session's own conversation turns: user prompts (records
 	// carrying text, not tool-result-only) plus assistant text replies. It matches
@@ -880,6 +993,11 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 		var record logRecord
 		if jsonl.Unmarshal(line, &record) != nil {
 			return
+		}
+		if runID := toolResultRunID(record.ToolUseResult); runID != "" {
+			if title := toolResultWorkflowName(record.ToolUseResult); title != "" {
+				workflowNames[runID] = model.CleanTitle(title)
+			}
 		}
 		if record.Type == "ai-title" {
 			session.Title = model.CleanTitle(record.AITitle)
@@ -937,7 +1055,7 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 		}
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	seenModels := make(map[string]bool)
 	missingPricing := make(map[string]bool)
@@ -975,7 +1093,7 @@ func (p Parser) parseFile(path string) (*model.Session, error) {
 		}
 	}
 	session.Messages = messages
-	return session, nil
+	return session, workflowNames, nil
 }
 
 // assistantTextBlocks counts the text blocks in an assistant message that the

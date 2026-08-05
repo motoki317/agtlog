@@ -147,6 +147,9 @@ func resolveSelector(selector string, nodes []graphNode, diagnostics []commandDi
 }
 
 func selectorEligible(node graphNode) bool {
+	if node.session.Group {
+		return true
+	}
 	if node.path == "" || !strings.Contains(node.session.Path, "#") {
 		return true
 	}

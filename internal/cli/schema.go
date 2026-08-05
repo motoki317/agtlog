@@ -317,11 +317,7 @@ func costDTO(value model.Cost) Cost {
 }
 
 func descendantCount(session *model.Session) int {
-	total := 0
-	for _, child := range session.Subagents {
-		total += 1 + descendantCount(child)
-	}
-	return total
+	return session.DescendantAgentCount()
 }
 
 func timestamp(value time.Time) string {

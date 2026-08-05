@@ -150,6 +150,25 @@ func TestListRequiredZeroAndEmptyFieldsSurviveEncoding(t *testing.T) {
 	}
 }
 
+func TestListExcludesWorkflowGroupsFromSubagentCount(t *testing.T) {
+	direct := &model.Session{ID: "direct-scout", Agent: model.AgentClaude}
+	nested := &model.Session{ID: "nested-mapper", Agent: model.AgentClaude}
+	group := &model.Session{ID: "wf-river-run", Agent: model.AgentClaude, Group: true, Subagents: []*model.Session{nested}}
+	root := &model.Session{ID: "session-workflow", Agent: model.AgentClaude, Subagents: []*model.Session{direct, group}}
+	registry := &fakeRegistry{sessions: []*model.Session{root}}
+	var output bytes.Buffer
+	if err := Execute(context.Background(), []string{"list"}, &output, io.Discard, func(context.Context, Options) (Registry, error) { return registry, nil }); err != nil {
+		t.Fatal(err)
+	}
+	var response ListResponse
+	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Sessions) != 1 || response.Sessions[0].Subagents != 2 {
+		t.Fatalf("sessions = %#v, want two agents excluding workflow group", response.Sessions)
+	}
+}
+
 func TestListDistinguishesUnaddressableSessionsFromUnreadableLogs(t *testing.T) {
 	registry := &fakeRegistry{sessions: []*model.Session{{Agent: model.AgentClaude, Path: "/logs/session-without-id.jsonl"}}}
 	var output bytes.Buffer

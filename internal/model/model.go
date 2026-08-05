@@ -307,6 +307,7 @@ type Session struct {
 	DuplicatedByModel   map[string]float64 `json:"-"`
 	DuplicatedOwners    []DuplicateOwner   `json:"-"`
 	Events              []Event
+	Group               bool
 	Subagents           []*Session
 }
 
@@ -317,6 +318,17 @@ func (s Session) TotalUsage() Usage {
 	}
 	for _, subagent := range s.Subagents {
 		total = total.Add(subagent.TotalUsage())
+	}
+	return total
+}
+
+func (s Session) DescendantAgentCount() int {
+	total := 0
+	for _, subagent := range s.Subagents {
+		total += subagent.DescendantAgentCount()
+		if !subagent.Group {
+			total++
+		}
 	}
 	return total
 }

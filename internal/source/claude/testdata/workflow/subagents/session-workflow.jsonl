@@ -1,0 +1,4 @@
+{"type":"user","timestamp":"2026-02-03T04:00:00Z","sessionId":"session-workflow","cwd":"/workspace/river-lab","message":{"content":"Survey the delta"}}
+{"type":"assistant","timestamp":"2026-02-03T04:01:00Z","sessionId":"session-workflow","message":{"content":[{"type":"tool_use","id":"tool-direct","name":"Task","input":{"description":"Unmatched direct task"}}]}}
+{"type":"assistant","timestamp":"2026-02-03T04:02:00Z","sessionId":"session-workflow","message":{"content":[{"type":"tool_use","id":"tool-workflow","name":"Workflow","input":{"workflow":"unresolved-input"}}]}}
+{"type":"user","timestamp":"2026-02-03T04:03:00Z","sessionId":"session-workflow","toolUseResult":{"status":"async_launched","taskId":"task-river","workflowName":"  River survey\nignored","runId":"wf-river-run","transcriptDir":"/workspace/river-lab/subagents/workflows/wf-river-run"},"message":{"content":[{"type":"tool_result","tool_use_id":"tool-workflow","content":"launched"}]}}

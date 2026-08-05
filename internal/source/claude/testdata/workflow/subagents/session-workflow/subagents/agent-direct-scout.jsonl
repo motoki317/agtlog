@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-02-03T04:01:30Z","sessionId":"session-workflow","agentId":"direct-scout","cwd":"/workspace/river-lab","message":{"content":"Inspect the shoreline"}}
+{"type":"assistant","timestamp":"2026-02-03T04:01:40Z","sessionId":"session-workflow","agentId":"direct-scout","requestId":"request-direct","message":{"id":"message-direct","model":"claude-opus-4-8","usage":{"input_tokens":2,"output_tokens":1}}}

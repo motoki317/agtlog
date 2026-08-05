@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-02-03T04:02:15Z","sessionId":"session-workflow","agentId":"journal-entry","message":{"content":"Workflow bookkeeping"}}
+{"type":"assistant","timestamp":"2026-02-03T04:05:00Z","sessionId":"session-workflow","agentId":"journal-entry","requestId":"request-journal","message":{"id":"message-journal","model":"claude-opus-4-8","usage":{"input_tokens":100,"output_tokens":100}}}

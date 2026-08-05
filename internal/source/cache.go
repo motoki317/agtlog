@@ -26,7 +26,7 @@ type cacheDiagnostic struct {
 	Message string `json:"message"`
 }
 
-const cacheVersion = 3
+const cacheVersion = 4
 
 const maxSummaryCacheBytes = 64 << 20
 

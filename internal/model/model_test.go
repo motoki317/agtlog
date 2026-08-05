@@ -70,6 +70,17 @@ func TestSessionTotalUsageIncludesNestedSubagents(t *testing.T) {
 	}
 }
 
+func TestSessionDescendantAgentCountExcludesGroups(t *testing.T) {
+	session := Session{Subagents: []*Session{
+		{ID: "direct"},
+		{ID: "wf-river-run", Group: true, Subagents: []*Session{{ID: "nested"}, {ID: "nested-group", Group: true, Subagents: []*Session{{ID: "deep"}}}}},
+	}}
+
+	if got := session.DescendantAgentCount(); got != 3 {
+		t.Fatalf("DescendantAgentCount() = %d, want three agents excluding groups", got)
+	}
+}
+
 func TestUsageAggregationSaturatesInsteadOfOverflowing(t *testing.T) {
 	got := (Usage{InputTokens: math.MaxInt64}).Add(Usage{InputTokens: 1})
 	if got.InputTokens != math.MaxInt64 {

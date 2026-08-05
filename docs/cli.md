@@ -62,6 +62,9 @@ A canonical ref identifies one node in a session graph:
 <agent>:<root-id>#<subagent-path>
 ```
 
+Claude Workflow runs use synthetic group nodes. A group ref ends in `#<runId>`,
+and each child transcript ref ends in `#<runId>/<agentId>`.
+
 Every response uses canonical refs. Codex descendant refs use the logged agent
 path, so a ref stays unchanged when a later record supplies a thread ID. A Claude
 descendant ref can instead use its logged `agentId`; that Codex stability guarantee
@@ -98,7 +101,7 @@ and `updated_at`.
 | `started_at` | timestamp | Start time for this node. |
 | `updated_at` | timestamp | Latest time for this node or any descendant. |
 | `messages` | integer | Message count for this node, excluding descendants. |
-| `subagents` | integer | Recursive descendant count. |
+| `subagents` | integer | Recursive agent transcript count. Workflow group containers are excluded. |
 | `has_error` | boolean | Whether this node reports an API error. |
 | `tokens` | token totals | Recursive owned token totals. |
 | `cost` | cost totals | Recursive owned API-equivalent cost. |

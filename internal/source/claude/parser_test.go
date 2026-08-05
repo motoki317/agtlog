@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -29,9 +31,125 @@ func mainFixture() string {
 	return filepath.Join("testdata", "project-alpha", "session-main.jsonl")
 }
 
+func workflowFixture() string {
+	return filepath.Join("testdata", "workflow", "subagents", "session-workflow.jsonl")
+}
+
 func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v14:") {
-		t.Fatalf("CacheFingerprint() = %q, want v14 request ledger", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v15:") {
+		t.Fatalf("CacheFingerprint() = %q, want v15 workflow discovery", got)
+	}
+}
+
+func TestParseDiscoversWorkflowSubagentGroup(t *testing.T) {
+	session, err := testParser().Parse(workflowFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Subagents) != 2 {
+		t.Fatalf("subagents = %#v, want one direct child and one workflow group", session.Subagents)
+	}
+	direct, group := session.Subagents[0], session.Subagents[1]
+	if direct.ID != "direct-scout" || direct.Group {
+		t.Fatalf("direct child = %#v", direct)
+	}
+	if group.ID != "wf-river-run" || !group.Group || group.Path != workflowFixture()+"#wf-river-run" {
+		t.Fatalf("workflow group = %#v", group)
+	}
+	if group.Title != "River survey" {
+		t.Fatalf("workflow group title = %q, want summary metadata", group.Title)
+	}
+	if len(group.Subagents) != 1 || group.Subagents[0].ID != "nested-mapper" {
+		t.Fatalf("workflow children = %#v", group.Subagents)
+	}
+	if nested := group.Subagents[0]; len(nested.Subagents) != 1 || nested.Subagents[0].ID != "deep-reviewer" {
+		t.Fatalf("nested agent children = %#v, want one owned transcript", nested.Subagents)
+	}
+	wantStart := time.Date(2026, 2, 3, 4, 2, 30, 0, time.UTC)
+	wantUpdate := time.Date(2026, 2, 3, 4, 4, 0, 0, time.UTC)
+	if !group.StartedAt.Equal(wantStart) || !group.UpdatedAt.Equal(wantUpdate) {
+		t.Fatalf("group timestamps = %s..%s, want %s..%s", group.StartedAt, group.UpdatedAt, wantStart, wantUpdate)
+	}
+	if got := session.TotalUsage().TotalTokens(); got != 10 {
+		t.Fatalf("TotalUsage().TotalTokens() = %d, want every transcript once for 10", got)
+	}
+	if got := session.TotalCost().USD; got != 14 {
+		t.Fatalf("TotalCost().USD = %v, want every transcript once for 14", got)
+	}
+}
+
+func TestGroupTimestampsCoverEveryImmediateChild(t *testing.T) {
+	later := &model.Session{StartedAt: time.Date(2026, 2, 3, 5, 0, 0, 0, time.UTC), UpdatedAt: time.Date(2026, 2, 3, 6, 0, 0, 0, time.UTC)}
+	earlier := &model.Session{StartedAt: time.Date(2026, 2, 3, 3, 0, 0, 0, time.UTC), UpdatedAt: time.Date(2026, 2, 3, 4, 0, 0, 0, time.UTC)}
+	group := &model.Session{Group: true}
+
+	attachSubagent(group, later)
+	attachSubagent(group, earlier)
+
+	if !group.StartedAt.Equal(earlier.StartedAt) || !group.UpdatedAt.Equal(later.UpdatedAt) {
+		t.Fatalf("group timestamps = %s..%s, want %s..%s", group.StartedAt, group.UpdatedAt, earlier.StartedAt, later.UpdatedAt)
+	}
+}
+
+func TestParseExcludesWorkflowJournal(t *testing.T) {
+	session, err := testParser().Parse(workflowFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := session.Subagents[1]
+	if len(group.Subagents) != 1 || group.Subagents[0].ID == "journal-entry" {
+		t.Fatalf("workflow children = %#v, want only agent transcripts", group.Subagents)
+	}
+}
+
+func TestParseKeepsDepthOneJSONLWithoutAgentPrefix(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session-main.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"user","sessionId":"session-main","message":{"content":"Start"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	subagentDir := filepath.Join(dir, "session-main", "subagents")
+	if err := os.MkdirAll(subagentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	child := []byte(`{"type":"user","agentId":"legacy-child","message":{"content":"Work"}}` + "\n")
+	if err := os.WriteFile(filepath.Join(subagentDir, "legacy-child.jsonl"), child, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Subagents) != 1 || session.Subagents[0].ID != "legacy-child" || session.Subagents[0].Group {
+		t.Fatalf("direct children = %#v, want ungrouped legacy transcript", session.Subagents)
+	}
+}
+
+func TestParseKeysGroupsByImmediateParentDirectory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session-main.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"user","sessionId":"session-main","message":{"content":"Start"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for index, branch := range []string{"branch-a", "branch-b"} {
+		runDir := filepath.Join(dir, "session-main", "subagents", branch, "wf-river-run")
+		if err := os.MkdirAll(runDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		child := fmt.Sprintf(`{"type":"user","agentId":"worker-%d","message":{"content":"Work"}}`, index) + "\n"
+		if err := os.WriteFile(filepath.Join(runDir, fmt.Sprintf("agent-worker-%d.jsonl", index)), []byte(child), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Subagents) != 2 || !session.Subagents[0].Group || !session.Subagents[1].Group ||
+		len(session.Subagents[0].Subagents) != 1 || len(session.Subagents[1].Subagents) != 1 {
+		t.Fatalf("workflow groups = %#v, want one group per immediate parent", session.Subagents)
 	}
 }
 
@@ -389,6 +507,44 @@ func TestParseDoesNotFollowSymlinkedSubagentDirectory(t *testing.T) {
 	}
 }
 
+func TestParseReportsNestedWalkErrorAndKeepsHealthyChildren(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session-main.jsonl")
+	subagentDir := filepath.Join(dir, "session-main", "subagents")
+	blockedDir := filepath.Join(subagentDir, "blocked")
+	if err := os.MkdirAll(blockedDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"type":"user","sessionId":"session-main","message":{"content":"Start"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subagentDir, "agent-healthy.jsonl"), []byte(`{"type":"user","agentId":"healthy","message":{"content":"Work"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parser := testParser()
+	parser.walk = func(root string, visit filepath.WalkFunc) error {
+		return filepath.Walk(root, func(current string, info os.FileInfo, walkErr error) error {
+			if current == blockedDir {
+				return visit(current, nil, errors.New("injected walk failure"))
+			}
+			return visit(current, info, walkErr)
+		})
+	}
+	var diagnostics []string
+	session, err := parser.ParseWithDiagnostics(path, func(path string, _ error) {
+		diagnostics = append(diagnostics, path)
+	})
+	if err != nil {
+		t.Fatalf("ParseWithDiagnostics() error = %v, want partial session", err)
+	}
+	if len(diagnostics) != 1 || diagnostics[0] != blockedDir {
+		t.Fatalf("diagnostics = %#v, want injected nested path", diagnostics)
+	}
+	if len(session.Subagents) != 1 || session.Subagents[0].ID != "healthy" {
+		t.Fatalf("healthy children = %#v, want retained sibling", session.Subagents)
+	}
+}
+
 func TestParseSkipsOversizedRecordAndContinues(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session-oversized.jsonl")
 	file, err := os.Create(path)
@@ -561,6 +717,80 @@ func TestLoadEventsLinksAndLoadsSubagentAtSpawn(t *testing.T) {
 	if len(subagent.Events) != 1 || subagent.Events[0].Text != "Inspect the ridge" {
 		t.Fatalf("subagent events = %#v", subagent.Events)
 	}
+}
+
+func TestLoadEventsTaskFallbackSkipsWorkflowGroup(t *testing.T) {
+	parsed, err := testParser().Parse(workflowFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct, group := parsed.Subagents[0], parsed.Subagents[1]
+	parsed.Subagents = []*model.Session{group, direct}
+
+	if err := testParser().LoadNodeEvents(context.Background(), parsed); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range parsed.Events {
+		if event.Kind == model.EventSubagent && event.ToolName == "Task" {
+			if event.Subagent != direct {
+				t.Fatalf("Task fallback linked to %#v, want direct child", event.Subagent)
+			}
+			return
+		}
+	}
+	t.Fatal("Task event not found")
+}
+
+func TestLoadEventsLinksWorkflowByRunIDAndNamesGroup(t *testing.T) {
+	session, err := testParser().Parse(workflowFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := session.Subagents[1]
+	target.Title = target.ID
+	decoy := &model.Session{ID: "wf-decoy-run", Agent: model.AgentClaude, Path: session.Path + "#wf-decoy-run", Title: "Decoy", Group: true}
+	session.Subagents = append([]*model.Session{decoy}, session.Subagents...)
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range session.Events {
+		if event.Kind == model.EventSubagent && event.ToolName == "Workflow" {
+			if event.Subagent == nil || event.Subagent.ID != "wf-river-run" || event.AgentID != "wf-river-run" {
+				t.Fatalf("Workflow event = %#v, want matching run group", event)
+			}
+			if event.Subagent.Title != "River survey" {
+				t.Fatalf("workflow title = %q, want River survey", event.Subagent.Title)
+			}
+			if event.Subagent != target || decoy.Title != "Decoy" {
+				t.Fatalf("run ID binding target = %#v, decoy title = %q", event.Subagent, decoy.Title)
+			}
+			if len(event.Subagent.Subagents[0].Events) != 1 || event.Subagent.Subagents[0].Events[0].Text != "Map the river channels" {
+				t.Fatalf("nested workflow events = %#v, want loaded child timeline", event.Subagent.Subagents[0].Events)
+			}
+			return
+		}
+	}
+	t.Fatal("Workflow event not found")
+}
+
+func TestLoadEventsKeepsInflightWorkflowEventWithoutGroup(t *testing.T) {
+	path := filepath.Join("testdata", "workflow", "subagents", "session-workflow", "subagents", "workflows", "fixture-inflight.jsonl")
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := testParser().LoadNodeEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range session.Events {
+		if event.Kind == model.EventSubagent && event.ToolName == "Workflow" {
+			if event.Subagent != nil || event.AgentID != "" || event.ResultSummary != "launched" {
+				t.Fatalf("in-flight Workflow event = %#v, want associated result without group", event)
+			}
+			return
+		}
+	}
+	t.Fatalf("in-flight events = %#v, want Workflow subagent event", session.Events)
 }
 
 // A Task input carries keys beyond the identifying ones, and their values are

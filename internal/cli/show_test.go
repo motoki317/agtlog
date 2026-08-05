@@ -15,8 +15,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/motoki317/agtlog/internal/cost"
 	"github.com/motoki317/agtlog/internal/model"
 	"github.com/motoki317/agtlog/internal/source"
+	"github.com/motoki317/agtlog/internal/source/claude"
 )
 
 func TestShowRejectsRawWithoutEvents(t *testing.T) {
@@ -133,6 +135,77 @@ func TestCanonicalRefSurvivesInlineChildThreadUpgrade(t *testing.T) {
 	after := indexSessionGraphs([]*model.Session{root})[1].ref
 	if before != "codex:thread-root#review_x" || after != before {
 		t.Fatalf("canonical ref changed from %q to %q", before, after)
+	}
+}
+
+func TestShowListsAndResolvesNestedWorkflowRef(t *testing.T) {
+	parser := claude.NewParser(cost.NewCalculator(cost.Table{}))
+	fixture := filepath.Join("..", "source", "claude", "testdata", "workflow", "subagents", "session-workflow.jsonl")
+	root, err := parser.Parse(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry := &fakeRegistry{sessions: []*model.Session{root}, load: func(session *model.Session) error {
+		return parser.LoadNodeEvents(context.Background(), session)
+	}}
+	wantRef := "claude:session-workflow#wf-river-run/nested-mapper"
+	nodes := indexSessionGraphs([]*model.Session{root})
+	for _, selector := range []string{"wf-river-run", "wf-river"} {
+		selected, resolveErr := resolveSelector(selector, nodes, nil)
+		if resolveErr != nil || selected.ref != "claude:session-workflow#wf-river-run" {
+			t.Fatalf("resolveSelector(%q) = %#v, %v; want workflow group", selector, selected, resolveErr)
+		}
+	}
+
+	var groupOutput bytes.Buffer
+	if err := Execute(context.Background(), []string{"show", "claude:session-workflow#wf-river-run"}, &groupOutput, io.Discard, func(context.Context, Options) (Registry, error) { return registry, nil }); err != nil {
+		t.Fatal(err)
+	}
+	var groupResponse ShowResponse
+	if err := json.Unmarshal(groupOutput.Bytes(), &groupResponse); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(groupResponse.SubagentRefs, []string{wantRef}) {
+		t.Fatalf("subagent_refs = %#v, want nested workflow ref", groupResponse.SubagentRefs)
+	}
+	if groupResponse.Session.Title != "River survey" {
+		t.Fatalf("group title = %q, want workflow summary title", groupResponse.Session.Title)
+	}
+
+	var summaryOutput bytes.Buffer
+	if err := Execute(context.Background(), []string{"show", "claude:session-workflow#wf-river-run", "--no-events"}, &summaryOutput, io.Discard, func(context.Context, Options) (Registry, error) { return registry, nil }); err != nil {
+		t.Fatal(err)
+	}
+	var summaryResponse ShowResponse
+	if err := json.Unmarshal(summaryOutput.Bytes(), &summaryResponse); err != nil {
+		t.Fatal(err)
+	}
+	if summaryResponse.Session.Title != "River survey" {
+		t.Fatalf("summary group title = %q, want workflow summary title", summaryResponse.Session.Title)
+	}
+
+	var nestedOutput bytes.Buffer
+	if err := Execute(context.Background(), []string{"show", wantRef}, &nestedOutput, io.Discard, func(context.Context, Options) (Registry, error) { return registry, nil }); err != nil {
+		t.Fatal(err)
+	}
+	var nestedResponse ShowResponse
+	if err := json.Unmarshal(nestedOutput.Bytes(), &nestedResponse); err != nil {
+		t.Fatal(err)
+	}
+	if nestedResponse.Session.Ref != wantRef || nestedResponse.Session.Title != "Map the river channels" {
+		t.Fatalf("resolved session = %#v", nestedResponse.Session)
+	}
+}
+
+func TestWorkflowGroupRunIDSelectorReportsAmbiguity(t *testing.T) {
+	roots := []*model.Session{
+		{ID: "session-one", Agent: model.AgentClaude, Subagents: []*model.Session{{ID: "workflow-river-alpha", Agent: model.AgentClaude, Group: true, Path: "/logs/one.jsonl#workflow-river-alpha"}}},
+		{ID: "session-two", Agent: model.AgentClaude, Subagents: []*model.Session{{ID: "workflow-river-beta", Agent: model.AgentClaude, Group: true, Path: "/logs/two.jsonl#workflow-river-beta"}}},
+	}
+	_, err := resolveSelector("workflow-river", indexSessionGraphs(roots), nil)
+	var exit *ExitError
+	if !errors.As(err, &exit) || exit.Detail.Code != "ambiguous_ref" || len(exit.Detail.Candidates) != 2 {
+		t.Fatalf("ambiguous workflow selector error = %#v", err)
 	}
 }
 

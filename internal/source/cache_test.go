@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/motoki317/agtlog/internal/model"
 )
@@ -306,6 +307,70 @@ func TestRegistryInvalidatesUnversionedCache(t *testing.T) {
 	}
 	if adapter.parses != 2 {
 		t.Fatalf("Parse() called %d times, want unversioned cache reparsed", adapter.parses)
+	}
+}
+
+func TestRegistryInvalidatesVersionThreeCache(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
+	if _, err := registry.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cachePath := registry.cachePath(adapter, path)
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(data, &entry); err != nil {
+		t.Fatal(err)
+	}
+	entry["version"] = float64(3)
+	data, err = json.Marshal(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cachePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := registry.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.parses != 2 {
+		t.Fatalf("Parse() called %d times, want version 3 cache reparsed", adapter.parses)
+	}
+}
+
+func TestRegistryRoundTripsWorkflowGroupInCurrentCache(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Date(2026, 2, 3, 4, 0, 0, 0, time.UTC)
+	updated := started.Add(time.Hour)
+	session := &model.Session{ID: "session-workflow", Agent: model.AgentClaude, Path: path, Subagents: []*model.Session{{
+		ID: "wf-river-run", Agent: model.AgentClaude, Path: path + "#wf-river-run", Title: "River survey", Group: true,
+		StartedAt: started, UpdatedAt: updated, Subagents: []*model.Session{{ID: "nested-mapper", Agent: model.AgentClaude, Path: filepath.Join(root, "agent-nested-mapper.jsonl")}},
+	}}}
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
+	registry.storeCached(adapter, path, "fingerprint", session, nil)
+
+	loaded, _, ok := registry.loadCached(adapter, path, "fingerprint")
+	if !ok || loaded == nil || len(loaded.Subagents) != 1 {
+		t.Fatalf("loadCached() = %#v, %t", loaded, ok)
+	}
+	group := loaded.Subagents[0]
+	if !group.Group || group.Path != path+"#wf-river-run" || !group.StartedAt.Equal(started) || !group.UpdatedAt.Equal(updated) ||
+		len(group.Subagents) != 1 || loaded.DescendantAgentCount() != 1 {
+		t.Fatalf("cached workflow graph = %#v", loaded)
 	}
 }
 
