@@ -139,14 +139,22 @@ func (p Parser) CacheFingerprint() string {
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
-	return p.parse(path, 0, make(map[string]bool))
+	return p.parse(path, 0, make(map[string]bool), nil)
+}
+
+func (p Parser) ParseWithDiagnostics(path string, report func(string, error)) (*model.Session, error) {
+	return p.parse(path, 0, make(map[string]bool), report)
 }
 
 func (p Parser) LoadEvents(ctx context.Context, session *model.Session) error {
-	return p.loadEvents(ctx, session, 0, make(map[*model.Session]bool))
+	return p.loadEvents(ctx, session, 0, make(map[*model.Session]bool), true)
 }
 
-func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth int, visited map[*model.Session]bool) error {
+func (p Parser) LoadNodeEvents(ctx context.Context, session *model.Session) error {
+	return p.loadEvents(ctx, session, 0, make(map[*model.Session]bool), false)
+}
+
+func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth int, visited map[*model.Session]bool, recursive bool) error {
 	if depth > maxSubagentDepth || visited[session] {
 		return errors.New("subagent event cycle detected")
 	}
@@ -384,9 +392,11 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 			p.setEventUsage(&session.Events[ref.eventIndex], usage)
 		}
 	}
-	for _, subagent := range session.Subagents {
-		if err := p.loadEvents(ctx, subagent, depth+1, visited); err != nil {
-			continue
+	if recursive {
+		for _, subagent := range session.Subagents {
+			if err := p.loadEvents(ctx, subagent, depth+1, visited, true); err != nil {
+				continue
+			}
 		}
 	}
 	return nil
@@ -745,7 +755,7 @@ func claudeResultText(content json.RawMessage) string {
 
 const maxSubagentDepth = 64
 
-func (p Parser) parse(path string, depth int, visited map[string]bool) (*model.Session, error) {
+func (p Parser) parse(path string, depth int, visited map[string]bool, report func(string, error)) (*model.Session, error) {
 	if depth > maxSubagentDepth {
 		return nil, fmt.Errorf("subagent nesting exceeds %d levels", maxSubagentDepth)
 	}
@@ -778,8 +788,11 @@ func (p Parser) parse(path string, depth int, visited map[string]bool) (*model.S
 			return nil, globErr
 		}
 		for _, subagentPath := range subagentPaths {
-			subagent, parseErr := p.parse(subagentPath, depth+1, visited)
+			subagent, parseErr := p.parse(subagentPath, depth+1, visited, report)
 			if parseErr != nil {
+				if report != nil {
+					report(subagentPath, parseErr)
+				}
 				continue
 			}
 			attachSubagent(session, subagent)
@@ -791,9 +804,11 @@ func (p Parser) parse(path string, depth int, visited map[string]bool) (*model.S
 			if sessionIDFromFile(legacyPath) != session.ID {
 				continue
 			}
-			subagent, parseErr := p.parse(legacyPath, depth+1, visited)
+			subagent, parseErr := p.parse(legacyPath, depth+1, visited, report)
 			if parseErr == nil {
 				attachSubagent(session, subagent)
+			} else if report != nil {
+				report(legacyPath, parseErr)
 			}
 		}
 	}

@@ -492,7 +492,11 @@ func codexTitleBoilerplate(line string) bool {
 }
 
 func (p Parser) LoadEvents(ctx context.Context, session *model.Session) error {
-	return p.loadEvents(ctx, session)
+	return p.loadEvents(ctx, session, true)
+}
+
+func (p Parser) LoadNodeEvents(ctx context.Context, session *model.Session) error {
+	return p.loadEvents(ctx, session, false)
 }
 
 func validTokenUsage(usage *tokenUsage) bool {

@@ -25,12 +25,12 @@ type codexTextBlock struct {
 	Text string `json:"text"`
 }
 
-func (p Parser) loadEvents(ctx context.Context, session *model.Session) error {
+func (p Parser) loadEvents(ctx context.Context, session *model.Session, recursive bool) error {
 	clearCodexEvents(session)
-	return p.loadEventsRecursive(ctx, session, 0, make(map[string]bool))
+	return p.loadEventsRecursive(ctx, session, 0, make(map[string]bool), recursive)
 }
 
-func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session, depth int, visited map[string]bool) error {
+func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session, depth int, visited map[string]bool, recursive bool) error {
 	if depth > maxAgentDepth {
 		return fmt.Errorf("subagent nesting exceeds %d levels", maxAgentDepth)
 	}
@@ -324,12 +324,14 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 			}, request.Usage)
 		}
 	}
-	for _, subagent := range session.Subagents {
-		if subagent.Path == "" || strings.Contains(subagent.Path, "#") {
-			continue
-		}
-		if err := p.loadEventsRecursive(ctx, subagent, depth+1, visited); err != nil {
-			return err
+	if recursive {
+		for _, subagent := range session.Subagents {
+			if subagent.Path == "" || strings.Contains(subagent.Path, "#") {
+				continue
+			}
+			if err := p.loadEventsRecursive(ctx, subagent, depth+1, visited, true); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

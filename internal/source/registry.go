@@ -63,6 +63,14 @@ func ReadRecord(ctx context.Context, ref model.RecordRef) ([]byte, error) {
 }
 
 func (r *Registry) LoadDetail(ctx context.Context, session *model.Session) error {
+	return r.loadDetail(ctx, session, false)
+}
+
+func (r *Registry) LoadNodeDetail(ctx context.Context, session *model.Session) error {
+	return r.loadDetail(ctx, session, true)
+}
+
+func (r *Registry) loadDetail(ctx context.Context, session *model.Session, nodeOnly bool) error {
 	if session == nil {
 		return errors.New("session is nil")
 	}
@@ -79,6 +87,11 @@ func (r *Registry) LoadDetail(ctx context.Context, session *model.Session) error
 			continue
 		}
 		if insideAnyRoot(path, adapter.Roots()) {
+			if nodeOnly {
+				if nodeLoader, supported := adapter.(nodeDetailLoader); supported {
+					return nodeLoader.LoadNodeEvents(ctx, session)
+				}
+			}
 			return loader.LoadEvents(ctx, session)
 		}
 	}
@@ -89,6 +102,24 @@ type detailLoader interface {
 	LoadEvents(context.Context, *model.Session) error
 }
 
+type nodeDetailLoader interface {
+	LoadNodeEvents(context.Context, *model.Session) error
+}
+
+func (r *Registry) ReleaseDetail(session *model.Session) {
+	var release func(*model.Session)
+	release = func(current *model.Session) {
+		if current == nil {
+			return
+		}
+		current.Events = nil
+		for _, child := range current.Subagents {
+			release(child)
+		}
+	}
+	release(session)
+}
+
 type Options struct {
 	Workers  int
 	CacheDir string
@@ -97,6 +128,12 @@ type Options struct {
 type Registry struct {
 	sources []Source
 	options Options
+}
+
+type DiscoveryDiagnostic struct {
+	Agent model.AgentKind
+	Path  string
+	Err   error
 }
 
 func NewRegistry(sources []Source, options Options) *Registry {
@@ -115,15 +152,24 @@ func NewRegistry(sources []Source, options Options) *Registry {
 }
 
 func (r *Registry) Discover(ctx context.Context) ([]*model.Session, error) {
+	sessions, _, err := r.DiscoverWithDiagnostics(ctx)
+	return sessions, err
+}
+
+func (r *Registry) DiscoverWithDiagnostics(ctx context.Context) ([]*model.Session, []DiscoveryDiagnostic, error) {
 	type job struct {
 		source Source
 		path   string
+	}
+	type result struct {
+		session     *model.Session
+		diagnostics []DiscoveryDiagnostic
 	}
 	var pending []job
 	for _, adapter := range r.sources {
 		paths, err := adapter.Discover(ctx)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, path := range paths {
 			pending = append(pending, job{source: adapter, path: path})
@@ -136,7 +182,7 @@ func (r *Registry) Discover(ctx context.Context) ([]*model.Session, error) {
 	}
 	workers = min(workers, max(1, len(pending)))
 	jobs := make(chan job, len(pending))
-	results := make(chan *model.Session, len(pending))
+	results := make(chan result, len(pending))
 	for _, item := range pending {
 		jobs <- item
 	}
@@ -151,22 +197,36 @@ func (r *Registry) Discover(ctx context.Context) ([]*model.Session, error) {
 				if ctx.Err() != nil {
 					return
 				}
-				if session, err := r.discoverSession(item.source, item.path); err == nil {
-					results <- session
+				session, diagnostics, err := r.discoverSession(item.source, item.path)
+				if err != nil {
+					diagnostics = append(diagnostics, DiscoveryDiagnostic{Agent: item.source.Agent(), Path: item.path, Err: err})
+					results <- result{diagnostics: diagnostics}
+					continue
 				}
+				results <- result{session: session, diagnostics: diagnostics}
 			}
 		}()
 	}
 	group.Wait()
 	close(results)
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	allSessions := make([]*model.Session, 0, len(results))
-	for session := range results {
-		allSessions = append(allSessions, session)
+	diagnostics := make([]DiscoveryDiagnostic, 0)
+	for item := range results {
+		diagnostics = append(diagnostics, item.diagnostics...)
+		if item.session != nil {
+			allSessions = append(allSessions, item.session)
+		}
 	}
+	sort.Slice(diagnostics, func(i, j int) bool {
+		if diagnostics[i].Agent != diagnostics[j].Agent {
+			return diagnostics[i].Agent < diagnostics[j].Agent
+		}
+		return diagnostics[i].Path < diagnostics[j].Path
+	})
 	linkedChildren := linkSessionGraphs(allSessions)
 	sessions := make([]*model.Session, 0, len(allSessions))
 	for _, session := range allSessions {
@@ -185,7 +245,7 @@ func (r *Registry) Discover(ctx context.Context) ([]*model.Session, error) {
 		return sessions[i].ID < sessions[j].ID
 	})
 	AttributeOwnership(sessions)
-	return sessions, nil
+	return sessions, diagnostics, nil
 }
 
 func linkSessionGraphs(sessions []*model.Session) map[*model.Session]bool {

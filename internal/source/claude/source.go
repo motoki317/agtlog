@@ -104,8 +104,16 @@ func (s Source) Parse(path string) (*model.Session, error) {
 	return s.parser.Parse(path)
 }
 
+func (s Source) ParseWithDiagnostics(path string, report func(string, error)) (*model.Session, error) {
+	return s.parser.ParseWithDiagnostics(path, report)
+}
+
 func (s Source) LoadEvents(ctx context.Context, session *model.Session) error {
 	return s.parser.LoadEvents(ctx, session)
+}
+
+func (s Source) LoadNodeEvents(ctx context.Context, session *model.Session) error {
+	return s.parser.LoadNodeEvents(ctx, session)
 }
 
 func (s Source) Fingerprint(path string) (string, error) {

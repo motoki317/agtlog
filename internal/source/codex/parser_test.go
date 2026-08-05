@@ -127,6 +127,26 @@ func TestLoadEventsAttachesTokenCountUsageToAssistantTurn(t *testing.T) {
 	}
 }
 
+func TestLoadNodeEventsDoesNotOpenSeparateDescendants(t *testing.T) {
+	rootPath := filepath.Join(t.TempDir(), "rollout-root.jsonl")
+	line := `{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"agent_message","message":"Root readable"}}` + "\n"
+	if err := os.WriteFile(rootPath, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	brokenChild := filepath.Join(t.TempDir(), "rollout-child.jsonl")
+	if err := os.Mkdir(brokenChild, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root := &model.Session{Path: rootPath, Agent: model.AgentCodex, Subagents: []*model.Session{{Path: brokenChild, Agent: model.AgentCodex}}}
+	parser := testParser()
+	if err := parser.LoadNodeEvents(context.Background(), root); err != nil || len(root.Events) != 1 {
+		t.Fatalf("LoadNodeEvents() events = %#v, error = %v", root.Events, err)
+	}
+	if err := parser.LoadEvents(context.Background(), root); err == nil {
+		t.Fatal("LoadEvents() succeeded despite unreadable descendant")
+	}
+}
+
 func TestLoadEventsPricesUsageFromStringSummaryTurnContextModel(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout-string-summary.jsonl")
 	lines := strings.Join([]string{

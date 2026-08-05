@@ -93,7 +93,7 @@ func TestRegistrySkipsOversizedSummaryCacheEntry(t *testing.T) {
 		Title: strings.Repeat("x", maxSummaryCacheBytes),
 	}
 
-	registry.storeCached(adapter, path, "fingerprint", session)
+	registry.storeCached(adapter, path, "fingerprint", session, nil)
 
 	if _, err := os.Stat(registry.cachePath(adapter, path)); !os.IsNotExist(err) {
 		t.Fatalf("oversized cache path error = %v, want not exist", err)

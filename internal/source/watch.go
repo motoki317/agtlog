@@ -257,7 +257,7 @@ func (r *Registry) refresh(ctx context.Context, changedPaths []string) []*model.
 		}
 		// Full re-parse per change; add offset-incremental parsing if large-session refresh lags.
 		before, fingerprintErr := sourceFingerprint(target.adapter, target.path)
-		session, err := r.parseAndCache(target.adapter, target.path, before, fingerprintErr == nil)
+		session, _, err := r.parseAndCache(target.adapter, target.path, before, fingerprintErr == nil)
 		if err != nil {
 			continue
 		}

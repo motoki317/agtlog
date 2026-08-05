@@ -146,6 +146,94 @@ func TestRegistryDiscoversEveryRegisteredSource(t *testing.T) {
 	}
 }
 
+func TestRegistryReportsPerPathDiagnostics(t *testing.T) {
+	adapter := diagnosticSource{
+		sessions: map[string]*model.Session{
+			"good.jsonl": {ID: "session-good", Agent: model.AgentClaude},
+		},
+		errors: map[string]error{
+			"broken-b.jsonl": errors.New("bad record b"),
+			"broken-a.jsonl": errors.New("bad record a"),
+		},
+	}
+	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 3})
+
+	sessions, diagnostics, err := registry.DiscoverWithDiagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].ID != "session-good" {
+		t.Fatalf("sessions = %#v, want session-good", sessions)
+	}
+	if len(diagnostics) != 2 {
+		t.Fatalf("diagnostics = %#v, want two", diagnostics)
+	}
+	if diagnostics[0].Agent != model.AgentClaude || diagnostics[0].Path != "broken-a.jsonl" || diagnostics[0].Err.Error() != "bad record a" {
+		t.Fatalf("first diagnostic = %#v", diagnostics[0])
+	}
+	if diagnostics[1].Path != "broken-b.jsonl" || diagnostics[1].Err.Error() != "bad record b" {
+		t.Fatalf("second diagnostic = %#v", diagnostics[1])
+	}
+
+	legacySessions, err := registry.Discover(context.Background())
+	if err != nil || len(legacySessions) != 1 {
+		t.Fatalf("Discover() = %#v, %v", legacySessions, err)
+	}
+}
+
+func TestRegistryReportsClaudeSubagentDiagnosticsFromCache(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project-orbit")
+	if err := os.MkdirAll(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parentPath := filepath.Join(project, "session-root.jsonl")
+	parent := `{"type":"user","timestamp":"2026-01-02T00:00:00Z","sessionId":"session-root","cwd":"/workspace/orbit","message":{"content":"Inspect relay"}}` + "\n"
+	if err := os.WriteFile(parentPath, []byte(parent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	brokenPath := filepath.Join(project, "session-root", "subagents", "agent-broken.jsonl")
+	if err := os.MkdirAll(brokenPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	adapter := claude.NewSource(claude.NewParser(cost.NewCalculator(cost.Table{})), []string{root})
+	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1, CacheDir: t.TempDir()})
+	for attempt := range 2 {
+		sessions, diagnostics, err := registry.DiscoverWithDiagnostics(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sessions) != 1 || len(diagnostics) != 1 || !strings.HasSuffix(diagnostics[0].Path, filepath.Join("project-orbit", "session-root", "subagents", "agent-broken.jsonl")) {
+			t.Fatalf("attempt %d: sessions = %#v, diagnostics = %#v", attempt, sessions, diagnostics)
+		}
+	}
+}
+
+type diagnosticSource struct {
+	sessions map[string]*model.Session
+	errors   map[string]error
+}
+
+func (s diagnosticSource) Agent() model.AgentKind { return model.AgentClaude }
+func (s diagnosticSource) Roots() []string        { return nil }
+func (s diagnosticSource) Discover(context.Context) ([]string, error) {
+	paths := make([]string, 0, len(s.sessions)+len(s.errors))
+	for path := range s.sessions {
+		paths = append(paths, path)
+	}
+	for path := range s.errors {
+		paths = append(paths, path)
+	}
+	return paths, nil
+}
+func (s diagnosticSource) Parse(path string) (*model.Session, error) {
+	if err := s.errors[path]; err != nil {
+		return nil, err
+	}
+	session := *s.sessions[path]
+	return &session, nil
+}
+
 func TestRegistryLinksCodexSubagentSidecarUsage(t *testing.T) {
 	root := t.TempDir()
 	parentPath := filepath.Join(root, "rollout-thread-root.jsonl")

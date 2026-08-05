@@ -14,13 +14,19 @@ import (
 )
 
 type cacheEntry struct {
-	Version     int             `json:"version"`
-	Agent       model.AgentKind `json:"agent"`
-	Fingerprint string          `json:"fingerprint"`
-	Session     *model.Session  `json:"session"`
+	Version     int               `json:"version"`
+	Agent       model.AgentKind   `json:"agent"`
+	Fingerprint string            `json:"fingerprint"`
+	Session     *model.Session    `json:"session"`
+	Diagnostics []cacheDiagnostic `json:"diagnostics"`
 }
 
-const cacheVersion = 2
+type cacheDiagnostic struct {
+	Path    string `json:"path"`
+	Message string `json:"message"`
+}
+
+const cacheVersion = 3
 
 const maxSummaryCacheBytes = 64 << 20
 
@@ -28,31 +34,39 @@ type fingerprinter interface {
 	Fingerprint(string) (string, error)
 }
 
-func (r *Registry) loadCached(adapter Source, path, fingerprint string) (*model.Session, bool) {
+func (r *Registry) loadCached(adapter Source, path, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool) {
 	if !r.cacheDirSafe() {
-		return nil, false
+		return nil, nil, false
 	}
 	cachePath := r.cachePath(adapter, path)
 	info, err := os.Lstat(cachePath)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() > maxSummaryCacheBytes {
-		return nil, false
+		return nil, nil, false
 	}
 	data, err := os.ReadFile(cachePath)
 	if err != nil {
-		return nil, false
+		return nil, nil, false
 	}
 	var entry cacheEntry
 	if json.Unmarshal(data, &entry) != nil || entry.Version != cacheVersion || entry.Agent != adapter.Agent() || entry.Fingerprint != fingerprint || entry.Session == nil {
-		return nil, false
+		return nil, nil, false
 	}
-	return entry.Session, true
+	diagnostics := make([]DiscoveryDiagnostic, 0, len(entry.Diagnostics))
+	for _, diagnostic := range entry.Diagnostics {
+		diagnostics = append(diagnostics, DiscoveryDiagnostic{Agent: adapter.Agent(), Path: diagnostic.Path, Err: errors.New(diagnostic.Message)})
+	}
+	return entry.Session, diagnostics, true
 }
 
-func (r *Registry) storeCached(adapter Source, path, fingerprint string, session *model.Session) {
+func (r *Registry) storeCached(adapter Source, path, fingerprint string, session *model.Session, diagnostics []DiscoveryDiagnostic) {
 	if r.options.CacheDir == "" || !r.cacheDirSafe() {
 		return
 	}
-	data, err := json.Marshal(cacheEntry{Version: cacheVersion, Agent: adapter.Agent(), Fingerprint: fingerprint, Session: session})
+	cachedDiagnostics := make([]cacheDiagnostic, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		cachedDiagnostics = append(cachedDiagnostics, cacheDiagnostic{Path: diagnostic.Path, Message: diagnostic.Err.Error()})
+	}
+	data, err := json.Marshal(cacheEntry{Version: cacheVersion, Agent: adapter.Agent(), Fingerprint: fingerprint, Session: session, Diagnostics: cachedDiagnostics})
 	if err != nil || len(data) > maxSummaryCacheBytes || os.MkdirAll(r.options.CacheDir, 0o700) != nil {
 		return
 	}
@@ -141,31 +155,48 @@ func resolveExistingPath(path string) (string, error) {
 	}
 }
 
-func (r *Registry) discoverSession(adapter Source, path string) (*model.Session, error) {
+func (r *Registry) discoverSession(adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
 	if r.options.CacheDir == "" {
-		return adapter.Parse(path)
+		return parseSessionWithDiagnostics(adapter, path)
 	}
 	fingerprint, err := sourceFingerprint(adapter, path)
 	if err == nil {
-		if session, ok := r.loadCached(adapter, path, fingerprint); ok {
-			return session, nil
+		if session, diagnostics, ok := r.loadCached(adapter, path, fingerprint); ok {
+			return session, diagnostics, nil
 		}
 	}
 	return r.parseAndCache(adapter, path, fingerprint, err == nil)
 }
 
-func (r *Registry) parseAndCache(adapter Source, path, before string, cacheable bool) (*model.Session, error) {
-	session, err := adapter.Parse(path)
+func (r *Registry) parseAndCache(adapter Source, path, before string, cacheable bool) (*model.Session, []DiscoveryDiagnostic, error) {
+	session, diagnostics, err := parseSessionWithDiagnostics(adapter, path)
 	if err != nil {
-		return nil, err
+		return nil, diagnostics, err
 	}
 	if cacheable {
 		after, fingerprintErr := sourceFingerprint(adapter, path)
 		if fingerprintErr == nil && before == after {
-			r.storeCached(adapter, path, after, session)
+			r.storeCached(adapter, path, after, session, diagnostics)
 		}
 	}
-	return session, nil
+	return session, diagnostics, nil
+}
+
+type diagnosticParser interface {
+	ParseWithDiagnostics(string, func(string, error)) (*model.Session, error)
+}
+
+func parseSessionWithDiagnostics(adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
+	parser, ok := adapter.(diagnosticParser)
+	if !ok {
+		session, err := adapter.Parse(path)
+		return session, nil, err
+	}
+	var diagnostics []DiscoveryDiagnostic
+	session, err := parser.ParseWithDiagnostics(path, func(diagnosticPath string, diagnosticErr error) {
+		diagnostics = append(diagnostics, DiscoveryDiagnostic{Agent: adapter.Agent(), Path: diagnosticPath, Err: diagnosticErr})
+	})
+	return session, diagnostics, err
 }
 
 func sourceFingerprint(adapter Source, path string) (string, error) {
