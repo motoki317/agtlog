@@ -28,8 +28,9 @@ nix run github:motoki317/agtlog
 agtlog
 ```
 
-agtlog finds the standard Claude Code and Codex log folders, shows every session
-in one list, and updates as new activity arrives. Common options:
+agtlog finds the standard Claude Code and Codex log folders, shows every
+top-level session, and updates as new activity arrives. Open a row to
+inspect its nested subagents. Common options:
 
 ```text
 --agent claude|codex   show only one agent
@@ -44,11 +45,34 @@ agtlog never writes to your agent logs or config.
 Its only writes are small caches for sessions and prices, kept under your XDG
 cache folder.
 
+### Machine-readable CLI
+
+The `list`, `show`, and `search` subcommands expose the same local sessions to
+scripts and coding agents. They emit JSON by default.
+
+```bash
+agtlog list --project forge --since 7d
+agtlog search 'watcher race' --project forge --since 7d
+agtlog show 'claude:0f3a9c21-4d7e-4a1b-9d2c-8e5f7a1b3c4d' --offset 12 --limit 1 --full
+```
+
+Replace the fictional project, ref, and event index with values from `list` and
+`search`.
+
+Filter searches with a project, directory, time range, or session selector.
+Scoped searches avoid opening unrelated logs and are the fast path.
+
+Use `--format text` for terminal-safe tables. Subcommands use cached and embedded
+prices without a background network request; `--offline` states that default
+explicitly. Use `--refresh-prices` to update the price cache before a command.
+
+The complete command and JSON contract is in [docs/cli.md](docs/cli.md).
+
 ### About cost
 
 Costs are estimates based on public API prices.
-Codex costs start with `~`: if you pay for a ChatGPT plan, your real cost is
-usually lower.
+A `~` marks a published stand-in price. Codex costs commonly use stand-ins; if
+you pay for a ChatGPT plan, your real cost is usually lower.
 An `!` means one model has no price yet, so the shown total is partial.
 
 ## Keys
