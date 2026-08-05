@@ -124,13 +124,20 @@ func CleanTimelineText(value string) string {
 	return strings.Join(cleaned, "\n")
 }
 
-func BoundedDetailText(value string) string {
-	runeCount := utf8.RuneCountInString(value)
-	if runeCount <= maxDetailRunes {
+func BoundedDetailText(value string, limits ...int) string {
+	limit := maxDetailRunes
+	if len(limits) > 0 {
+		limit = limits[0]
+	}
+	if limit <= 0 {
 		return value
 	}
-	half := (maxDetailRunes - 1) / 2
-	tailRunes := maxDetailRunes - 1 - half
+	runeCount := utf8.RuneCountInString(value)
+	if runeCount <= limit {
+		return value
+	}
+	half := (limit - 1) / 2
+	tailRunes := limit - 1 - half
 	headByte, tailByte := len(value), len(value)
 	seen := 0
 	for index := range value {

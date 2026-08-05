@@ -1,0 +1,4 @@
+REF                    AGENT   PROJECT  TITLE            AGE  MSGS  SUBS  TOKENS  $
+claude:session-claude  claude  forge    Repair relay     2h   1     1     40      0.03!
+codex:session-codex    codex   forge    Add JSON output  5h   2     -     105     ~0.15
+PAGE	returned=2	total=2	has_more=false	next_offset=2

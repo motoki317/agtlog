@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "command": "list",
+  "sessions": [
+    {
+      "ref": "claude:session-claude",
+      "agent": "claude",
+      "project": "forge",
+      "cwd": "/workspace/forge",
+      "title": "Repair relay",
+      "git_branch": "main",
+      "models": [
+        "claude-opus-4-8"
+      ],
+      "started_at": "2026-08-05T07:41:12+09:00",
+      "updated_at": "2026-08-05T09:12:04+09:00",
+      "messages": 1,
+      "subagents": 1,
+      "has_error": false,
+      "tokens": {
+        "uncached_input": 25,
+        "output": 5,
+        "cache_write": 0,
+        "cache_read": 10,
+        "total": 40
+      },
+      "cost": {
+        "usd": 0.033,
+        "complete": false,
+        "estimated": false,
+        "missing_pricing": [
+          "claude-future-9"
+        ]
+      },
+      "path": "testdata/corpus/claude/project-forge/session-claude.jsonl"
+    },
+    {
+      "ref": "codex:session-codex",
+      "agent": "codex",
+      "project": "forge",
+      "cwd": "/workspace/forge",
+      "title": "Add JSON output",
+      "git_branch": "feature/json",
+      "models": [
+        "gpt-5.6-sol"
+      ],
+      "started_at": "2026-08-05T05:50:00+09:00",
+      "updated_at": "2026-08-05T06:12:04+09:00",
+      "messages": 2,
+      "subagents": 0,
+      "has_error": false,
+      "tokens": {
+        "uncached_input": 60,
+        "output": 5,
+        "cache_write": 0,
+        "cache_read": 40,
+        "total": 105
+      },
+      "cost": {
+        "usd": 0.155,
+        "complete": true,
+        "estimated": true,
+        "missing_pricing": []
+      },
+      "path": "testdata/corpus/codex/2026/08/05/rollout-session-codex.jsonl"
+    }
+  ],
+  "page": {
+    "offset": 0,
+    "limit": 0,
+    "returned": 2,
+    "total": 2,
+    "has_more": false,
+    "next_offset": 2
+  },
+  "warnings": []
+}

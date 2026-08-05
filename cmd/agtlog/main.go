@@ -17,6 +17,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
+	machinecli "github.com/motoki317/agtlog/internal/cli"
 	"github.com/motoki317/agtlog/internal/cost"
 	"github.com/motoki317/agtlog/internal/model"
 	"github.com/motoki317/agtlog/internal/source"
@@ -33,6 +34,9 @@ func main() {
 	defer stop()
 	err := executeWithDiagnostics(ctx, os.Args[1:], os.Stdout, os.Stderr, defaultRegistry)
 	if err != nil {
+		if status, ok := machinecli.ExitStatus(err); ok {
+			os.Exit(status)
+		}
 		fmt.Fprintf(os.Stderr, "agtlog: %s\n", terminalField(err.Error(), 512))
 		os.Exit(1)
 	}
@@ -181,6 +185,9 @@ func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 	theme := flags.String("theme", "", "color theme: default, nord, or dracula")
 	flags.Usage = func() {
 		_, _ = fmt.Fprintln(output, "Usage: agtlog [--offline] [--refresh-prices] [--no-watch] [--agent claude|codex] [--theme default|nord|dracula] [--version]")
+		_, _ = fmt.Fprintln(output, "       agtlog list [flags]")
+		_, _ = fmt.Fprintln(output, "       agtlog show <ref> [flags]")
+		_, _ = fmt.Fprintln(output, "       agtlog search <pattern> [flags]")
 		_, _ = fmt.Fprintln(output, "  --agent           limit sessions to claude or codex")
 		_, _ = fmt.Fprintln(output, "  --no-watch        disable live session following")
 		_, _ = fmt.Fprintln(output, "  --offline         skip pricing refresh")
@@ -219,6 +226,11 @@ func executeWithDiagnostics(ctx context.Context, args []string, output, diagnost
 }
 
 func executeApplication(ctx context.Context, args []string, input io.Reader, output, diagnostics io.Writer, factory registryFactory, runner tuiRunner) error {
+	if len(args) > 0 && machinecli.IsCommand(args[0]) {
+		return machinecli.Execute(ctx, args, output, diagnostics, func(ctx context.Context, options machinecli.Options) (machinecli.Registry, error) {
+			return factory(ctx, cliOptions{offline: options.Offline, refreshPrices: options.RefreshPrices, agent: options.Agent})
+		})
+	}
 	var parsedOutput bytes.Buffer
 	options, err := parseOptions(args, &parsedOutput)
 	if options.help {

@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "command": "show",
+  "session": {
+    "ref": "claude:session-claude",
+    "agent": "claude",
+    "project": "forge",
+    "cwd": "/workspace/forge",
+    "title": "Repair relay",
+    "git_branch": "main",
+    "models": [
+      "claude-opus-4-8"
+    ],
+    "started_at": "2026-08-05T07:41:12+09:00",
+    "updated_at": "2026-08-05T09:12:04+09:00",
+    "messages": 1,
+    "subagents": 1,
+    "has_error": false,
+    "tokens": {
+      "uncached_input": 25,
+      "output": 5,
+      "cache_write": 0,
+      "cache_read": 10,
+      "total": 40
+    },
+    "cost": {
+      "usd": 0.033,
+      "complete": false,
+      "estimated": false,
+      "missing_pricing": [
+        "claude-future-9"
+      ]
+    },
+    "path": "testdata/corpus/claude/project-forge/session-claude.jsonl"
+  },
+  "subagent_refs": [
+    "claude:session-claude#scout"
+  ],
+  "totals": {
+    "tokens": {
+      "self": {
+        "uncached_input": 20,
+        "output": 4,
+        "cache_write": 0,
+        "cache_read": 10,
+        "total": 34
+      },
+      "descendants": {
+        "uncached_input": 5,
+        "output": 1,
+        "cache_write": 0,
+        "cache_read": 0,
+        "total": 6
+      },
+      "total": {
+        "uncached_input": 25,
+        "output": 5,
+        "cache_write": 0,
+        "cache_read": 10,
+        "total": 40
+      }
+    },
+    "cost": {
+      "self": {
+        "usd": 0.033,
+        "complete": true,
+        "estimated": false,
+        "missing_pricing": []
+      },
+      "descendants": {
+        "usd": 0,
+        "complete": false,
+        "estimated": false,
+        "missing_pricing": [
+          "claude-future-9"
+        ]
+      },
+      "total": {
+        "usd": 0.033,
+        "complete": false,
+        "estimated": false,
+        "missing_pricing": [
+          "claude-future-9"
+        ]
+      }
+    }
+  },
+  "events": [
+    {
+      "index": 0,
+      "timestamp": "2026-08-05T07:41:12+09:00",
+      "kind": "user",
+      "text": "Repair the relay",
+      "model": "",
+      "truncated": [],
+      "record": {
+        "path": "testdata/corpus/claude/project-forge/session-claude.jsonl",
+        "offset": 0,
+        "length": 202
+      }
+    },
+    {
+      "index": 1,
+      "timestamp": "2026-08-05T09:01:00+09:00",
+      "kind": "tool-call",
+      "text": "Bash(inspect relay)",
+      "model": "claude-opus-4-8",
+      "tool": {
+        "name": "Bash",
+        "call_id": "tool-relay",
+        "summary": "exit 7",
+        "input": "inspect relay",
+        "diff": "",
+        "output": "Error: Exit code 7\nrelay failure in sector 7",
+        "duration_ms": 1000
+      },
+      "usage": {
+        "uncached_input": 20,
+        "output": 4,
+        "cache_write": 0,
+        "cache_read": 10,
+        "flow": 24,
+        "context": 30
+      },
+      "cost": {
+        "usd": 0.033,
+        "complete": true,
+        "estimated": false
+      },
+      "truncated": [],
+      "record": {
+        "path": "testdata/corpus/claude/project-forge/session-claude.jsonl",
+        "offset": 203,
+        "length": 417
+      }
+    },
+    {
+      "index": 2,
+      "timestamp": "2026-08-05T09:01:01+09:00",
+      "kind": "tool-result",
+      "text": "exit 7",
+      "model": "",
+      "tool": {
+        "name": "",
+        "call_id": "tool-relay",
+        "summary": "",
+        "input": "",
+        "diff": "",
+        "output": "",
+        "duration_ms": 0
+      },
+      "truncated": [],
+      "record": {
+        "path": "testdata/corpus/claude/project-forge/session-claude.jsonl",
+        "offset": 621,
+        "length": 262
+      }
+    },
+    {
+      "index": 3,
+      "timestamp": "2026-08-05T09:03:00+09:00",
+      "kind": "compact",
+      "text": "Context compacted",
+      "model": "",
+      "truncated": [],
+      "record": {
+        "path": "testdata/corpus/claude/project-forge/session-claude.jsonl",
+        "offset": 884,
+        "length": 198
+      },
+      "compact": {
+        "trigger": "auto",
+        "post_tokens": 64
+      }
+    }
+  ],
+  "page": {
+    "offset": 0,
+    "limit": 0,
+    "returned": 4,
+    "total": 4,
+    "has_more": false,
+    "next_offset": 4,
+    "complete": true
+  },
+  "warnings": []
+}

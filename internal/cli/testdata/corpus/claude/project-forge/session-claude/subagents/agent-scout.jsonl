@@ -1,0 +1,2 @@
+{"type":"user","uuid":"user-scout","timestamp":"2026-08-05T08:10:00+09:00","sessionId":"session-claude","agentId":"scout","isSidechain":true,"cwd":"/workspace/forge","message":{"content":"Scout relay"}}
+{"type":"assistant","uuid":"assistant-scout","timestamp":"2026-08-05T08:20:00+09:00","sessionId":"session-claude","agentId":"scout","isSidechain":true,"requestId":"request-scout","message":{"id":"message-scout","model":"claude-future-9","content":[{"type":"text","text":"relay beacon found"}],"usage":{"input_tokens":5,"output_tokens":1}}}

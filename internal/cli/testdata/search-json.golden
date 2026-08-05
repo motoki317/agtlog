@@ -1,0 +1,150 @@
+{
+  "schema_version": 1,
+  "command": "search",
+  "hits": [
+    {
+      "session": {
+        "ref": "claude:session-claude",
+        "agent": "claude",
+        "project": "forge",
+        "title": "Repair relay",
+        "updated_at": "2026-08-05T09:12:04+09:00"
+      },
+      "event": {
+        "index": 0,
+        "timestamp": "2026-08-05T07:41:12+09:00",
+        "kind": "user",
+        "tool": ""
+      },
+      "field": "text",
+      "range": [
+        11,
+        16
+      ],
+      "snippet": "Repair the relay",
+      "matches": 1
+    },
+    {
+      "session": {
+        "ref": "claude:session-claude",
+        "agent": "claude",
+        "project": "forge",
+        "title": "Repair relay",
+        "updated_at": "2026-08-05T09:12:04+09:00"
+      },
+      "event": {
+        "index": 1,
+        "timestamp": "2026-08-05T09:01:00+09:00",
+        "kind": "tool-call",
+        "tool": "Bash"
+      },
+      "field": "text",
+      "range": [
+        13,
+        18
+      ],
+      "snippet": "Bash(inspect relay)",
+      "matches": 1
+    },
+    {
+      "session": {
+        "ref": "claude:session-claude",
+        "agent": "claude",
+        "project": "forge",
+        "title": "Repair relay",
+        "updated_at": "2026-08-05T09:12:04+09:00"
+      },
+      "event": {
+        "index": 1,
+        "timestamp": "2026-08-05T09:01:00+09:00",
+        "kind": "tool-call",
+        "tool": "Bash"
+      },
+      "field": "tool.input",
+      "range": [
+        8,
+        13
+      ],
+      "snippet": "inspect relay",
+      "matches": 1
+    },
+    {
+      "session": {
+        "ref": "claude:session-claude",
+        "agent": "claude",
+        "project": "forge",
+        "title": "Repair relay",
+        "updated_at": "2026-08-05T09:12:04+09:00"
+      },
+      "event": {
+        "index": 1,
+        "timestamp": "2026-08-05T09:01:00+09:00",
+        "kind": "tool-call",
+        "tool": "Bash"
+      },
+      "field": "tool.output",
+      "range": [
+        19,
+        24
+      ],
+      "snippet": "Error: Exit code 7\nrelay failure in sector 7",
+      "matches": 1
+    },
+    {
+      "session": {
+        "ref": "claude:session-claude#scout",
+        "agent": "claude",
+        "project": "forge",
+        "title": "Scout relay",
+        "updated_at": "2026-08-05T08:20:00+09:00"
+      },
+      "event": {
+        "index": 0,
+        "timestamp": "2026-08-05T08:10:00+09:00",
+        "kind": "user",
+        "tool": ""
+      },
+      "field": "text",
+      "range": [
+        6,
+        11
+      ],
+      "snippet": "Scout relay",
+      "matches": 1
+    },
+    {
+      "session": {
+        "ref": "claude:session-claude#scout",
+        "agent": "claude",
+        "project": "forge",
+        "title": "Scout relay",
+        "updated_at": "2026-08-05T08:20:00+09:00"
+      },
+      "event": {
+        "index": 1,
+        "timestamp": "2026-08-05T08:20:00+09:00",
+        "kind": "assistant-text",
+        "tool": ""
+      },
+      "field": "text",
+      "range": [
+        0,
+        5
+      ],
+      "snippet": "relay beacon found",
+      "matches": 1
+    }
+  ],
+  "page": {
+    "offset": 0,
+    "limit": 0,
+    "returned": 6,
+    "has_more": false,
+    "next_offset": 6,
+    "complete": true,
+    "total": 6,
+    "sessions_scanned": 3,
+    "sessions_matched": 2
+  },
+  "warnings": []
+}

@@ -322,6 +322,11 @@ func (s Session) TotalUsage() Usage {
 }
 
 func (s Session) OwnedUsage() Usage {
+	total := s.OwnedSelfUsage()
+	return total.Add(s.OwnedDescendantUsage())
+}
+
+func (s Session) OwnedSelfUsage() Usage {
 	var total Usage
 	for _, usage := range s.Usage {
 		total = total.Add(usage)
@@ -331,6 +336,11 @@ func (s Session) OwnedUsage() Usage {
 	total.CacheCreation5mTokens -= s.DuplicatedUsage.CacheCreation5mTokens
 	total.CacheCreation1hTokens -= s.DuplicatedUsage.CacheCreation1hTokens
 	total.CacheReadTokens -= s.DuplicatedUsage.CacheReadTokens
+	return total
+}
+
+func (s Session) OwnedDescendantUsage() Usage {
+	var total Usage
 	for _, subagent := range s.Subagents {
 		total = total.Add(subagent.OwnedUsage())
 	}
@@ -369,9 +379,23 @@ func (s Session) TotalCost() Cost {
 }
 
 func (s Session) OwnedCost() Cost {
+	total := s.OwnedSelfCost()
+	return addOwnedCosts(total, s.Subagents)
+}
+
+func (s Session) OwnedSelfCost() Cost {
 	total := s.Cost
 	total.EstimatedRates = append([]EstimatedRate(nil), s.Cost.EstimatedRates...)
+	total.MissingPricingModels = append([]string(nil), s.Cost.MissingPricingModels...)
 	total.USD -= s.DuplicatedUSD
+	return total
+}
+
+func (s Session) OwnedDescendantCost() Cost {
+	return addOwnedCosts(Cost{}, s.Subagents)
+}
+
+func addOwnedCosts(total Cost, subagents []*Session) Cost {
 	estimated := make(map[EstimatedRate]bool, len(total.EstimatedRates))
 	for _, rate := range total.EstimatedRates {
 		estimated[rate] = true
@@ -380,7 +404,7 @@ func (s Session) OwnedCost() Cost {
 	for _, name := range total.MissingPricingModels {
 		seen[name] = true
 	}
-	for _, subagent := range s.Subagents {
+	for _, subagent := range subagents {
 		subtotal := subagent.OwnedCost()
 		total.USD += subtotal.USD
 		total.Estimated = total.Estimated || subtotal.Estimated

@@ -286,11 +286,15 @@ func TestRunHelpPrintsUsageAndSucceeds(t *testing.T) {
 	}
 }
 
-func TestRunRejectsUnexpectedArguments(t *testing.T) {
-	registry := source.NewRegistry(nil, source.Options{})
-	err := run(context.Background(), []string{"list"}, io.Discard, registry)
-	if err == nil || !strings.Contains(err.Error(), "unexpected argument") {
-		t.Fatalf("run() error = %v, want unexpected argument", err)
+func TestRunDispatchesListSubcommand(t *testing.T) {
+	session := &model.Session{ID: "session-a", Agent: model.AgentClaude, Title: "Plan launch"}
+	registry := source.NewRegistry([]source.Source{staticSource{session: session}}, source.Options{Workers: 1})
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{"list"}, &output, registry); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"command": "list"`) || !strings.Contains(output.String(), `"ref": "claude:session-a"`) {
+		t.Fatalf("list output = %q", output.String())
 	}
 }
 

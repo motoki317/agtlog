@@ -1,0 +1,8 @@
+REF                          INDEX  KIND            FIELD        RANGE  MATCHES  SNIPPET
+claude:session-claude        0      user            text         11:16  1        Repair the relay
+claude:session-claude        1      tool-call       text         13:18  1        Bash(inspect relay)
+claude:session-claude        1      tool-call       tool.input   8:13   1        inspect relay
+claude:session-claude        1      tool-call       tool.output  19:24  1        Error: Exit code 7 relay failure in sector 7
+claude:session-claude#scout  0      user            text         6:11   1        Scout relay
+claude:session-claude#scout  1      assistant-text  text         0:5    1        relay beacon found
+PAGE	returned=6	total=6	has_more=false	next_offset=6	complete=true	sessions_scanned=3	sessions_matched=2
