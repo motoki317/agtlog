@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -19,8 +20,9 @@ import (
 )
 
 type Parser struct {
-	calculator cost.Calculator
-	walk       func(string, filepath.WalkFunc) error
+	calculator           cost.Calculator
+	walk                 func(string, filepath.WalkFunc) error
+	readSubagentMetadata func(string) ([]byte, error)
 }
 
 type logRecord struct {
@@ -133,20 +135,31 @@ type userContentRecord struct {
 }
 
 func NewParser(calculator cost.Calculator) Parser {
-	return Parser{calculator: calculator, walk: filepath.Walk}
+	return Parser{
+		calculator:           calculator,
+		walk:                 filepath.Walk,
+		readSubagentMetadata: readClaudeSubagentMetadata,
+	}
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v16:" + p.calculator.Fingerprint()
+	return "claude-parser-v17:" + p.calculator.Fingerprint()
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
-	session, _, err := p.parse(path, 0, make(map[string]bool), nil)
-	return session, err
+	return p.parseSummary(path, nil)
 }
 
 func (p Parser) ParseWithDiagnostics(path string, report func(string, error)) (*model.Session, error) {
-	session, _, err := p.parse(path, 0, make(map[string]bool), report)
+	return p.parseSummary(path, report)
+}
+
+func (p Parser) parseSummary(path string, report func(string, error)) (*model.Session, error) {
+	titlePrompts := make(map[*model.Session]string)
+	session, err := p.parse(path, 0, make(map[string]bool), report, titlePrompts)
+	if err == nil {
+		resolveSubagentTitleCollisions(session.Subagents, titlePrompts)
+	}
 	return session, err
 }
 
@@ -809,37 +822,47 @@ func claudeResultText(content json.RawMessage) string {
 const maxSubagentDepth = 64
 const maxRetainedTitlePromptBytes = 16 << 10
 const maxRetainedTitlePromptLines = 128
+const maxClaudeSubagentMetadataBytes = 64 << 10
 
-func (p Parser) parse(path string, depth int, visited map[string]bool, report func(string, error)) (*model.Session, string, error) {
+type flatClaudeSubagent struct {
+	session    *model.Session
+	transcript string
+	parentID   string
+}
+
+func (p Parser) parse(path string, depth int, visited map[string]bool, report func(string, error), titlePrompts map[*model.Session]string) (*model.Session, error) {
 	if depth > maxSubagentDepth {
-		return nil, "", fmt.Errorf("subagent nesting exceeds %d levels", maxSubagentDepth)
+		return nil, fmt.Errorf("subagent nesting exceeds %d levels", maxSubagentDepth)
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return nil, "", errors.New("session path is not a regular file")
+		return nil, errors.New("session path is not a regular file")
 	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	if visited[absolute] {
-		return nil, "", errors.New("subagent cycle detected")
+		return nil, errors.New("subagent cycle detected")
 	}
 	visited[absolute] = true
 	defer delete(visited, absolute)
 
 	session, workflowNames, titlePrompt, err := p.parseFile(path)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	titlePrompts := make(map[*model.Session]string)
+	if titlePrompt != "" {
+		titlePrompts[session] = titlePrompt
+	}
 	subagentDir := filepath.Join(strings.TrimSuffix(path, filepath.Ext(path)), "subagents")
 	if info, statErr := os.Lstat(subagentDir); statErr == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
 		groups := make(map[string]*model.Session)
 		children := make([]*model.Session, 0)
+		flatChildren := make([]flatClaudeSubagent, 0)
 		walk := p.walk
 		if walk == nil {
 			walk = filepath.Walk
@@ -856,7 +879,7 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 					return filepath.SkipDir
 				}
 				if subagentPath != subagentDir && subagentTranscriptCandidate(subagentPath, subagentDir) {
-					if _, _, parseErr := p.parse(subagentPath, depth+1, visited, report); parseErr != nil && report != nil {
+					if _, parseErr := p.parse(subagentPath, depth+1, visited, report, titlePrompts); parseErr != nil && report != nil {
 						report(subagentPath, parseErr)
 					}
 					return filepath.SkipDir
@@ -867,18 +890,25 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 				return nil
 			}
 			parentDir := filepath.Dir(subagentPath)
-			subagent, subagentTitlePrompt, parseErr := p.parse(subagentPath, depth+1, visited, report)
+			subagent, parseErr := p.parse(subagentPath, depth+1, visited, report, titlePrompts)
 			if parseErr != nil {
 				if report != nil {
 					report(subagentPath, parseErr)
 				}
 				return nil
 			}
-			if subagentTitlePrompt != "" {
-				titlePrompts[subagent] = subagentTitlePrompt
-			}
 			if parentDir == subagentDir {
 				children = append(children, subagent)
+				metadataPath := strings.TrimSuffix(subagentPath, filepath.Ext(subagentPath)) + ".meta.json"
+				parentID, metadataErr := p.readClaudeSubagentParentID(metadataPath)
+				if metadataErr != nil {
+					parentID = ""
+				}
+				flatChildren = append(flatChildren, flatClaudeSubagent{
+					session:    subagent,
+					transcript: subagentPath,
+					parentID:   parentID,
+				})
 				return nil
 			}
 			groupID := filepath.Base(parentDir)
@@ -896,10 +926,13 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 			return nil
 		})
 		if walkErr != nil {
-			return nil, "", walkErr
+			return nil, walkErr
 		}
+		nested := reparentFlatClaudeSubagents(flatChildren, depth+1)
 		for _, child := range children {
-			attachSubagent(session, child)
+			if !nested[child] {
+				attachSubagent(session, child)
+			}
 		}
 	}
 	if depth == 0 {
@@ -908,24 +941,204 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 			if sessionIDFromFile(legacyPath) != session.ID {
 				continue
 			}
-			subagent, subagentTitlePrompt, parseErr := p.parse(legacyPath, depth+1, visited, report)
+			subagent, parseErr := p.parse(legacyPath, depth+1, visited, report, titlePrompts)
 			if parseErr == nil {
-				if subagentTitlePrompt != "" {
-					titlePrompts[subagent] = subagentTitlePrompt
-				}
 				attachSubagent(session, subagent)
 			} else if report != nil {
 				report(legacyPath, parseErr)
 			}
 		}
 	}
-	for _, child := range session.Subagents {
-		if child.Group {
-			resolveSiblingTitleCollisions(child.Subagents, titlePrompts)
+	return session, nil
+}
+
+func (p Parser) readClaudeSubagentParentID(path string) (string, error) {
+	readMetadata := p.readSubagentMetadata
+	if readMetadata == nil {
+		readMetadata = readClaudeSubagentMetadata
+	}
+	content, err := readMetadata(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	var metadata struct {
+		ParentAgentID string `json:"parentAgentId"`
+	}
+	if err := json.Unmarshal(content, &metadata); err != nil {
+		return "", err
+	}
+	return metadata.ParentAgentID, nil
+}
+
+func readClaudeSubagentMetadata(path string) ([]byte, error) {
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
+		return nil, errors.New("subagent metadata is not a regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(pathInfo, openedInfo) {
+		return nil, errors.New("subagent metadata changed while opening")
+	}
+	content, err := io.ReadAll(io.LimitReader(file, maxClaudeSubagentMetadataBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(content) > maxClaudeSubagentMetadataBytes {
+		return nil, fmt.Errorf("subagent metadata exceeds %d bytes", maxClaudeSubagentMetadataBytes)
+	}
+	return content, nil
+}
+
+func reparentFlatClaudeSubagents(children []flatClaudeSubagent, rootDepth int) map[*model.Session]bool {
+	byID := make(map[string]*model.Session, len(children))
+	ambiguousIDs := make(map[string]bool)
+	for _, child := range children {
+		id := child.session.ID
+		if id == "" {
+			name := strings.TrimSuffix(filepath.Base(child.transcript), filepath.Ext(child.transcript))
+			if strings.HasPrefix(name, "agent-") {
+				id = strings.TrimPrefix(name, "agent-")
+			}
+		}
+		if id != "" {
+			if _, exists := byID[id]; exists {
+				delete(byID, id)
+				ambiguousIDs[id] = true
+			} else if !ambiguousIDs[id] {
+				byID[id] = child.session
+			}
 		}
 	}
-	resolveSiblingTitleCollisions(session.Subagents, titlePrompts)
-	return session, titlePrompt, nil
+
+	requestedParents := make(map[*model.Session]*model.Session)
+	for _, child := range children {
+		if child.parentID == "" {
+			continue
+		}
+		if ambiguousIDs[child.parentID] {
+			continue
+		}
+		parent := byID[child.parentID]
+		if parent == nil {
+			continue
+		}
+		requestedParents[child.session] = parent
+	}
+
+	invalid := make(map[*model.Session]bool)
+	for child, parent := range requestedParents {
+		if flatSubagentParentCycle(child, parent, requestedParents) {
+			invalid[child] = true
+		}
+	}
+	rejectOverdeepFlatSubagents(children, rootDepth, requestedParents, invalid)
+
+	nested := make(map[*model.Session]bool)
+	childrenByParent := make(map[*model.Session][]*model.Session)
+	for _, child := range children {
+		parent := requestedParents[child.session]
+		if parent == nil || invalid[child.session] {
+			continue
+		}
+		childrenByParent[parent] = append(childrenByParent[parent], child.session)
+		nested[child.session] = true
+	}
+	var attachDescendants func(*model.Session)
+	attachDescendants = func(parent *model.Session) {
+		for _, child := range childrenByParent[parent] {
+			attachDescendants(child)
+			attachSubagent(parent, child)
+		}
+	}
+	for _, child := range children {
+		if !nested[child.session] {
+			attachDescendants(child.session)
+		}
+	}
+	return nested
+}
+
+func rejectOverdeepFlatSubagents(
+	children []flatClaudeSubagent,
+	rootDepth int,
+	requestedParents map[*model.Session]*model.Session,
+	invalid map[*model.Session]bool,
+) {
+	depths := make(map[*model.Session]int, len(children))
+	for _, child := range children {
+		if _, known := depths[child.session]; known {
+			continue
+		}
+		var path []*model.Session
+		cursor := child.session
+		baseDepth := rootDepth
+		for {
+			if depth, known := depths[cursor]; known {
+				baseDepth = depth
+				break
+			}
+			if invalid[cursor] || requestedParents[cursor] == nil {
+				depths[cursor] = rootDepth
+				break
+			}
+			path = append(path, cursor)
+			cursor = requestedParents[cursor]
+		}
+		for index := len(path) - 1; index >= 0; index-- {
+			node := path[index]
+			if subagentTreeHeight(node) > maxSubagentDepth-baseDepth {
+				invalid[node] = true
+				depths[node] = rootDepth
+				baseDepth = rootDepth
+				continue
+			}
+			baseDepth++
+			depths[node] = baseDepth
+		}
+	}
+}
+
+func subagentTreeHeight(session *model.Session) int {
+	height := 1
+	for _, child := range session.Subagents {
+		height = max(height, 1+subagentTreeHeight(child))
+	}
+	return height
+}
+
+func flatSubagentParentCycle(child, parent *model.Session, requestedParents map[*model.Session]*model.Session) bool {
+	seen := make(map[*model.Session]bool)
+	for ancestor := parent; ancestor != nil; ancestor = requestedParents[ancestor] {
+		if ancestor == child {
+			return true
+		}
+		if seen[ancestor] {
+			return false
+		}
+		seen[ancestor] = true
+	}
+	return false
+}
+
+func resolveSubagentTitleCollisions(siblings []*model.Session, titlePrompts map[*model.Session]string) {
+	for _, sibling := range siblings {
+		resolveSubagentTitleCollisions(sibling.Subagents, titlePrompts)
+	}
+	resolveSiblingTitleCollisions(siblings, titlePrompts)
 }
 
 func resolveSiblingTitleCollisions(siblings []*model.Session, titlePrompts map[*model.Session]string) {

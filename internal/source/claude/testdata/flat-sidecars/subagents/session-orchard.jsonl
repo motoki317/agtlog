@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-04-05T01:00:00Z","sessionId":"session-orchard","cwd":"/workspace/fictional-orchard","message":{"content":"Coordinate the orchard survey"}}
+{"type":"assistant","timestamp":"2026-04-05T01:00:10Z","sessionId":"session-orchard","requestId":"request-root","message":{"id":"message-root","model":"claude-opus-4-8","usage":{"input_tokens":10,"output_tokens":5}}}

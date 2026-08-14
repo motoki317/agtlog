@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-04-05T01:01:20Z","sessionId":"session-orchard","agentId":"observer","message":{"content":"Observe the southern rows"}}
+{"type":"assistant","timestamp":"2026-04-05T01:01:30Z","sessionId":"session-orchard","agentId":"observer","requestId":"request-observer","message":{"id":"message-observer","model":"claude-fable-5","usage":{"input_tokens":1,"output_tokens":1}}}

@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-04-05T01:02:30Z","sessionId":"session-orchard","agentId":"helper","message":{"content":"Assist the unnamed worker"}}
+{"type":"assistant","timestamp":"2026-04-05T01:02:40Z","sessionId":"session-orchard","agentId":"helper","requestId":"request-helper","message":{"id":"message-helper","model":"claude-fable-5","usage":{"input_tokens":2}}}

@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-04-05T01:03:00Z","sessionId":"session-orchard","agentId":"reviewer","message":{"content":"Review route notes"}}
+{"type":"assistant","timestamp":"2026-04-05T01:03:10Z","sessionId":"session-orchard","agentId":"reviewer","requestId":"request-reviewer","message":{"id":"message-reviewer","model":"claude-opus-4-8","usage":{"input_tokens":1,"output_tokens":2}}}

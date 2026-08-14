@@ -1,0 +1,2 @@
+{"type":"user","timestamp":"2026-04-05T01:02:00Z","sessionId":"session-orchard","agentId":"east","message":{"content":"# Shared mapping brief\n# Map eastern grove"}}
+{"type":"assistant","timestamp":"2026-04-05T01:02:10Z","sessionId":"session-orchard","agentId":"east","requestId":"request-east","message":{"id":"message-east","model":"claude-fable-5","content":[{"type":"tool_use","id":"tool-reviewer","name":"Agent","input":{"description":"Review route notes","subagent_type":"general-purpose"}}],"usage":{"input_tokens":3,"output_tokens":1}}}

@@ -39,6 +39,10 @@ func workflowTitleFixture() string {
 	return filepath.Join("testdata", "workflow-titles", "subagents", "session-expedition.jsonl")
 }
 
+func flatSidecarFixture() string {
+	return filepath.Join("testdata", "flat-sidecars", "subagents", "session-orchard.jsonl")
+}
+
 type titlePromptFixture struct {
 	id      string
 	prompt  string
@@ -103,9 +107,530 @@ func titlesByID(sessions []*model.Session) map[string]string {
 	return titles
 }
 
+func parseFlatSidecarBaseline(t *testing.T) *model.Session {
+	t.Helper()
+	sourcePath := flatSidecarFixture()
+	targetDir := t.TempDir()
+	targetPath := filepath.Join(targetDir, filepath.Base(sourcePath))
+	content, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(targetPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sourceSubagents := filepath.Join(strings.TrimSuffix(sourcePath, filepath.Ext(sourcePath)), "subagents")
+	targetSubagents := filepath.Join(strings.TrimSuffix(targetPath, filepath.Ext(targetPath)), "subagents")
+	if err := os.MkdirAll(targetSubagents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(sourceSubagents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".jsonl" {
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(sourceSubagents, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(targetSubagents, entry.Name()), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session, err := testParser().Parse(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return session
+}
+
 func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v16:") {
-		t.Fatalf("CacheFingerprint() = %q, want v16 sibling titles", got)
+	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v17:") {
+		t.Fatalf("CacheFingerprint() = %q, want v17 sidecar hierarchy", got)
+	}
+}
+
+func TestParseReparentsFlatSubagentsFromSidecars(t *testing.T) {
+	session, err := testParser().Parse(flatSidecarFixture())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := session.DescendantAgentCount(); got != 7 {
+		t.Fatalf("DescendantAgentCount() = %d, want all 7 flat transcripts", got)
+	}
+	if len(session.Subagents) != 3 {
+		t.Fatalf("root subagents = %#v, want planner, filename-fallback parent, and observer", session.Subagents)
+	}
+
+	planner := subagentByID(session.Subagents, "route-planner")
+	if planner == nil {
+		t.Fatalf("root subagents = %#v, want transcript ID route-planner", session.Subagents)
+	}
+	if len(planner.Subagents) != 2 {
+		t.Fatalf("planner children = %#v, want east and west", planner.Subagents)
+	}
+	if got := []string{planner.Subagents[0].ID, planner.Subagents[1].ID}; !reflect.DeepEqual(got, []string{"east", "west"}) {
+		t.Fatalf("planner children = %#v, want east and west", got)
+	}
+	east := planner.Subagents[0]
+	if len(east.Subagents) != 1 || east.Subagents[0].ID != "reviewer" {
+		t.Fatalf("east children = %#v, want third-level reviewer", east.Subagents)
+	}
+	if got := titlesByID(planner.Subagents); !reflect.DeepEqual(got, map[string]string{
+		"east": "Map eastern grove",
+		"west": "Map western grove",
+	}) {
+		t.Fatalf("nested sibling titles = %#v, want collisions resolved within final parent", got)
+	}
+
+	var nameless *model.Session
+	for _, child := range session.Subagents {
+		if filepath.Base(child.Path) == "agent-nameless.jsonl" {
+			nameless = child
+			break
+		}
+	}
+	if nameless == nil || nameless.ID != "" || len(nameless.Subagents) != 1 || nameless.Subagents[0].ID != "helper" {
+		t.Fatalf("filename fallback parent = %#v, want nameless -> helper", nameless)
+	}
+
+	if got := east.TotalUsage().TotalTokens(); got != 7 {
+		t.Errorf("east TotalUsage() = %d, want own plus reviewer 7", got)
+	}
+	if got := east.TotalCost().USD; got != 14 {
+		t.Errorf("east TotalCost() = %v, want own plus reviewer 14", got)
+	}
+	if got := planner.TotalUsage().TotalTokens(); got != 15 {
+		t.Errorf("planner TotalUsage() = %d, want all descendants 15", got)
+	}
+	if got := planner.TotalCost().USD; got != 30 {
+		t.Errorf("planner TotalCost() = %v, want all descendants 30", got)
+	}
+	if got := nameless.TotalUsage().TotalTokens(); got != 4 {
+		t.Errorf("filename parent TotalUsage() = %d, want own plus helper 4", got)
+	}
+	if got := nameless.TotalCost().USD; got != 6 {
+		t.Errorf("filename parent TotalCost() = %v, want own plus helper 6", got)
+	}
+	if got := session.TotalUsage().TotalTokens(); got != 36 {
+		t.Errorf("root TotalUsage() = %d, want every transcript once for 36", got)
+	}
+	if got := session.TotalCost().USD; got != 61 {
+		t.Errorf("root TotalCost() = %v, want every transcript once for 61", got)
+	}
+
+	flat := parseFlatSidecarBaseline(t)
+	if len(flat.Subagents) != 7 {
+		t.Fatalf("metadata-free baseline subagents = %#v, want all 7 at root", flat.Subagents)
+	}
+	if got, want := session.TotalUsage(), flat.TotalUsage(); !reflect.DeepEqual(got, want) {
+		t.Errorf("tree TotalUsage() = %#v, want unchanged flat total %#v", got, want)
+	}
+	if got, want := session.TotalCost(), flat.TotalCost(); !reflect.DeepEqual(got, want) {
+		t.Errorf("tree TotalCost() = %#v, want unchanged flat total %#v", got, want)
+	}
+
+	if err := testParser().LoadNodeEvents(context.Background(), planner); err != nil {
+		t.Fatal(err)
+	}
+	if len(planner.Events) != 2 || planner.Events[1].Kind != model.EventSubagent || planner.Events[1].Subagent != east {
+		t.Fatalf("planner spawn event = %#v, want linked east child", planner.Events)
+	}
+	if err := testParser().LoadNodeEvents(context.Background(), east); err != nil {
+		t.Fatal(err)
+	}
+	if len(east.Events) != 2 || east.Events[1].Kind != model.EventSubagent || east.Events[1].Subagent != east.Subagents[0] {
+		t.Fatalf("east spawn event = %#v, want linked reviewer child", east.Events)
+	}
+}
+
+func TestParseKeepsInvalidSidecarChildrenAtRoot(t *testing.T) {
+	tests := []struct {
+		name      string
+		ids       []string
+		sidecars  map[string]string
+		readError bool
+		wantRoots int
+	}{
+		{name: "absent", ids: []string{"solo"}},
+		{name: "malformed", ids: []string{"solo"}, sidecars: map[string]string{"solo": "{"}},
+		{name: "wrong parent type", ids: []string{"solo"}, sidecars: map[string]string{"solo": `{"parentAgentId":12}`}},
+		{name: "oversized", ids: []string{"solo"}, sidecars: map[string]string{"solo": strings.Repeat("x", maxClaudeSubagentMetadataBytes+1)}},
+		{name: "dangling parent", ids: []string{"solo"}, sidecars: map[string]string{"solo": `{"parentAgentId":"missing"}`}},
+		{name: "unreadable", ids: []string{"solo"}, sidecars: map[string]string{"solo": `{}`}, readError: true},
+		{
+			name: "two-node cycle",
+			ids:  []string{"alpha", "beta", "gamma"},
+			sidecars: map[string]string{
+				"alpha": `{"parentAgentId":"beta"}`,
+				"beta":  `{"parentAgentId":"alpha"}`,
+				"gamma": `{"parentAgentId":"alpha"}`,
+			},
+			wantRoots: 2,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "session-garden.jsonl")
+			subagentDir := filepath.Join(dir, "session-garden", "subagents")
+			if err := os.MkdirAll(subagentDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(`{"type":"user","sessionId":"garden","message":{"content":"Tend the garden"}}`+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range test.ids {
+				content := `{"type":"user","agentId":` + strconv.Quote(id) + `,"message":{"content":"Inspect seedlings"}}` + "\n"
+				if err := os.WriteFile(filepath.Join(subagentDir, "agent-"+id+".jsonl"), []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if meta, ok := test.sidecars[id]; ok {
+					if err := os.WriteFile(filepath.Join(subagentDir, "agent-"+id+".meta.json"), []byte(meta), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			reads := make(map[string]int)
+			parser := testParser()
+			parser.readSubagentMetadata = func(path string) ([]byte, error) {
+				reads[path]++
+				if test.readError {
+					return nil, errors.New("injected metadata read failure")
+				}
+				return readClaudeSubagentMetadata(path)
+			}
+			var diagnostics []string
+			session, err := parser.ParseWithDiagnostics(path, func(path string, _ error) {
+				diagnostics = append(diagnostics, path)
+			})
+			if err != nil {
+				t.Fatalf("ParseWithDiagnostics() error = %v, want optional sidecar fallback", err)
+			}
+			if got := session.DescendantAgentCount(); got != len(test.ids) {
+				t.Fatalf("DescendantAgentCount() = %d, want all %d transcripts retained", got, len(test.ids))
+			}
+			wantRoots := test.wantRoots
+			if wantRoots == 0 {
+				wantRoots = len(test.ids)
+			}
+			if len(session.Subagents) != wantRoots {
+				t.Fatalf("root subagents = %#v, want every invalid-sidecar child at root", session.Subagents)
+			}
+			if len(diagnostics) != 0 {
+				t.Fatalf("diagnostics = %#v, want optional metadata failures not misreported as unreadable sessions", diagnostics)
+			}
+			if len(reads) != len(test.ids) {
+				t.Fatalf("metadata reads = %#v, want one path per transcript", reads)
+			}
+			for path, count := range reads {
+				if count != 1 {
+					t.Errorf("metadata reads for %s = %d, want once", path, count)
+				}
+			}
+		})
+	}
+}
+
+func TestParseAcceptsMetadataAtSizeLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session-garden.jsonl")
+	subagentDir := filepath.Join(dir, "session-garden", "subagents")
+	if err := os.MkdirAll(subagentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"type":"user","sessionId":"garden","message":{"content":"Tend the garden"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"parent", "child"} {
+		content := `{"type":"user","agentId":` + strconv.Quote(id) + `,"message":{"content":"Inspect seedlings"}}` + "\n"
+		if err := os.WriteFile(filepath.Join(subagentDir, "agent-"+id+".jsonl"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prefix := `{"parentAgentId":"parent","padding":"`
+	suffix := `"}`
+	metadata := prefix + strings.Repeat("x", maxClaudeSubagentMetadataBytes-len(prefix)-len(suffix)) + suffix
+	if len(metadata) != maxClaudeSubagentMetadataBytes {
+		t.Fatalf("metadata bytes = %d, want boundary %d", len(metadata), maxClaudeSubagentMetadataBytes)
+	}
+	if err := os.WriteFile(filepath.Join(subagentDir, "agent-child.meta.json"), []byte(metadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := subagentByID(session.Subagents, "parent")
+	if parent == nil || len(parent.Subagents) != 1 || parent.Subagents[0].ID != "child" {
+		t.Fatalf("parent = %#v, want exact-limit sidecar accepted", parent)
+	}
+}
+
+func TestReadClaudeSubagentMetadataDoesNotFollowSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "outside.meta.json")
+	link := filepath.Join(dir, "agent-child.meta.json")
+	if err := os.WriteFile(target, []byte(`{"parentAgentId":"parent"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if _, err := readClaudeSubagentMetadata(link); err == nil {
+		t.Fatal("readClaudeSubagentMetadata() followed symlink")
+	}
+}
+
+func TestParseLeavesChildAtRootWhenParentIDIsAmbiguous(t *testing.T) {
+	tests := []struct {
+		name    string
+		agents  map[string]string
+		childID string
+	}{
+		{
+			name:    "duplicate transcript IDs",
+			agents:  map[string]string{"first": "shared", "second": "shared", "worker": "worker"},
+			childID: "worker",
+		},
+		{
+			name:    "transcript ID collides with filename fallback",
+			agents:  map[string]string{"shared": "", "explicit": "shared", "worker": "worker"},
+			childID: "worker",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "session-garden.jsonl")
+			subagentDir := filepath.Join(dir, "session-garden", "subagents")
+			if err := os.MkdirAll(subagentDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(`{"type":"user","sessionId":"garden","message":{"content":"Tend the garden"}}`+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for filenameID, agentID := range test.agents {
+				idField := ""
+				if agentID != "" {
+					idField = `,"agentId":` + strconv.Quote(agentID)
+				}
+				content := `{"type":"user"` + idField + `,"message":{"content":"Inspect seedlings"}}` + "\n"
+				if err := os.WriteFile(filepath.Join(subagentDir, "agent-"+filenameID+".jsonl"), []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			metadata := `{"parentAgentId":"shared"}`
+			if err := os.WriteFile(filepath.Join(subagentDir, "agent-"+test.childID+".meta.json"), []byte(metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			var diagnostics []string
+			session, err := testParser().ParseWithDiagnostics(path, func(path string, _ error) {
+				diagnostics = append(diagnostics, path)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if session.DescendantAgentCount() != 3 || len(session.Subagents) != 3 || subagentByID(session.Subagents, test.childID) == nil {
+				t.Fatalf("subagents = %#v, want ambiguous parent candidates and child retained at root", session.Subagents)
+			}
+			if len(diagnostics) != 0 {
+				t.Fatalf("diagnostics = %#v, want ambiguous metadata not misreported as an unreadable session", diagnostics)
+			}
+		})
+	}
+}
+
+func TestParseDoesNotUseFilenameWhenTranscriptHasID(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session-garden.jsonl")
+	subagentDir := filepath.Join(dir, "session-garden", "subagents")
+	if err := os.MkdirAll(subagentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"type":"user","sessionId":"garden","message":{"content":"Tend the garden"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		"agent-alias.jsonl":      `{"type":"user","agentId":"canonical","message":{"content":"Inspect seedlings"}}` + "\n",
+		"agent-worker.jsonl":     `{"type":"user","agentId":"worker","message":{"content":"Measure the rows"}}` + "\n",
+		"agent-worker.meta.json": `{"parentAgentId":"alias"}`,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(subagentDir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.DescendantAgentCount() != 2 || len(session.Subagents) != 2 || subagentByID(session.Subagents, "worker") == nil {
+		t.Fatalf("subagents = %#v, want filename reference unresolved when transcript ID exists", session.Subagents)
+	}
+}
+
+func TestParseRerootsFlatSubagentBeyondDepthLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session-garden.jsonl")
+	subagentDir := filepath.Join(dir, "session-garden", "subagents")
+	if err := os.MkdirAll(subagentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"type":"user","sessionId":"garden","message":{"content":"Tend the garden"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for index := 1; index <= maxSubagentDepth+1; index++ {
+		id := fmt.Sprintf("worker-%02d", index)
+		content := `{"type":"user","agentId":` + strconv.Quote(id) + `,"message":{"content":"Inspect seedlings"}}` + "\n"
+		if err := os.WriteFile(filepath.Join(subagentDir, "agent-"+id+".jsonl"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		metadata := `{}`
+		if index > 1 {
+			metadata = `{"parentAgentId":` + strconv.Quote(fmt.Sprintf("worker-%02d", index-1)) + `}`
+		}
+		if err := os.WriteFile(filepath.Join(subagentDir, "agent-"+id+".meta.json"), []byte(metadata), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var diagnostics []string
+	parser := testParser()
+	session, err := parser.ParseWithDiagnostics(path, func(path string, _ error) {
+		diagnostics = append(diagnostics, path)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := session.DescendantAgentCount(); got != maxSubagentDepth+1 {
+		t.Fatalf("DescendantAgentCount() = %d, want all %d transcripts", got, maxSubagentDepth+1)
+	}
+	if len(session.Subagents) != 2 || len(diagnostics) != 0 {
+		t.Fatalf("roots/diagnostics = %d/%#v, want one over-depth edge rerooted", len(session.Subagents), diagnostics)
+	}
+	if err := parser.LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	var checkEvents func(*model.Session) int
+	checkEvents = func(parent *model.Session) int {
+		count := 0
+		for _, child := range parent.Subagents {
+			if len(child.Events) != 1 {
+				t.Errorf("%s events = %#v, want loaded user event", child.ID, child.Events)
+			}
+			count += 1 + checkEvents(child)
+		}
+		return count
+	}
+	if got := checkEvents(session); got != maxSubagentDepth+1 {
+		t.Fatalf("loaded event nodes = %d, want %d", got, maxSubagentDepth+1)
+	}
+}
+
+func TestParseRerootsFlatParentWhoseDirectorySubtreeWouldExceedDepthLimit(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session-garden.jsonl")
+	subagentDir := filepath.Join(dir, "session-garden", "subagents")
+	if err := os.MkdirAll(subagentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"type":"user","sessionId":"garden","message":{"content":"Tend the garden"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parentPath := filepath.Join(subagentDir, "agent-parent.jsonl")
+	ancestorPath := filepath.Join(subagentDir, "agent-ancestor.jsonl")
+	for childPath, id := range map[string]string{parentPath: "parent", ancestorPath: "ancestor"} {
+		content := `{"type":"user","agentId":` + strconv.Quote(id) + `,"message":{"content":"Inspect seedlings"}}` + "\n"
+		if err := os.WriteFile(childPath, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(subagentDir, "agent-parent.meta.json"), []byte(`{"parentAgentId":"ancestor"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current := parentPath
+	for index := 1; index < maxSubagentDepth; index++ {
+		childDir := filepath.Join(strings.TrimSuffix(current, filepath.Ext(current)), "subagents")
+		if err := os.MkdirAll(childDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		id := fmt.Sprintf("nested-%02d", index)
+		current = filepath.Join(childDir, "agent-"+id+".jsonl")
+		content := `{"type":"user","agentId":` + strconv.Quote(id) + `,"message":{"content":"Inspect seedlings"}}` + "\n"
+		if err := os.WriteFile(current, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	parser := testParser()
+	session, err := parser.Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Subagents) != 2 || session.DescendantAgentCount() != maxSubagentDepth+1 {
+		t.Fatalf("root/count = %d/%d, want deep parent rerooted with all %d transcripts", len(session.Subagents), session.DescendantAgentCount(), maxSubagentDepth+1)
+	}
+	parent := subagentByID(session.Subagents, "parent")
+	if parent == nil || subagentTreeHeight(parent) != maxSubagentDepth {
+		t.Fatalf("parent = %#v, want directory subtree retained at height %d", parent, maxSubagentDepth)
+	}
+	if err := parser.LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	for node := parent; node != nil; {
+		if len(node.Events) != 1 {
+			t.Fatalf("%s events = %#v, want loaded user event", node.ID, node.Events)
+		}
+		if len(node.Subagents) == 0 {
+			break
+		}
+		node = node.Subagents[0]
+	}
+}
+
+func TestParseResolvesMixedDirectoryAndSidecarSiblingTitles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session-garden.jsonl")
+	subagentDir := filepath.Join(dir, "session-garden", "subagents")
+	parentPath := filepath.Join(subagentDir, "agent-parent.jsonl")
+	directoryChildDir := filepath.Join(subagentDir, "agent-parent", "subagents")
+	if err := os.MkdirAll(directoryChildDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		path:       `{"type":"user","sessionId":"garden","message":{"content":"Tend the garden"}}` + "\n",
+		parentPath: `{"type":"user","agentId":"parent","message":{"content":"Coordinate workers"}}` + "\n",
+		filepath.Join(directoryChildDir, "agent-directory.jsonl"): `{"type":"user","agentId":"directory","message":{"content":"# Shared assignment\n# Inspect directory grove"}}` + "\n",
+		filepath.Join(subagentDir, "agent-flat.jsonl"): strings.Join([]string{
+			`{"type":"user","agentId":"flat","message":{"content":"Shared assignment"}}`,
+			`{"type":"ai-title","agentId":"flat","aiTitle":"Shared assignment"}`,
+		}, "\n") + "\n",
+		filepath.Join(subagentDir, "agent-flat.meta.json"): `{"parentAgentId":"parent"}`,
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := subagentByID(session.Subagents, "parent")
+	if parent == nil || len(parent.Subagents) != 2 {
+		t.Fatalf("parent = %#v, want directory and sidecar children", parent)
+	}
+	want := map[string]string{"directory": "Inspect directory grove", "flat": "Shared assignment"}
+	if got := titlesByID(parent.Subagents); !reflect.DeepEqual(got, want) {
+		t.Fatalf("mixed sibling titles = %#v, want %#v", got, want)
 	}
 }
 
