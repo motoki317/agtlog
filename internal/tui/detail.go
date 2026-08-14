@@ -28,7 +28,9 @@ type detailState struct {
 	height              int
 	now                 time.Time
 	absoluteTime        bool
-	loading             bool
+	loadStatus          detailLoadStatus
+	loadGeneration      uint64
+	loadRestore         *detailRestoreState
 	err                 error
 	styles              styles
 	wrap                bool
@@ -141,6 +143,23 @@ type detailRole int
 
 type detailTab int
 
+type detailLoadStatus int
+
+type detailRestoreState struct {
+	viewportOffset      int
+	pinned              bool
+	focusKey            string
+	selectedSubagent    string
+	defaultExpanded     bool
+	focus               int
+	wrap                bool
+	tab                 detailTab
+	subagentSort        sortState
+	subagentColumnFocus listColumnKind
+	subagentSelection   int
+	expanded            map[string]bool
+}
+
 type subagentTreePosition struct {
 	parent *subagentTreePosition
 	last   bool
@@ -188,6 +207,12 @@ const (
 )
 
 const (
+	detailStatusLoaded detailLoadStatus = iota
+	detailStatusLoading
+	detailStatusFailed
+)
+
+const (
 	detailRow detailRole = iota
 	detailHeader
 	detailAccent
@@ -211,7 +236,7 @@ func newDetailState(session *model.Session, width, height int, styles styles) *d
 }
 
 func newDetailStateBase(session *model.Session, width, height int, styles styles) *detailState {
-	state := &detailState{session: session, expanded: make(map[string]bool), defaultExpanded: true, styles: styles, wrap: true, subagentTotal: subagentCount(session)}
+	state := &detailState{session: session, expanded: make(map[string]bool), defaultExpanded: true, loadStatus: detailStatusLoaded, styles: styles, wrap: true, subagentTotal: subagentCount(session)}
 	if project := terminalText(session.Project, 96); project != "" {
 		state.crumbs = []string{project}
 	}
@@ -242,6 +267,27 @@ func (d *detailState) clone() *detailState {
 
 func (d *detailState) scrollWheel(button tea.MouseButton) {
 	scrollViewport(&d.viewport, button)
+}
+
+func (d *detailState) markLoading(generation uint64, restore *detailRestoreState) {
+	d.loadStatus = detailStatusLoading
+	d.loadGeneration = generation
+	d.loadRestore = restore
+	d.err = nil
+}
+
+func (d *detailState) markLoaded() {
+	d.loadStatus = detailStatusLoaded
+	d.loadGeneration = 0
+	d.loadRestore = nil
+	d.err = nil
+}
+
+func (d *detailState) markLoadFailed(err error) {
+	d.loadStatus = detailStatusFailed
+	d.loadGeneration = 0
+	d.loadRestore = nil
+	d.err = err
 }
 
 func (d *detailState) resize(width, height int) {
@@ -281,6 +327,9 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		var cmd tea.Cmd
 		d.viewport, cmd = d.viewport.Update(msg)
 		return cmd
+	}
+	if d.loadStatus == detailStatusFailed {
+		return nil
 	}
 	switch key.String() {
 	case sortColumnKey:
@@ -520,20 +569,24 @@ func (d *detailState) setAllExpanded(expanded bool) {
 
 func (d *detailState) rebuild() {
 	var lines []detailLine
-	if d.err != nil {
+	if d.loadStatus == detailStatusFailed {
 		d.subagents = nil
 		d.subagentSelection = 0
-		lines = []detailLine{{text: "detail error: " + terminalText(d.err.Error(), 512), role: detailWarning}}
-	} else if d.loading {
-		d.subagents = nil
-		d.subagentSelection = 0
-		lines = []detailLine{{text: "Loading timeline…", role: detailSecondary}}
+		message := "detail unavailable"
+		if d.err != nil {
+			message = terminalText(d.err.Error(), 512)
+		}
+		lines = []detailLine{{text: "detail error: " + message, role: detailWarning}}
 	} else if d.tab == tabSubagents {
 		d.rebuildSubagents()
 		return
 	} else if d.tab == tabInfo {
 		d.rebuildInfo()
 		return
+	} else if d.loadStatus == detailStatusLoading {
+		d.subagents = nil
+		d.subagentSelection = 0
+		lines = []detailLine{{text: "Loading timeline…", role: detailSecondary}}
 	} else {
 		lines = d.sessionLines(d.session, 0, sessionIdentity(d.session))
 	}

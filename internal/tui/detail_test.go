@@ -29,7 +29,9 @@ import (
 )
 
 type detailTestSource struct {
-	session *model.Session
+	session        *model.Session
+	loadEvents     func(context.Context, *model.Session) error
+	loadNodeEvents func(context.Context, *model.Session) error
 }
 
 func writeRawRecord(t testing.TB, raw []byte) model.RecordRef {
@@ -76,9 +78,18 @@ func (s detailTestSource) Discover(context.Context) ([]string, error) {
 	return []string{s.session.Path}, nil
 }
 func (s detailTestSource) Parse(string) (*model.Session, error) { return s.session, nil }
-func (s detailTestSource) LoadEvents(_ context.Context, session *model.Session) error {
+func (s detailTestSource) LoadEvents(ctx context.Context, session *model.Session) error {
+	if s.loadEvents != nil {
+		return s.loadEvents(ctx, session)
+	}
 	session.Events = []model.Event{{Kind: model.EventUser, Text: "Loaded on open"}}
 	return nil
+}
+func (s detailTestSource) LoadNodeEvents(ctx context.Context, session *model.Session) error {
+	if s.loadNodeEvents != nil {
+		return s.loadNodeEvents(ctx, session)
+	}
+	return s.LoadEvents(ctx, session)
 }
 
 func TestEnterOnSubagentDrillsIntoChild(t *testing.T) {
@@ -1142,34 +1153,123 @@ func TestSubagentsErrorStateClearsHiddenSelection(t *testing.T) {
 	child := &model.Session{ID: "scout", Agent: model.AgentClaude}
 	detail := newDetailState(&model.Session{ID: "route", Subagents: []*model.Session{child}}, 80, 12, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
-	detail.err = errors.New("fictional load failure")
+	detail.markLoadFailed(errors.New("fictional load failure"))
 	detail.rebuild()
+	for _, key := range []tea.KeyMsg{
+		{Type: tea.KeyTab},
+		{Type: tea.KeyRunes, Runes: []rune(sortTitleKey)},
+		{Type: tea.KeyRight},
+	} {
+		detail.update(key)
+	}
 
 	if subagent := detail.focusedSubagent(); subagent != nil {
 		t.Fatalf("error state retained hidden subagent selection %q", subagent.ID)
 	}
+	if detail.tab != tabSubagents || !strings.Contains(ansi.Strip(detail.view()), "detail error: fictional load failure") {
+		t.Fatalf("error-state input hid the load error: tab=%v\n%s", detail.tab, ansi.Strip(detail.view()))
+	}
 }
 
-func TestLoadingSubagentsRejectStaleDrillInput(t *testing.T) {
-	child := &model.Session{ID: "scout", Agent: model.AgentClaude}
-	root := &model.Session{ID: "route", Agent: model.AgentClaude, Subagents: []*model.Session{child}}
-	m := NewModel([]*model.Session{root}, nil)
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyTab}} {
-		updated, _ := m.Update(key)
-		m = updated.(Model)
+func TestLoadingSummaryTabsRemainInteractiveForRootAndChild(t *testing.T) {
+	leafA := &model.Session{ID: "alpha", Agent: model.AgentClaude, Title: "Map the ridge", Cost: model.Cost{USD: 0.25}}
+	leafB := &model.Session{ID: "bravo", Agent: model.AgentCodex, Title: "Check the valley", Cost: model.Cost{USD: 0.50}}
+	child := &model.Session{
+		ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl", Title: "Scout terrain",
+		Cost: model.Cost{USD: 1}, Subagents: []*model.Session{leafA, leafB},
 	}
-	detailStateFromScreen(t, m.detail).loading = true
-	detailStateFromScreen(t, m.detail).rebuild()
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRight}, {Type: tea.KeyRunes, Runes: []rune{'l'}}} {
-		updated, _ := m.Update(key)
-		m = updated.(Model)
+	sibling := &model.Session{ID: "mapper", Agent: model.AgentCodex, Title: "Map terrain", Cost: model.Cost{USD: 0.75}}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Title: "Plan route",
+		Cost: model.Cost{USD: 2}, Subagents: []*model.Session{child, sibling},
+		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
 	}
+	registry := source.NewRegistry([]source.Source{detailTestSource{session: root}}, source.Options{})
 
-	if detailStateFromScreen(t, m.detail).session != root || len(m.detailStack) != 0 || detailStateFromScreen(t, m.detail).focusedSubagent() != nil {
-		t.Fatalf("loading drill input changed state: session=%q stack=%d focused=%#v", detailStateFromScreen(t, m.detail).session.ID, len(m.detailStack), detailStateFromScreen(t, m.detail).focusedSubagent())
-	}
-	if view := ansi.Strip(m.View()); !strings.Contains(view, "Loading timeline…") {
-		t.Fatalf("loading state lost authoritative message:\n%s", view)
+	for _, test := range []struct {
+		name       string
+		open       func(Model) (Model, tea.Cmd)
+		firstChild string
+		nextChild  string
+	}{
+		{
+			name: "root",
+			open: func(m Model) (Model, tea.Cmd) {
+				updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				return updated.(Model), cmd
+			},
+			firstChild: child.Title,
+			nextChild:  leafA.ID,
+		},
+		{
+			name: "child",
+			open: func(m Model) (Model, tea.Cmd) {
+				m.screen = screenDetail
+				m.detail = newDetailState(root, m.width, m.height, m.styles)
+				m.detailGeneration = 1
+				updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+				return updated.(Model), cmd
+			},
+			firstChild: leafA.Title,
+			nextChild:  leafB.ID,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m, cmd := test.open(NewModel([]*model.Session{root}, registry))
+			if cmd == nil {
+				t.Fatal("open returned no node-load command")
+			}
+			if view := ansi.Strip(m.View()); !strings.Contains(view, "Loading timeline…") {
+				t.Fatalf("Timeline did not show the loading placeholder:\n%s", view)
+			}
+
+			updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+			m = updated.(Model)
+			view := ansi.Strip(m.View())
+			if detail := detailStateFromScreen(t, m.detail); detail.tab != tabSubagents || !strings.Contains(view, test.firstChild) || strings.Contains(view, "Loading timeline…") {
+				t.Fatalf("loading Subagents tab did not render summary rows: tab=%v\n%s", detail.tab, view)
+			}
+			updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
+			m = updated.(Model)
+			updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+			m = updated.(Model)
+			if selected := detailStateFromScreen(t, m.detail).focusedSubagent(); selected == nil || selected.ID != test.nextChild {
+				t.Fatalf("loading Subagents navigation selected %#v, want %q", selected, test.nextChild)
+			}
+
+			updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+			m = updated.(Model)
+			view = ansi.Strip(m.View())
+			if detail := detailStateFromScreen(t, m.detail); detail.tab != tabInfo || !strings.Contains(view, "total:") || !strings.Contains(view, "Cost tree") || strings.Contains(view, "Loading timeline…") {
+				t.Fatalf("loading Info tab did not render summary costs: tab=%v\n%s", detail.tab, view)
+			}
+			updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
+			m = updated.(Model)
+			updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+			m = updated.(Model)
+			wantInfoOffset := detailStateFromScreen(t, m.detail).viewport.YOffset
+			if wantInfoOffset == 0 {
+				t.Fatal("loading Info navigation did not scroll")
+			}
+
+			updated, _ = m.Update(cmd())
+			m = updated.(Model)
+			view = ansi.Strip(m.View())
+			if detail := detailStateFromScreen(t, m.detail); detail.loadStatus != detailStatusLoaded || detail.tab != tabInfo || detail.viewport.YOffset != wantInfoOffset || !strings.Contains(view, "Cost tree") {
+				t.Fatalf("node completion discarded loading-tab navigation: status=%v tab=%v\n%s", detail.loadStatus, detail.tab, view)
+			}
+			updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+			m = updated.(Model)
+			detail := detailStateFromScreen(t, m.detail)
+			if selected := detail.focusedSubagent(); detail.tab != tabSubagents || detail.subagentColumnFocus != columnTitle || selected == nil || selected.ID != test.nextChild {
+				t.Fatalf("node completion discarded Subagents navigation: tab=%v column=%v selected=%#v", detail.tab, detail.subagentColumnFocus, selected)
+			}
+			updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+			m = updated.(Model)
+			if view := ansi.Strip(m.View()); detailStateFromScreen(t, m.detail).tab != tabTimeline || !strings.Contains(view, "Loaded on open") {
+				t.Fatalf("loaded Timeline did not expose node events:\n%s", view)
+			}
+		})
 	}
 }
 
@@ -2503,8 +2603,23 @@ func TestSubagentLineHasNoInlineToggle(t *testing.T) {
 }
 
 func TestEnterLoadsDetailLazily(t *testing.T) {
-	session := &model.Session{ID: "lazy", Agent: model.AgentClaude, Path: "/workspace/session.jsonl"}
-	registry := source.NewRegistry([]source.Source{detailTestSource{session: session}}, source.Options{})
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl"}
+	session := &model.Session{ID: "lazy", Agent: model.AgentClaude, Path: "/workspace/session.jsonl", Subagents: []*model.Session{child}}
+	nodeLoads, recursiveLoads := 0, 0
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: session,
+		loadEvents: func(_ context.Context, loaded *model.Session) error {
+			recursiveLoads++
+			loaded.Events = []model.Event{{Kind: model.EventUser, Text: "Loaded recursively"}}
+			loaded.Subagents[0].Events = []model.Event{{Kind: model.EventUser, Text: "Loaded child recursively"}}
+			return nil
+		},
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			nodeLoads++
+			loaded.Events = []model.Event{{Kind: model.EventUser, Text: "Loaded on open"}}
+			return nil
+		},
+	}}, source.Options{})
 	m := NewModel([]*model.Session{session}, registry)
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -2517,6 +2632,621 @@ func TestEnterLoadsDetailLazily(t *testing.T) {
 
 	if view := m.View(); !strings.Contains(view, "Loaded on open") {
 		t.Fatalf("detail view did not apply lazy events:\n%s", view)
+	}
+	if nodeLoads != 1 || recursiveLoads != 0 {
+		t.Fatalf("detail loads: node=%d recursive=%d, want node-only root load", nodeLoads, recursiveLoads)
+	}
+	if got := len(detailStateFromScreen(t, m.detail).session.Subagents[0].Events); got != 0 {
+		t.Fatalf("root open loaded %d descendant events, want none", got)
+	}
+}
+
+func TestOpeningSubagentReloadsNodeOnRevisit(t *testing.T) {
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl", Title: "Scout terrain"}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{child},
+		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
+	}
+	childLoads := 0
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: root,
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			if loaded.ID == child.ID {
+				childLoads++
+				loaded.Events = []model.Event{{Kind: model.EventUser, Text: "Inspect the ridge"}}
+			}
+			return nil
+		},
+	}}, source.Options{})
+	m := NewModel([]*model.Session{root}, registry)
+	m.screen = screenDetail
+	m.detail = newDetailState(root, m.width, m.height, m.styles)
+	m.detailGeneration = 1
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil || detailStateFromScreen(t, m.detail).loadStatus != detailStatusLoading || !strings.Contains(ansi.Strip(m.View()), "Loading timeline…") {
+		t.Fatalf("subagent open did not enter loading state: cmd=%v view=\n%s", cmd != nil, ansi.Strip(m.View()))
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+	childDetail := detailStateFromScreen(t, m.detail)
+	if childDetail.loadStatus != detailStatusLoaded || !strings.Contains(ansi.Strip(m.View()), "Inspect the ridge") {
+		t.Fatalf("loaded child did not render its timeline: status=%v\n%s", childDetail.loadStatus, ansi.Strip(m.View()))
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if cmd == nil || childLoads != 1 || detailStateFromScreen(t, m.detail).loadStatus != detailStatusLoading {
+		t.Fatalf("revisit did not start a fresh node load: cmd=%v loads=%d status=%v", cmd != nil, childLoads, detailStateFromScreen(t, m.detail).loadStatus)
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+	if childLoads != 2 || !strings.Contains(ansi.Strip(m.View()), "Inspect the ridge") {
+		t.Fatalf("revisit did not apply the fresh node load: loads=%d\n%s", childLoads, ansi.Strip(m.View()))
+	}
+}
+
+func TestChildLoaderMutatesCloneUntilResultIsApplied(t *testing.T) {
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl"}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{child},
+		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
+	}
+	mutated := make(chan *model.Session, 1)
+	release := make(chan struct{})
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: root,
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			loaded.Events = []model.Event{{Kind: model.EventUser, Text: "Clone-only event"}}
+			mutated <- loaded
+			<-release
+			return nil
+		},
+	}}, source.Options{})
+	m := NewModel([]*model.Session{root}, registry)
+	m.screen = screenDetail
+	m.detail = newDetailState(root, m.width, m.height, m.styles)
+	m.detailGeneration = 1
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	result := make(chan tea.Msg, 1)
+	go func() { result <- cmd() }()
+	loadedClone := <-mutated
+	if loadedClone == child || len(child.Events) != 0 || len(root.Subagents[0].Events) != 0 || len(detailStateFromScreen(t, m.detail).session.Events) != 0 {
+		t.Fatalf("background load crossed clone boundary: clone=%p child=%p events=%d/%d/%d", loadedClone, child, len(child.Events), len(root.Subagents[0].Events), len(detailStateFromScreen(t, m.detail).session.Events))
+	}
+	close(release)
+	message := <-result
+	if len(child.Events) != 0 || len(root.Subagents[0].Events) != 0 {
+		t.Fatal("completed command mutated the live tree before its message was applied")
+	}
+	updated, _ = m.Update(message)
+	m = updated.(Model)
+	loadedChild := detailStateFromScreen(t, m.detail).session
+	loadedRoot := detailStateFromScreen(t, m.detailStack[0]).session
+	if loadedChild != loadedClone {
+		t.Fatalf("accepted clone was not installed on its matching screen: child=%p clone=%p", loadedChild, loadedClone)
+	}
+	if loadedRoot.Subagents[0] != child || loadedRoot.Events[0].Subagent != child || len(child.Events) != 0 {
+		t.Fatalf("accepted clone mutated the summary tree: child=%p subagent=%p event=%p events=%d", child, loadedRoot.Subagents[0], loadedRoot.Events[0].Subagent, len(child.Events))
+	}
+}
+
+func TestZeroEventSubagentSettlesAsEmptyTimeline(t *testing.T) {
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl"}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{child},
+		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
+	}
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: root,
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			loaded.Events = nil
+			return nil
+		},
+	}}, source.Options{})
+	m := NewModel([]*model.Session{root}, registry)
+	m.screen = screenDetail
+	m.detail = newDetailState(root, m.width, m.height, m.styles)
+	m.detailGeneration = 1
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	view := ansi.Strip(m.View())
+	if detail.loadStatus != detailStatusLoaded || !strings.Contains(view, "No timeline events.") || strings.Contains(view, "Loading timeline…") {
+		t.Fatalf("zero-event child did not settle: status=%v\n%s", detail.loadStatus, view)
+	}
+}
+
+func TestPoppedSubagentDiscardsStaleLoad(t *testing.T) {
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl"}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{child},
+		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
+	}
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: root,
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			loaded.Events = []model.Event{{Kind: model.EventUser, Text: "Stale child event"}}
+			return nil
+		},
+	}}, source.Options{})
+	m := NewModel([]*model.Session{root}, registry)
+	m.screen = screenDetail
+	m.detail = newDetailState(root, m.width, m.height, m.styles)
+	m.detailGeneration = 1
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+
+	if detailStateFromScreen(t, m.detail).session != root || len(m.detailStack) != 0 {
+		t.Fatalf("stale child load changed the open screen: detail=%#v stack=%d", m.detail, len(m.detailStack))
+	}
+	if len(root.Subagents[0].Events) != 0 {
+		t.Fatalf("stale child load mutated the summary tree: events=%d", len(root.Subagents[0].Events))
+	}
+}
+
+func TestLateSiblingResultCannotReplaceOpenChild(t *testing.T) {
+	alpha := &model.Session{ID: "alpha", Agent: model.AgentClaude, Path: "/workspace/alpha.jsonl", Title: "Alpha"}
+	bravo := &model.Session{ID: "bravo", Agent: model.AgentClaude, Path: "/workspace/bravo.jsonl", Title: "Bravo"}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{alpha, bravo},
+	}
+	alphaStarted, bravoStarted := make(chan struct{}), make(chan struct{})
+	releaseAlpha, releaseBravo := make(chan struct{}), make(chan struct{})
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: root,
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			switch loaded.ID {
+			case alpha.ID:
+				close(alphaStarted)
+				<-releaseAlpha
+				loaded.Events = []model.Event{{Kind: model.EventUser, Text: "Stale alpha event"}}
+			case bravo.ID:
+				close(bravoStarted)
+				<-releaseBravo
+				loaded.Events = []model.Event{{Kind: model.EventUser, Text: "Current bravo event"}}
+			}
+			return nil
+		},
+	}}, source.Options{})
+	m := NewModel([]*model.Session{root}, registry)
+	m.screen = screenDetail
+	m.detail = newDetailState(root, m.width, m.height, m.styles)
+	m.detailGeneration = 1
+	detail := detailStateFromScreen(t, m.detail)
+	detail.tab = tabSubagents
+	detail.rebuild()
+
+	updated, alphaCmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	alphaResult := make(chan tea.Msg, 1)
+	go func() { alphaResult <- alphaCmd() }()
+	<-alphaStarted
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	updated, bravoCmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	bravoResult := make(chan tea.Msg, 1)
+	go func() { bravoResult <- bravoCmd() }()
+	<-bravoStarted
+	close(releaseAlpha)
+	updated, _ = m.Update(<-alphaResult)
+	m = updated.(Model)
+	if detail := detailStateFromScreen(t, m.detail); detail.session.ID != bravo.ID || detail.loadStatus != detailStatusLoading {
+		t.Fatalf("late sibling result changed open child: session=%q status=%v", detail.session.ID, detail.loadStatus)
+	}
+	close(releaseBravo)
+	updated, _ = m.Update(<-bravoResult)
+	m = updated.(Model)
+	if detail := detailStateFromScreen(t, m.detail); detail.session.ID != bravo.ID || detail.loadStatus != detailStatusLoaded || !strings.Contains(ansi.Strip(m.View()), "Current bravo event") {
+		t.Fatalf("matching sibling result did not settle child: session=%q status=%v\n%s", detail.session.ID, detail.loadStatus, ansi.Strip(m.View()))
+	}
+}
+
+func TestOlderChildResultCannotReplaceReopenedScreen(t *testing.T) {
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl"}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{child},
+		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
+	}
+	loads := 0
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: root,
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			loads++
+			loaded.Events = []model.Event{{Kind: model.EventUser, Text: fmt.Sprintf("Child load %d", loads)}}
+			return nil
+		},
+	}}, source.Options{})
+	m := NewModel([]*model.Session{root}, registry)
+	m.screen = screenDetail
+	m.detail = newDetailState(root, m.width, m.height, m.styles)
+	m.detailGeneration = 1
+
+	updated, oldCmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	updated, currentCmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(oldCmd())
+	m = updated.(Model)
+	if detail := detailStateFromScreen(t, m.detail); detail.loadStatus != detailStatusLoading || strings.Contains(ansi.Strip(m.View()), "Child load 1") {
+		t.Fatalf("older child result replaced reopened screen: status=%v\n%s", detail.loadStatus, ansi.Strip(m.View()))
+	}
+	updated, _ = m.Update(currentCmd())
+	m = updated.(Model)
+	if detail := detailStateFromScreen(t, m.detail); detail.loadStatus != detailStatusLoaded || !strings.Contains(ansi.Strip(m.View()), "Child load 2") {
+		t.Fatalf("current child result did not settle reopened screen: status=%v\n%s", detail.loadStatus, ansi.Strip(m.View()))
+	}
+}
+
+func TestFailedRootRefreshSettlesStaleChildLoad(t *testing.T) {
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl"}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{child},
+		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
+	}
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: root,
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			if loaded.ID == root.ID {
+				return errors.New("root detail unavailable")
+			}
+			loaded.Events = []model.Event{{Kind: model.EventUser, Text: "Stale child event"}}
+			return nil
+		},
+	}}, source.Options{})
+	m := NewModel([]*model.Session{root}, registry)
+	m.screen = screenDetail
+	m.detail = newDetailState(root, m.width, m.height, m.styles)
+	m.detailGeneration = 1
+
+	updated, childCmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	replacement := cloneSession(root)
+	updated, rootCmd := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+	m = updated.(Model)
+	updated, _ = m.Update(childCmd())
+	m = updated.(Model)
+	if detailStateFromScreen(t, m.detail).loadStatus != detailStatusLoading {
+		t.Fatal("stale child result settled before the replacement root result")
+	}
+	updated, _ = m.Update(rootCmd())
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	if detail.loadStatus != detailStatusFailed || !strings.Contains(ansi.Strip(m.View()), "detail error: root detail unavailable") {
+		t.Fatalf("failed root refresh stranded child: status=%v\n%s", detail.loadStatus, ansi.Strip(m.View()))
+	}
+}
+
+func TestChildLoadErrorUsesDetailErrorState(t *testing.T) {
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl"}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{child},
+		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
+	}
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: root,
+		loadNodeEvents: func(context.Context, *model.Session) error {
+			return errors.New("child detail unavailable")
+		},
+	}}, source.Options{})
+	m := NewModel([]*model.Session{root}, registry)
+	m.screen = screenDetail
+	m.detail = newDetailState(root, m.width, m.height, m.styles)
+	m.detailGeneration = 1
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+	detail := detailStateFromScreen(t, m.detail)
+	if detail.loadStatus != detailStatusFailed || detail.err == nil || !strings.Contains(ansi.Strip(m.View()), "detail error: child detail unavailable") {
+		t.Fatalf("child error did not use detail error state: status=%v err=%v\n%s", detail.loadStatus, detail.err, ansi.Strip(m.View()))
+	}
+}
+
+func TestReplaceDetailTreeReloadsOpenChild(t *testing.T) {
+	child := &model.Session{
+		ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl",
+		Events: []model.Event{{Kind: model.EventUser, Text: "Old child event"}},
+	}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{child},
+		Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
+	}
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: root,
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			if loaded.ID == child.ID {
+				loaded.Events = []model.Event{{Kind: model.EventUser, Text: "Fresh child event"}}
+			}
+			return nil
+		},
+	}}, source.Options{})
+	m := NewModel([]*model.Session{root}, registry)
+	m.screen = screenDetail
+	m.detailStack = []detailScreen{newDetailState(root, m.width, m.height, m.styles)}
+	m.detail = newDetailState(child, m.width, m.height, m.styles)
+	m.detailGeneration = 2
+
+	replacement := cloneSession(root)
+	replacement.Subagents[0].Events = nil
+	updated, rootCmd := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+	m = updated.(Model)
+	if rootCmd == nil {
+		t.Fatal("session update did not reload the open root")
+	}
+	updated, cmd := m.Update(rootCmd())
+	m = updated.(Model)
+	if cmd == nil || detailStateFromScreen(t, m.detail).loadStatus != detailStatusLoading || !strings.Contains(ansi.Strip(m.View()), "Loading timeline…") {
+		t.Fatalf("tree replacement did not reload open child: cmd=%v\n%s", cmd != nil, ansi.Strip(m.View()))
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+	if detail := detailStateFromScreen(t, m.detail); detail.loadStatus != detailStatusLoaded || detail.session == detailStateFromScreen(t, m.detailStack[0]).session.Subagents[0] {
+		t.Fatalf("refreshed child did not replace only its screen: status=%v", detail.loadStatus)
+	}
+	if events := detailStateFromScreen(t, m.detailStack[0]).session.Subagents[0].Events; len(events) != 0 {
+		t.Fatalf("refreshed child mutated summary tree with %d events", len(events))
+	}
+	view := ansi.Strip(m.View())
+	if !strings.Contains(view, "Fresh child event") || strings.Contains(view, "Old child event") {
+		t.Fatalf("refreshed child timeline is stale:\n%s", view)
+	}
+}
+
+func TestReplaceDetailTreePreservesReloadedChildState(t *testing.T) {
+	grandchildren := []*model.Session{
+		{ID: "alpha", Agent: model.AgentClaude, Path: "/workspace/alpha.jsonl", Title: "Alpha"},
+		{ID: "bravo", Agent: model.AgentClaude, Path: "/workspace/bravo.jsonl", Title: "Bravo"},
+	}
+	events := make([]model.Event, 12)
+	for index := range events {
+		events[index] = model.Event{Kind: model.EventAssistantText, Text: fmt.Sprintf("Child event %02d", index)}
+	}
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl", Events: events, Subagents: grandchildren}
+	root := &model.Session{ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{child}}
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: root,
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			if loaded.ID == child.ID {
+				loaded.Events = append([]model.Event(nil), events...)
+			}
+			return nil
+		},
+	}}, source.Options{})
+
+	t.Run("timeline focus and viewport", func(t *testing.T) {
+		m := NewModel([]*model.Session{root}, registry)
+		m.width, m.height = 80, 10
+		m.screen = screenDetail
+		m.detailStack = []detailScreen{newDetailState(root, m.width, m.height, m.styles)}
+		m.detail = newDetailState(child, m.width, m.height, m.styles)
+		m.detailGeneration = 2
+		detail := detailStateFromScreen(t, m.detail)
+		detail.focus = 3
+		detail.selectedLine = detail.focusables[3].line
+		detail.viewport.SetYOffset(2)
+		wantKey := detail.focusables[detail.focus].key
+		wantOffset := detail.viewport.YOffset
+
+		replacement := cloneSession(root)
+		replacement.Subagents[0].Events = nil
+		updated, cmd := m.Update(detailLoadedMsg{generation: 2, identity: sessionIdentity(root), session: replacement})
+		m = updated.(Model)
+		updated, _ = m.Update(cmd())
+		m = updated.(Model)
+		detail = detailStateFromScreen(t, m.detail)
+		if got := detail.focusables[detail.focus].key; got != wantKey || detail.viewport.YOffset != wantOffset {
+			t.Fatalf("reloaded timeline state: key=%q offset=%d, want key=%q offset=%d", got, detail.viewport.YOffset, wantKey, wantOffset)
+		}
+	})
+
+	t.Run("subagent interaction during reload", func(t *testing.T) {
+		m := NewModel([]*model.Session{root}, registry)
+		m.screen = screenDetail
+		m.detailStack = []detailScreen{newDetailState(root, m.width, m.height, m.styles)}
+		m.detail = newDetailState(child, m.width, m.height, m.styles)
+		m.detailGeneration = 2
+		detail := detailStateFromScreen(t, m.detail)
+		detail.tab = tabSubagents
+		detail.subagentSelection = 1
+		detail.rebuild()
+
+		replacement := cloneSession(root)
+		replacement.Subagents[0].Events = nil
+		updated, cmd := m.Update(detailLoadedMsg{generation: 2, identity: sessionIdentity(root), session: replacement})
+		m = updated.(Model)
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+		m = updated.(Model)
+		want := sessionIdentity(detailStateFromScreen(t, m.detail).focusedSubagent())
+		updated, _ = m.Update(cmd())
+		m = updated.(Model)
+		detail = detailStateFromScreen(t, m.detail)
+		if detail.tab != tabSubagents || sessionIdentity(detail.focusedSubagent()) != want {
+			t.Fatalf("reloaded Subagents state: tab=%v selected=%#v, want identity %q", detail.tab, detail.focusedSubagent(), want)
+		}
+	})
+}
+
+func TestReplaceDetailTreePreservesChildStateAcrossBurst(t *testing.T) {
+	events := make([]model.Event, 12)
+	for index := range events {
+		events[index] = model.Event{Kind: model.EventAssistantText, Text: fmt.Sprintf("Child event %02d", index)}
+	}
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl", Events: events}
+	root := &model.Session{ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{child}}
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: root,
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			if loaded.ID == child.ID {
+				loaded.Events = append([]model.Event(nil), events...)
+			}
+			return nil
+		},
+	}}, source.Options{})
+	m := NewModel([]*model.Session{root}, registry)
+	m.width, m.height = 80, 10
+	m.screen = screenDetail
+	m.detailStack = []detailScreen{newDetailState(root, m.width, m.height, m.styles)}
+	m.detail = newDetailState(child, m.width, m.height, m.styles)
+	detail := detailStateFromScreen(t, m.detail)
+	detail.focus = 3
+	detail.selectedLine = detail.focusables[3].line
+	detail.viewport.SetYOffset(2)
+	wantKey := detail.focusables[detail.focus].key
+	wantOffset := detail.viewport.YOffset
+
+	for generation := uint64(2); generation <= 3; generation++ {
+		m.detailGeneration = generation
+		replacement := cloneSession(root)
+		replacement.Subagents[0].Events = nil
+		updated, cmd := m.Update(detailLoadedMsg{generation: generation, identity: sessionIdentity(root), session: replacement})
+		m = updated.(Model)
+		if generation == 3 {
+			updated, _ = m.Update(cmd())
+			m = updated.(Model)
+		}
+	}
+	detail = detailStateFromScreen(t, m.detail)
+	if got := detail.focusables[detail.focus].key; got != wantKey || detail.viewport.YOffset != wantOffset {
+		t.Fatalf("bursty reload state: key=%q offset=%d, want key=%q offset=%d", got, detail.viewport.YOffset, wantKey, wantOffset)
+	}
+}
+
+func TestReplaceDetailTreeRebindsItemAfterChildLoad(t *testing.T) {
+	oldEvent := model.Event{Kind: model.EventToolCall, CallID: "call-route", ToolName: "Bash", Detail: &model.ToolDetail{Output: "old route"}}
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl", Events: []model.Event{oldEvent}}
+	root := &model.Session{ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{child}}
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: root,
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			if loaded.ID == child.ID {
+				loaded.Events = []model.Event{{Kind: model.EventToolCall, CallID: "call-route", ToolName: "Bash", Detail: &model.ToolDetail{Output: "fresh route"}}}
+			}
+			return nil
+		},
+	}}, source.Options{})
+	m := NewModel([]*model.Session{root}, registry)
+	m.screen = screenDetail
+	m.detailStack = []detailScreen{newDetailState(root, m.width, m.height, m.styles)}
+	m.detail = newDetailState(child, m.width, m.height, m.styles)
+	m.detailGeneration = 2
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if _, ok := m.detail.(*itemView); !ok {
+		t.Fatalf("precondition: child event opened %T, want item", m.detail)
+	}
+
+	replacement := cloneSession(root)
+	replacement.Subagents[0].Events = nil
+	updated, cmd := m.Update(detailLoadedMsg{generation: 2, identity: sessionIdentity(root), session: replacement})
+	m = updated.(Model)
+	if _, ok := m.detail.(*itemView); !ok || len(m.detailStack) != 2 || detailStateFromScreen(t, m.detailStack[1]).loadStatus != detailStatusLoading {
+		t.Fatalf("tree replacement dropped pending item: detail=%T stack=%d", m.detail, len(m.detailStack))
+	}
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+	item, ok := m.detail.(*itemView)
+	if !ok || len(m.detailStack) != 2 {
+		t.Fatalf("child completion did not restore item: detail=%T stack=%d", m.detail, len(m.detailStack))
+	}
+	if item.event.Detail == nil || item.event.Detail.Output != "fresh route" || detailStateFromScreen(t, m.detailStack[1]).loadStatus != detailStatusLoaded {
+		t.Fatalf("restored item did not use fresh child event: event=%#v", item.event)
+	}
+}
+
+func TestReplaceDetailTreeLoadsNestedScreensInEitherOrder(t *testing.T) {
+	for _, order := range []string{"ancestor first", "descendant first"} {
+		t.Run(order, func(t *testing.T) {
+			grandchild := &model.Session{
+				ID: "mapper", Agent: model.AgentClaude, Path: "/workspace/mapper.jsonl",
+				Events: []model.Event{{Kind: model.EventUser, Text: "Old grandchild event"}},
+			}
+			child := &model.Session{
+				ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl", Subagents: []*model.Session{grandchild},
+				Events: []model.Event{{Kind: model.EventUser, Text: "Old child event"}},
+			}
+			root := &model.Session{ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{child}}
+			registry := source.NewRegistry([]source.Source{detailTestSource{
+				session: root,
+				loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+					switch loaded.ID {
+					case child.ID:
+						loaded.Events = []model.Event{{Kind: model.EventUser, Text: "Fresh child event"}}
+					case grandchild.ID:
+						loaded.Events = []model.Event{{Kind: model.EventUser, Text: "Fresh grandchild event"}}
+					}
+					return nil
+				},
+			}}, source.Options{})
+			m := NewModel([]*model.Session{root}, registry)
+			m.screen = screenDetail
+			m.detailStack = []detailScreen{
+				newDetailState(root, m.width, m.height, m.styles),
+				newDetailState(child, m.width, m.height, m.styles),
+			}
+			m.detail = newDetailState(grandchild, m.width, m.height, m.styles)
+			m.detailGeneration = 2
+
+			replacement := cloneSession(root)
+			replacement.Subagents[0].Events = nil
+			replacement.Subagents[0].Subagents[0].Events = nil
+			updated, cmd := m.Update(detailLoadedMsg{generation: 2, identity: sessionIdentity(root), session: replacement})
+			m = updated.(Model)
+			if detailStateFromScreen(t, m.detailStack[1]).loadStatus != detailStatusLoading || detailStateFromScreen(t, m.detail).loadStatus != detailStatusLoading {
+				t.Fatal("tree replacement did not mark both nested child screens loading")
+			}
+			batchMessage := cmd()
+			batch, ok := batchMessage.(tea.BatchMsg)
+			if !ok || len(batch) != 2 {
+				t.Fatalf("nested reload command = %T, want two-command batch", batchMessage)
+			}
+			messages := make(map[string]tea.Msg, len(batch))
+			for _, load := range batch {
+				message := load()
+				messages[message.(childDetailLoadedMsg).identity] = message
+			}
+			identities := []string{sessionIdentity(child), sessionIdentity(grandchild)}
+			if order == "descendant first" {
+				slices.Reverse(identities)
+			}
+			for _, identity := range identities {
+				updated, _ = m.Update(messages[identity])
+				m = updated.(Model)
+			}
+
+			rootDetail := detailStateFromScreen(t, m.detailStack[0])
+			childDetail := detailStateFromScreen(t, m.detailStack[1])
+			grandchildDetail := detailStateFromScreen(t, m.detail)
+			if sessionIdentity(rootDetail.session.Subagents[0]) != sessionIdentity(childDetail.session) ||
+				sessionIdentity(childDetail.session.Subagents[0]) != sessionIdentity(grandchildDetail.session) {
+				t.Fatalf("nested loaded screens lost their summary identities: root=%q child=%q grandchild=%q", sessionIdentity(rootDetail.session.Subagents[0]), sessionIdentity(childDetail.session.Subagents[0]), sessionIdentity(grandchildDetail.session))
+			}
+			if rootDetail.session.Subagents[0] == childDetail.session || childDetail.session.Subagents[0] == grandchildDetail.session {
+				t.Fatal("nested loaded screens mutated their parent summary graphs")
+			}
+			if childDetail.loadStatus != detailStatusLoaded || grandchildDetail.loadStatus != detailStatusLoaded ||
+				childDetail.session.Events[0].Text != "Fresh child event" || grandchildDetail.session.Events[0].Text != "Fresh grandchild event" {
+				t.Fatalf("nested reload did not settle with fresh events: child=%#v grandchild=%#v", childDetail.session.Events, grandchildDetail.session.Events)
+			}
+		})
 	}
 }
 

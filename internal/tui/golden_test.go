@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"crypto/sha256"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/charmbracelet/x/exp/teatest"
 	"github.com/motoki317/agtlog/internal/cost"
 	"github.com/motoki317/agtlog/internal/model"
+	"github.com/motoki317/agtlog/internal/source"
 )
 
 var goldenNow = time.Date(2026, 1, 2, 6, 4, 0, 0, time.UTC)
@@ -77,6 +79,70 @@ func TestGoldenDetailFrame(t *testing.T) {
 		tm.Send(key)
 	}
 	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "Task(Scout terrain)") }, teatest.WithDuration(time.Second))
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second)).(Model)
+
+	teatest.RequireEqualOutput(t, []byte(normalizeGolden(final.View())))
+}
+
+func TestGoldenLazySubagentFrame(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	child := &model.Session{
+		ID: "scout", Agent: model.AgentClaude, Path: "/workspace/starship/scout.jsonl", Project: "starship", Title: "Scout terrain",
+		Models: []string{"claude-opus-4-8"}, UpdatedAt: goldenNow.Add(-2 * time.Minute),
+		Usage: []model.Usage{{InputTokens: 42_000, OutputTokens: 3_000}}, Cost: model.Cost{USD: 0.32},
+	}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Path: "/workspace/starship/route.jsonl", Project: "starship", Title: "Plan route",
+		Models: []string{"claude-opus-4-8"}, UpdatedAt: goldenNow, Subagents: []*model.Session{child},
+	}
+	childGate := make(chan struct{})
+	defer func() {
+		select {
+		case <-childGate:
+		default:
+			close(childGate)
+		}
+	}()
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: root,
+		loadNodeEvents: func(ctx context.Context, loaded *model.Session) error {
+			switch loaded.ID {
+			case root.ID:
+				loaded.Events = []model.Event{
+					{Kind: model.EventUser, Text: "Delegate the survey"},
+					{Kind: model.EventSubagent, ToolName: "Agent", Subagent: loaded.Subagents[0]},
+				}
+			case child.ID:
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-childGate:
+				}
+				loaded.Events = []model.Event{
+					{Kind: model.EventUser, Text: "Inspect the ridge"},
+					{Kind: model.EventAssistantText, Text: "The ridge is clear"},
+				}
+			}
+			return nil
+		},
+	}}, source.Options{})
+	m := newModelWithClock([]*model.Session{root}, registry, func() time.Time { return goldenNow })
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 18))
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	teatest.WaitFor(t, tm.Output(), func(output []byte) bool {
+		return strings.Contains(string(output), "Delegate the survey")
+	}, teatest.WithDuration(time.Second))
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	teatest.WaitFor(t, tm.Output(), func(output []byte) bool {
+		return strings.Contains(string(output), "Loading timeline…")
+	}, teatest.WithDuration(time.Second))
+	close(childGate)
+	teatest.WaitFor(t, tm.Output(), func(output []byte) bool {
+		return strings.Contains(string(output), "The ridge is clear")
+	}, teatest.WithDuration(time.Second))
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)
 	}

@@ -52,6 +52,7 @@ type Model struct {
 	ctx               context.Context
 	refreshGeneration uint64
 	detailGeneration  uint64
+	childGeneration   uint64
 	itemGeneration    uint64
 }
 
@@ -170,9 +171,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if root := m.detailRoot(); root != nil && sessionIdentity(root.session) == loaded.identity {
 			if loaded.err != nil {
-				root.err = loaded.err
-				root.loading = false
+				root.markLoadFailed(loaded.err)
 				root.rebuild()
+				m.failLoadingChildDetails(loaded.err)
 				return m, nil
 			}
 			for _, current := range m.sessions {
@@ -181,9 +182,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					break
 				}
 			}
-			return m, m.replaceDetailTree(loaded.session)
+			return m, m.replaceDetailTree(loaded.session, true)
 		}
 		return m, nil
+	}
+	if loaded, ok := msg.(childDetailLoadedMsg); ok {
+		if loaded.detailGeneration != m.detailGeneration {
+			return m, nil
+		}
+		return m.applyChildDetailLoaded(loaded)
 	}
 	if update, ok := msg.(source.SessionUpdate); ok {
 		m.refreshGeneration++
@@ -215,7 +222,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.detailGeneration++
 					return m, loadDetail(m.ctx, m.registry, session, m.detailGeneration)
 				}
-				return m, m.replaceDetailTree(session)
+				return m, m.replaceDetailTree(session, false)
 			}
 			m.screen, m.detail = screenList, nil
 			m.detailStack = nil
@@ -471,7 +478,10 @@ func (m *Model) activateDetailSelection() (bool, tea.Cmd) {
 		child.resize(m.width, m.height)
 		child.anchorBottom()
 		m.detail = child
-		return true, nil
+		if m.registry == nil {
+			return true, nil
+		}
+		return true, m.startChildDetailLoad(child, child)
 	}
 	if event, exists := detail.focusedEvent(); exists {
 		crumbs := append([]string(nil), detail.crumbs...)
@@ -490,6 +500,41 @@ func (m *Model) activateDetailSelection() (bool, tea.Cmd) {
 	return false, nil
 }
 
+func (m *Model) startChildDetailLoad(detail, restore *detailState) tea.Cmd {
+	loadRestore := captureDetailRestoreState(restore)
+	if restore.loadRestore != nil {
+		loadRestore = *restore.loadRestore
+	}
+	m.childGeneration++
+	detail.markLoading(m.childGeneration, &loadRestore)
+	detail.rebuild()
+	return loadChildDetail(m.ctx, m.registry, detail.session, m.detailGeneration, detail.loadGeneration)
+}
+
+func (m *Model) failLoadingChildDetails(err error) {
+	lastFailed := -1
+	for index, screen := range m.detailStack {
+		detail, ok := screen.(*detailState)
+		if !ok || detail.loadStatus != detailStatusLoading {
+			continue
+		}
+		detail = detail.clone()
+		detail.markLoadFailed(err)
+		detail.rebuild()
+		m.detailStack[index] = detail
+		lastFailed = index
+	}
+	if detail, ok := m.detail.(*detailState); ok && detail.loadStatus == detailStatusLoading {
+		detail.markLoadFailed(err)
+		detail.rebuild()
+		return
+	}
+	if _, itemOpen := m.detail.(*itemView); itemOpen && lastFailed == len(m.detailStack)-1 {
+		m.detail = m.detailStack[lastFailed]
+		m.detailStack = m.detailStack[:lastFailed]
+	}
+}
+
 func (m *Model) openListSelection() tea.Cmd {
 	if len(m.visible) == 0 {
 		return nil
@@ -506,7 +551,7 @@ func (m *Model) openListSelection() tea.Cmd {
 	if m.registry == nil {
 		return nil
 	}
-	detail.loading = true
+	detail.markLoading(0, nil)
 	detail.rebuild()
 	m.detailGeneration++
 	return loadDetail(m.ctx, m.registry, m.visible[index], m.detailGeneration)
@@ -606,7 +651,7 @@ func cloneDetailScreenForScroll(screen detailScreen) detailScreen {
 	}
 }
 
-func (m *Model) replaceDetailTree(root *model.Session) tea.Cmd {
+func (m *Model) replaceDetailTree(root *model.Session, reloadChildren bool) tea.Cmd {
 	screens := append(append([]detailScreen(nil), m.detailStack...), m.detail)
 	sessions := make(map[string]*model.Session)
 	var indexSessions func(*model.Session)
@@ -618,7 +663,7 @@ func (m *Model) replaceDetailTree(root *model.Session) tea.Cmd {
 	}
 	indexSessions(root)
 	replacements := make([]detailScreen, 0, len(screens))
-	var rawCmd tea.Cmd
+	var cmds []tea.Cmd
 	for _, screen := range screens {
 		state, ok := screen.(*detailState)
 		if !ok {
@@ -627,26 +672,16 @@ func (m *Model) replaceDetailTree(root *model.Session) tea.Cmd {
 				if !parentOK {
 					continue
 				}
-				event, eventOK := parent.eventForKey(item.focusKey)
-				if !eventOK || !sameItemEvent(item.event, event) {
+				if parent.loadStatus == detailStatusLoading {
+					replacements = append(replacements, cloneDetailScreen(item))
 					continue
 				}
-				crumbs := append([]string(nil), parent.crumbs...)
-				if label := detailCrumbLabel(parent.session); label != "" {
-					crumbs = append(crumbs, label)
+				if replacement, rawCmd, exists := m.replacementItemView(item, parent); exists {
+					replacements = append(replacements, replacement)
+					if rawCmd != nil {
+						cmds = append(cmds, rawCmd)
+					}
 				}
-				offset := item.intendedYOffset()
-				replacement := newItemViewWithState(event, parent.session.Agent, crumbs, m.width, m.height, m.styles, m.now(), item.wrap)
-				m.itemGeneration++
-				replacement.ctx = m.ctx
-				replacement.generation = m.itemGeneration
-				rawCmd = replacement.requestRaw()
-				replacement.focusKey = item.focusKey
-				replacement.viewport.SetYOffset(offset)
-				if rawCmd != nil {
-					replacement.restoreYOffset = &offset
-				}
-				replacements = append(replacements, replacement)
 			}
 			continue
 		}
@@ -654,7 +689,12 @@ func (m *Model) replaceDetailTree(root *model.Session) tea.Cmd {
 		if session == nil {
 			break
 		}
-		replacements = append(replacements, m.replacementDetailState(state, session, root))
+		replacement := m.replacementDetailState(state, session, root)
+		replacement.markLoaded()
+		if reloadChildren && len(replacements) > 0 {
+			cmds = append(cmds, m.startChildDetailLoad(replacement, state))
+		}
+		replacements = append(replacements, replacement)
 	}
 	if len(replacements) == 0 {
 		m.screen, m.detail, m.detailStack = screenList, nil, nil
@@ -663,7 +703,30 @@ func (m *Model) replaceDetailTree(root *model.Session) tea.Cmd {
 	last := len(replacements) - 1
 	m.detail = replacements[last]
 	m.detailStack = replacements[:last]
-	return rawCmd
+	return tea.Batch(cmds...)
+}
+
+func (m *Model) replacementItemView(previous *itemView, parent *detailState) (*itemView, tea.Cmd, bool) {
+	event, exists := parent.eventForKey(previous.focusKey)
+	if !exists || !sameItemEvent(previous.event, event) {
+		return nil, nil, false
+	}
+	crumbs := append([]string(nil), parent.crumbs...)
+	if label := detailCrumbLabel(parent.session); label != "" {
+		crumbs = append(crumbs, label)
+	}
+	offset := previous.intendedYOffset()
+	replacement := newItemViewWithState(event, parent.session.Agent, crumbs, m.width, m.height, m.styles, m.now(), previous.wrap)
+	m.itemGeneration++
+	replacement.ctx = m.ctx
+	replacement.generation = m.itemGeneration
+	rawCmd := replacement.requestRaw()
+	replacement.focusKey = previous.focusKey
+	replacement.viewport.SetYOffset(offset)
+	if rawCmd != nil {
+		replacement.restoreYOffset = &offset
+	}
+	return replacement, rawCmd, true
 }
 
 func sameItemEvent(previous, replacement model.Event) bool {
@@ -683,51 +746,70 @@ func sameItemEvent(previous, replacement model.Event) bool {
 }
 
 func (m *Model) replacementDetailState(previous *detailState, session, root *model.Session) *detailState {
-	offset := previous.viewport.YOffset
-	pinned := previous.followingTail()
-	focusKey := ""
-	if len(previous.focusables) > 0 {
-		focusKey = previous.focusables[previous.focus].key
+	return m.replacementDetailStateFromRestore(captureDetailRestoreState(previous), session, detailBreadcrumbs(root, session))
+}
+
+func captureDetailRestoreState(detail *detailState) detailRestoreState {
+	restore := detailRestoreState{
+		viewportOffset:      detail.viewport.YOffset,
+		pinned:              detail.followingTail(),
+		defaultExpanded:     detail.defaultExpanded,
+		focus:               detail.focus,
+		wrap:                detail.wrap,
+		tab:                 detail.tab,
+		subagentSort:        detail.subagentSort,
+		subagentColumnFocus: detail.subagentColumnFocus,
+		subagentSelection:   detail.subagentSelection,
+		expanded:            make(map[string]bool, len(detail.expanded)),
 	}
-	selectedSubagent := ""
-	if previous.tab == tabSubagents {
-		if session := previous.focusedSubagent(); session != nil {
-			selectedSubagent = sessionIdentity(session)
+	if len(detail.focusables) > 0 {
+		restore.focusKey = detail.focusables[detail.focus].key
+	}
+	if detail.tab == tabSubagents {
+		if session := detail.focusedSubagent(); session != nil {
+			restore.selectedSubagent = sessionIdentity(session)
 		}
 	}
+	for key, expanded := range detail.expanded {
+		restore.expanded[key] = expanded
+	}
+	return restore
+}
+
+func (m *Model) replacementDetailStateFromRestore(restore detailRestoreState, session *model.Session, crumbs []string) *detailState {
 	replacement := newDetailStateBase(session, m.width, m.height, m.styles)
 	replacement.now = m.now()
 	replacement.absoluteTime = m.absoluteTime
-	replacement.wrap = previous.wrap
-	replacement.defaultExpanded = previous.defaultExpanded
-	replacement.crumbs = detailBreadcrumbs(root, session)
-	replacement.tab = previous.tab
-	replacement.subagentSort = previous.subagentSort
-	replacement.subagentColumnFocus = previous.subagentColumnFocus
-	replacement.subagentSelection = previous.subagentSelection
-	replacement.focus = previous.focus
-	if pinned {
+	replacement.wrap = restore.wrap
+	replacement.defaultExpanded = restore.defaultExpanded
+	replacement.crumbs = append([]string(nil), crumbs...)
+	replacement.tab = restore.tab
+	replacement.subagentSort = restore.subagentSort
+	replacement.subagentColumnFocus = restore.subagentColumnFocus
+	replacement.subagentSelection = restore.subagentSelection
+	replacement.focus = restore.focus
+	if restore.pinned {
 		replacement.focus = -1
 	}
-	for key, expanded := range previous.expanded {
+	for key, expanded := range restore.expanded {
 		replacement.expanded[key] = expanded
 	}
 	replacement.resize(m.width, m.height)
 	if replacement.tab == tabSubagents {
-		replacement.viewport.SetYOffset(offset)
+		replacement.viewport.SetYOffset(restore.viewportOffset)
 	}
-	if replacement.tab == tabSubagents && selectedSubagent != "" {
+	if replacement.tab == tabSubagents && restore.selectedSubagent != "" {
 		for index, item := range replacement.subagents {
-			if sessionIdentity(item.s) == selectedSubagent {
+			if sessionIdentity(item.s) == restore.selectedSubagent {
 				replacement.subagentSelection = index
 				replacement.selectedLine = subagentDetailLine(index)
 				replacement.rebuildRendered()
 				break
 			}
 		}
-	} else if replacement.tab == tabTimeline && !pinned {
+	} else if replacement.tab == tabTimeline && !restore.pinned {
 		for index, item := range replacement.focusables {
-			if item.key == focusKey && index != replacement.focus {
+			if item.key == restore.focusKey && index != replacement.focus {
 				oldLine := replacement.selectedLine
 				replacement.focus = index
 				replacement.updateSelection(oldLine, item.line)
@@ -735,10 +817,10 @@ func (m *Model) replacementDetailState(previous *detailState, session, root *mod
 			}
 		}
 	}
-	if pinned {
+	if restore.pinned {
 		replacement.anchorBottom()
 	} else if replacement.tab != tabSubagents {
-		replacement.viewport.SetYOffset(offset)
+		replacement.viewport.SetYOffset(restore.viewportOffset)
 	}
 	return replacement
 }
@@ -933,12 +1015,91 @@ type detailLoadedMsg struct {
 	err        error
 }
 
+type childDetailLoadedMsg struct {
+	detailGeneration uint64
+	loadGeneration   uint64
+	identity         string
+	session          *model.Session
+	err              error
+}
+
+func (m *Model) applyChildDetailLoaded(loaded childDetailLoadedMsg) (Model, tea.Cmd) {
+	apply := func(previous *detailState) (*detailState, bool) {
+		if previous.loadStatus != detailStatusLoading || previous.loadGeneration != loaded.loadGeneration || sessionIdentity(previous.session) != loaded.identity {
+			return previous, false
+		}
+		if loaded.err != nil {
+			replacement := previous.clone()
+			replacement.markLoadFailed(loaded.err)
+			replacement.rebuild()
+			return replacement, true
+		}
+
+		restore := captureDetailRestoreState(previous)
+		if previous.loadRestore != nil {
+			prior := *previous.loadRestore
+			if previous.tab == tabTimeline {
+				restore.focusKey = prior.focusKey
+				restore.focus = prior.focus
+				restore.pinned = prior.pinned
+				restore.viewportOffset = prior.viewportOffset
+			}
+			if restore.selectedSubagent == "" {
+				restore.selectedSubagent = prior.selectedSubagent
+			}
+		}
+		replacement := m.replacementDetailStateFromRestore(restore, loaded.session, previous.crumbs)
+		replacement.markLoaded()
+		return replacement, true
+	}
+
+	for index, screen := range m.detailStack {
+		previous, ok := screen.(*detailState)
+		if !ok {
+			continue
+		}
+		if replacement, matched := apply(previous); matched {
+			m.detailStack[index] = replacement
+			if item, ok := m.detail.(*itemView); ok && index == len(m.detailStack)-1 {
+				if replacementItem, rawCmd, exists := m.replacementItemView(item, replacement); exists {
+					m.detail = replacementItem
+					return *m, rawCmd
+				}
+				m.detail = replacement
+				m.detailStack = m.detailStack[:index]
+			}
+			return *m, nil
+		}
+	}
+	if previous, ok := m.detail.(*detailState); ok {
+		if replacement, matched := apply(previous); matched {
+			m.detail = replacement
+		}
+	}
+	return *m, nil
+}
+
 func loadDetail(ctx context.Context, registry *source.Registry, session *model.Session, generation uint64) tea.Cmd {
 	identity := sessionIdentity(session)
 	copy := cloneSession(session)
 	return func() tea.Msg {
-		err := registry.LoadDetail(ctx, copy)
+		err := registry.LoadNodeDetail(ctx, copy)
 		return detailLoadedMsg{generation: generation, identity: identity, session: copy, err: err}
+	}
+}
+
+func loadChildDetail(ctx context.Context, registry *source.Registry, session *model.Session, detailGeneration, loadGeneration uint64) tea.Cmd {
+	identity := sessionIdentity(session)
+	copy := cloneSession(session)
+	return func() tea.Msg {
+		err := registry.LoadNodeDetail(ctx, copy)
+		return childDetailLoadedMsg{
+			detailGeneration: detailGeneration,
+			loadGeneration:   loadGeneration,
+			identity:         identity,
+			session:          copy,
+			err:              err,
+		}
 	}
 }
 
