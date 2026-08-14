@@ -13,6 +13,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -132,6 +133,26 @@ type cliOptions struct {
 	theme         string
 }
 
+type discoveryProgress struct {
+	completed atomic.Int64
+	total     atomic.Int64
+	known     atomic.Bool
+}
+
+func (p *discoveryProgress) update(completed, total int) {
+	p.total.Store(int64(total))
+	p.known.Store(true)
+	for current := p.completed.Load(); int64(completed) > current; current = p.completed.Load() {
+		if p.completed.CompareAndSwap(current, int64(completed)) {
+			break
+		}
+	}
+}
+
+func (p *discoveryProgress) snapshot() (completed, total int, known bool) {
+	return int(p.completed.Load()), int(p.total.Load()), p.known.Load()
+}
+
 type tuiRunner func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error
 
 type registryFactory func(context.Context, cliOptions) (*source.Registry, error)
@@ -143,35 +164,136 @@ func executeTUI(ctx context.Context, options cliOptions, input io.Reader, output
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	sessions, err := registry.Discover(runCtx)
-	if err != nil {
-		return err
-	}
-	var follower *source.Follower
-	var updates <-chan source.SessionUpdate
+	progress := &discoveryProgress{}
+	discoveryRegistry := registry.WithDiscoveryProgress(progress.update)
 	watchingRoots := 0
 	if !options.noWatch {
-		follower, err = registry.Follow(runCtx, source.WatchOptions{})
-		if err != nil {
-			return err
-		}
-		defer func() {
-			cancel()
-			_ = follower.Close()
-		}()
-		updates = follower.Updates()
 		home, homeErr := os.UserHomeDir()
 		if homeErr != nil {
+			cancel()
 			return homeErr
 		}
 		watchingRoots = configuredWatchRootCount(home, os.Getenv("CLAUDE_CONFIG_DIR"), os.Getenv("CODEX_HOME"), options.agent)
-		sessions, err = registry.Discover(runCtx)
-		if err != nil {
-			return err
+	}
+	initial := tui.NewModelWithContextAndTheme(runCtx, nil, registry, theme).
+		WithWatchingRoots(watchingRoots).
+		WithDiscoveryProgress(progress.snapshot)
+	updates := make(chan source.SessionUpdate, 16)
+	backgroundDone := make(chan error, 1)
+	go func() {
+		backgroundDone <- discoverAndFollow(runCtx, registry, discoveryRegistry, !options.noWatch, updates)
+	}()
+	runnerErr := runner(runCtx, input, output, initial, updates)
+	cancel()
+	backgroundErr := <-backgroundDone
+	if runnerErr != nil {
+		return runnerErr
+	}
+	if backgroundErr != nil && !errors.Is(backgroundErr, context.Canceled) {
+		return backgroundErr
+	}
+	return nil
+}
+
+func discoverAndFollow(ctx context.Context, registry, discoveryRegistry *source.Registry, watch bool, updates chan<- source.SessionUpdate) error {
+	defer close(updates)
+	type discoveryResult struct {
+		sessions []*model.Session
+		err      error
+	}
+	startDiscovery := func() <-chan discoveryResult {
+		results := make(chan discoveryResult, 1)
+		go func() {
+			sessions, discoverErr := discoveryRegistry.Discover(ctx)
+			results <- discoveryResult{sessions: sessions, err: discoverErr}
+		}()
+		return results
+	}
+	if !watch {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case result := <-startDiscovery():
+			if !sendSessionUpdate(ctx, updates, source.SessionUpdate{Sessions: result.sessions, DiscoveryComplete: true, DiscoveryErr: result.err}) {
+				return ctx.Err()
+			}
+			return result.err
 		}
 	}
-	initial := tui.NewModelWithContextAndTheme(runCtx, sessions, registry, theme).WithWatchingRoots(watchingRoots)
-	return runner(runCtx, input, output, initial, updates)
+
+	follower, err := registry.Follow(ctx, source.WatchOptions{})
+	if err != nil {
+		_ = sendSessionUpdate(ctx, updates, source.SessionUpdate{DiscoveryComplete: true, DiscoveryErr: err})
+		return err
+	}
+	closeFollower := func() { _ = follower.Close() }
+	results := startDiscovery()
+
+	followerUpdates := follower.Updates()
+	for {
+		select {
+		case <-ctx.Done():
+			closeFollower()
+			return ctx.Err()
+		case update, ok := <-followerUpdates:
+			if !ok {
+				result := <-results
+				_ = sendSessionUpdate(ctx, updates, source.SessionUpdate{Sessions: result.sessions, DiscoveryComplete: true, DiscoveryErr: result.err})
+				closeFollower()
+				return result.err
+			}
+			if !sendSessionUpdate(ctx, updates, update) {
+				closeFollower()
+				return ctx.Err()
+			}
+		case result := <-results:
+			followerOpen := true
+			for range len(followerUpdates) {
+				update, ok := <-followerUpdates
+				if !ok {
+					followerOpen = false
+					break
+				}
+				if !sendSessionUpdate(ctx, updates, update) {
+					closeFollower()
+					return ctx.Err()
+				}
+			}
+			if !sendSessionUpdate(ctx, updates, source.SessionUpdate{Sessions: result.sessions, DiscoveryComplete: true, DiscoveryErr: result.err}) {
+				closeFollower()
+				return ctx.Err()
+			}
+			if result.err != nil || !followerOpen {
+				closeFollower()
+				return result.err
+			}
+			for {
+				select {
+				case <-ctx.Done():
+					closeFollower()
+					return ctx.Err()
+				case update, ok := <-followerUpdates:
+					if !ok {
+						closeFollower()
+						return nil
+					}
+					if !sendSessionUpdate(ctx, updates, update) {
+						closeFollower()
+						return ctx.Err()
+					}
+				}
+			}
+		}
+	}
+}
+
+func sendSessionUpdate(ctx context.Context, output chan<- source.SessionUpdate, update source.SessionUpdate) bool {
+	select {
+	case output <- update:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func parseOptions(args []string, output io.Writer) (cliOptions, error) {
@@ -277,6 +399,21 @@ func runBubbleTea(ctx context.Context, input io.Reader, output io.Writer, initia
 	inputFD, inputIsFile := input.(interface{ Fd() uintptr })
 	outputFD, outputIsFile := output.(interface{ Fd() uintptr })
 	if !inputIsFile || !outputIsFile || !term.IsTerminal(int(inputFD.Fd())) || !term.IsTerminal(int(outputFD.Fd())) {
+		for initial.DiscoveryInFlight() {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case update, ok := <-updates:
+				if !ok {
+					return errors.New("session discovery ended before completion")
+				}
+				updated, _ := initial.Update(update)
+				initial = updated.(tui.Model)
+			}
+		}
+		if err := initial.DiscoveryError(); err != nil {
+			return err
+		}
 		_, err := fmt.Fprintln(output, ansi.Strip(initial.StaticView()))
 		return err
 	}

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -31,6 +32,81 @@ func TestEmptyListExplainsWhereToFindSessions(t *testing.T) {
 		if width := ansi.StringWidth(line); width > 80 {
 			t.Fatalf("empty list line width = %d, want <= 80: %q", width, line)
 		}
+	}
+}
+
+func TestEmptyListShowsDiscoveryProgressWhileLoading(t *testing.T) {
+	m := NewModel(nil, nil).WithDiscoveryProgress(func() (int, int, bool) {
+		return 7, 12, true
+	})
+	view := ansi.Strip(m.View())
+
+	if !strings.Contains(view, "Loading sessions… 7/12") {
+		t.Fatalf("loading list missing progress:\n%s", view)
+	}
+	if strings.Contains(view, "No sessions found") || strings.Contains(view, "0 sessions") {
+		t.Fatalf("loading list claimed discovery was empty:\n%s", view)
+	}
+}
+
+func TestDiscoveryTickReadsLatestProgress(t *testing.T) {
+	completed := 2
+	m := NewModel(nil, nil).WithDiscoveryProgress(func() (int, int, bool) {
+		return completed, 12, true
+	})
+	completed = 9
+	updated, cmd := m.Update(discoveryTickMsg{})
+	m = updated.(Model)
+
+	if cmd == nil || !strings.Contains(ansi.Strip(m.View()), "Loading sessions… 9/12") {
+		t.Fatalf("discovery tick did not repaint latest progress:\n%s", ansi.Strip(m.View()))
+	}
+}
+
+func TestManualRefreshIsIgnoredDuringInitialDiscovery(t *testing.T) {
+	registry := source.NewRegistry(nil, source.Options{})
+	m := NewModel(nil, registry).WithDiscoveryProgress(func() (int, int, bool) {
+		return 2, 4, true
+	})
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m = updated.(Model)
+
+	if cmd != nil || m.status != "" || !m.DiscoveryInFlight() {
+		t.Fatalf("refresh changed loading model: cmd=%v status=%q loading=%v", cmd != nil, m.status, m.DiscoveryInFlight())
+	}
+}
+
+func TestEmptyDiscoverySettlesIntoNoSessionsState(t *testing.T) {
+	m := NewModel(nil, nil).WithDiscoveryProgress(func() (int, int, bool) {
+		return 0, 0, true
+	})
+	updated, _ := m.Update(source.SessionUpdate{DiscoveryComplete: true})
+	m = updated.(Model)
+	view := ansi.Strip(m.View())
+
+	if m.DiscoveryInFlight() || !strings.Contains(view, "No sessions found") || strings.Contains(view, "Loading sessions") {
+		t.Fatalf("empty discovery did not settle:\n%s", view)
+	}
+}
+
+func TestDiscoveryErrorIsVisibleAtNarrowWidth(t *testing.T) {
+	m := NewModel(nil, nil).WithWatchingRoots(3).WithDiscoveryProgress(func() (int, int, bool) {
+		return 0, 4, true
+	})
+	updated, _ := m.Update(source.SessionUpdate{
+		DiscoveryComplete: true,
+		DiscoveryErr:      errors.New("fictional root is unreadable"),
+	})
+	m = updated.(Model)
+	updated, _ = m.Update(tea.WindowSizeMsg{Width: 38, Height: 10})
+	m = updated.(Model)
+	view := ansi.Strip(m.View())
+
+	if !strings.Contains(view, "Session discovery failed") || !strings.Contains(view, "fictional root is unreadable") {
+		t.Fatalf("narrow error state hid discovery failure:\n%s", view)
+	}
+	if strings.Contains(view, "watching 3 roots") {
+		t.Fatalf("failed follower still claimed watched roots:\n%s", view)
 	}
 }
 
@@ -1137,6 +1213,80 @@ func TestSessionUpdateUpsertsRowAndKeepsSelection(t *testing.T) {
 	}
 	if got := m.selectedIdentity(); got != sessionIdentity(replacement) {
 		t.Fatalf("selected identity = %q, want updated second row", got)
+	}
+}
+
+func TestInitialDiscoveryDoesNotOverwriteEarlierWatcherUpdate(t *testing.T) {
+	progress := func() (int, int, bool) { return 1, 1, true }
+	m := NewModel(nil, nil).WithDiscoveryProgress(progress)
+	path := "/workspace/session.jsonl"
+	watcher := &model.Session{
+		ID: "session-a", Agent: model.AgentClaude, Path: path, Title: "Fresh watcher title",
+		UpdatedAt: time.Date(2026, time.August, 15, 10, 0, 1, 0, time.UTC),
+	}
+	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{watcher}})
+	m = updated.(Model)
+	stale := &model.Session{
+		ID: "session-a", Agent: model.AgentClaude, Path: path, Title: "Stale discovery title",
+		UpdatedAt: time.Date(2026, time.August, 15, 10, 0, 2, 0, time.UTC),
+	}
+	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{stale}, DiscoveryComplete: true})
+	m = updated.(Model)
+
+	if m.DiscoveryInFlight() || len(m.sessions) != 1 || m.sessions[0] != watcher {
+		t.Fatalf("sessions after watcher then discovery = %#v", m.sessions)
+	}
+}
+
+func TestInitialDiscoveryDoesNotDuplicateWatcherReplacementWithChangedIdentity(t *testing.T) {
+	m := NewModel(nil, nil).WithDiscoveryProgress(func() (int, int, bool) {
+		return 1, 1, true
+	})
+	path := "/workspace/replaced.jsonl"
+	replacement := &model.Session{ID: "new-id", Agent: model.AgentClaude, Path: path, Title: "Replacement"}
+	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+	m = updated.(Model)
+	stale := &model.Session{ID: "old-id", Agent: model.AgentClaude, Path: path, Title: "Stale discovery"}
+	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{stale}, DiscoveryComplete: true})
+	m = updated.(Model)
+
+	if len(m.sessions) != 1 || m.sessions[0] != replacement {
+		t.Fatalf("initial discovery duplicated replaced path: %#v", m.sessions)
+	}
+}
+
+func TestInitialDiscoveryDoesNotRestoreEarlierWatcherRemoval(t *testing.T) {
+	m := NewModel(nil, nil).WithDiscoveryProgress(func() (int, int, bool) {
+		return 1, 1, true
+	})
+	path := "/workspace/removed.jsonl"
+	updated, _ := m.Update(source.SessionUpdate{RemovedPaths: []string{path}})
+	m = updated.(Model)
+	removed := &model.Session{ID: "removed", Agent: model.AgentClaude, Path: path}
+	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{removed}, DiscoveryComplete: true})
+	m = updated.(Model)
+
+	if len(m.sessions) != 0 {
+		t.Fatalf("initial discovery restored removed session: %#v", m.sessions)
+	}
+}
+
+func TestInitialDiscoveryDoesNotOverwriteRecreatedWatcherPath(t *testing.T) {
+	m := NewModel(nil, nil).WithDiscoveryProgress(func() (int, int, bool) {
+		return 1, 1, true
+	})
+	path := "/workspace/recreated.jsonl"
+	updated, _ := m.Update(source.SessionUpdate{RemovedPaths: []string{path}})
+	m = updated.(Model)
+	recreated := &model.Session{ID: "new-id", Agent: model.AgentClaude, Path: path, Title: "Recreated"}
+	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{recreated}})
+	m = updated.(Model)
+	stale := &model.Session{ID: "old-id", Agent: model.AgentClaude, Path: path, Title: "Removed snapshot"}
+	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{stale}, DiscoveryComplete: true})
+	m = updated.(Model)
+
+	if len(m.sessions) != 1 || m.sessions[0] != recreated {
+		t.Fatalf("initial discovery overwrote recreated path: %#v", m.sessions)
 	}
 }
 

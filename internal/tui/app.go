@@ -23,42 +23,50 @@ type detailScreen interface {
 }
 
 type Model struct {
-	registry          *source.Registry
-	sessions          []*model.Session
-	visible           []*model.Session
-	visibleProjects   int
-	visibleCost       model.Cost
-	filter            textinput.Model
-	filtering         bool
-	sortState         sortState
-	columnFocus       listColumnKind
-	agent             agentFilter
-	screen            screen
-	detail            detailScreen
-	detailStack       []detailScreen
-	cursor            int
-	listOffset        int
-	filterSelection   string
-	width             int
-	height            int
-	keys              keyMap
-	helpOpen          bool
-	status            string
-	watchingRoots     int
-	theme             Theme
-	styles            styles
-	absoluteTime      bool
-	now               func() time.Time
-	ctx               context.Context
-	refreshGeneration uint64
-	detailGeneration  uint64
-	childGeneration   uint64
-	itemGeneration    uint64
+	registry            *source.Registry
+	sessions            []*model.Session
+	visible             []*model.Session
+	visibleProjects     int
+	visibleCost         model.Cost
+	filter              textinput.Model
+	filtering           bool
+	sortState           sortState
+	columnFocus         listColumnKind
+	agent               agentFilter
+	screen              screen
+	detail              detailScreen
+	detailStack         []detailScreen
+	cursor              int
+	listOffset          int
+	filterSelection     string
+	width               int
+	height              int
+	keys                keyMap
+	helpOpen            bool
+	status              string
+	watchingRoots       int
+	theme               Theme
+	styles              styles
+	absoluteTime        bool
+	now                 func() time.Time
+	ctx                 context.Context
+	refreshGeneration   uint64
+	detailGeneration    uint64
+	childGeneration     uint64
+	itemGeneration      uint64
+	discoveryLoading    bool
+	discoveryProgress   func() (completed, total int, known bool)
+	discoveryCompleted  int
+	discoveryTotal      int
+	discoveryTotalKnown bool
+	discoveryTouched    map[string]bool
+	discoveryErr        error
 }
 
 type screen int
 
 type ageTickMsg struct{}
+type discoveryTickMsg struct{}
 
 const mouseWheelRows = 3
 
@@ -116,10 +124,38 @@ func (m Model) WithWatchingRoots(count int) Model {
 	return m
 }
 
-func (m Model) Init() tea.Cmd { return nextAgeTick() }
+func (m Model) WithDiscoveryProgress(progress func() (completed, total int, known bool)) Model {
+	m.discoveryLoading = true
+	m.discoveryProgress = progress
+	m.discoveryTouched = make(map[string]bool)
+	m.readDiscoveryProgress()
+	return m
+}
+
+func (m Model) DiscoveryInFlight() bool { return m.discoveryLoading }
+
+func (m Model) DiscoveryError() error { return m.discoveryErr }
+
+func (m Model) Init() tea.Cmd {
+	if m.discoveryLoading {
+		return tea.Batch(nextAgeTick(), nextDiscoveryTick())
+	}
+	return nextAgeTick()
+}
 
 func nextAgeTick() tea.Cmd {
 	return tea.Tick(time.Minute, func(time.Time) tea.Msg { return ageTickMsg{} })
+}
+
+func nextDiscoveryTick() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg { return discoveryTickMsg{} })
+}
+
+func (m *Model) readDiscoveryProgress() {
+	if m.discoveryProgress == nil {
+		return
+	}
+	m.discoveryCompleted, m.discoveryTotal, m.discoveryTotalKnown = m.discoveryProgress()
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -142,6 +178,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncList(m.selectedIdentity())
 		m.refreshDetailTimes()
 		return m, nextAgeTick()
+	}
+	if _, ok := msg.(discoveryTickMsg); ok {
+		if !m.discoveryLoading {
+			return m, nil
+		}
+		m.readDiscoveryProgress()
+		return m, nextDiscoveryTick()
 	}
 	if refreshed, ok := msg.(refreshedMsg); ok {
 		if refreshed.generation != m.refreshGeneration {
@@ -193,6 +236,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.applyChildDetailLoaded(loaded)
 	}
 	if update, ok := msg.(source.SessionUpdate); ok {
+		if m.discoveryLoading && !update.DiscoveryComplete {
+			for _, path := range update.RemovedPaths {
+				m.discoveryTouched[path] = true
+			}
+			for _, session := range update.Sessions {
+				m.discoveryTouched[session.Path] = true
+			}
+		}
 		m.refreshGeneration++
 		openIdentity := ""
 		openPath := ""
@@ -210,6 +261,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.applySessionUpdate(update)
+		if update.DiscoveryComplete {
+			m.readDiscoveryProgress()
+			m.discoveryLoading = false
+			m.discoveryProgress = nil
+			m.discoveryTouched = nil
+			m.discoveryErr = update.DiscoveryErr
+			if update.DiscoveryErr != nil {
+				m.status = "discovery: " + terminalText(update.DiscoveryErr.Error(), 160)
+				m.watchingRoots = 0
+			}
+		}
 		if openIdentity != "" && !openChanged {
 			m.refreshOpenOwnership(openIdentity, openOwnership)
 		}
@@ -319,7 +381,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.detail.update(msg)
 	}
-	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.filtering && key.Matches(keyMsg, m.keys.Refresh) && m.registry != nil {
+	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.filtering && !m.discoveryLoading && key.Matches(keyMsg, m.keys.Refresh) && m.registry != nil {
 		m.status = "refreshing…"
 		m.refreshGeneration++
 		return m, refreshSessions(m.ctx, m.registry, m.refreshGeneration)
@@ -889,6 +951,11 @@ func refreshSessions(ctx context.Context, registry *source.Registry, generation 
 }
 
 func (m *Model) applySessionUpdate(update source.SessionUpdate) {
+	if update.DiscoveryComplete && len(m.discoveryTouched) == 0 && len(m.sessions) == 0 && len(update.RemovedPaths) == 0 {
+		m.sessions = append([]*model.Session(nil), update.Sessions...)
+		m.rebuildList()
+		return
+	}
 	removed := make(map[string]bool, len(update.RemovedPaths))
 	for _, path := range update.RemovedPaths {
 		removed[path] = true
@@ -905,6 +972,9 @@ func (m *Model) applySessionUpdate(update source.SessionUpdate) {
 		indices[sessionIdentity(session)] = index
 	}
 	for _, session := range update.Sessions {
+		if update.DiscoveryComplete && m.discoveryTouched[session.Path] {
+			continue
+		}
 		identity := sessionIdentity(session)
 		if index, exists := indices[identity]; exists {
 			m.sessions[index] = session

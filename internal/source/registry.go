@@ -155,6 +155,12 @@ func NewRegistry(sources []Source, options Options) *Registry {
 	return registry
 }
 
+func (r *Registry) WithDiscoveryProgress(progress func(completed, total int)) *Registry {
+	copy := *r
+	copy.options.Progress = progress
+	return &copy
+}
+
 func (r *Registry) Discover(ctx context.Context) ([]*model.Session, error) {
 	sessions, _, err := r.DiscoverWithDiagnostics(ctx)
 	return sessions, err

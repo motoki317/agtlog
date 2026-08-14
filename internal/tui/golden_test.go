@@ -45,6 +45,23 @@ func TestGoldenListFrame(t *testing.T) {
 	teatest.RequireEqualOutput(t, []byte(normalizeGolden(final.View())))
 }
 
+func TestGoldenLoadingFrame(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	m := newModelWithClock(nil, nil, func() time.Time { return goldenNow }).WithDiscoveryProgress(func() (int, int, bool) {
+		return 37, 128, true
+	})
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 16))
+	teatest.WaitFor(t, tm.Output(), func(output []byte) bool {
+		return strings.Contains(string(output), "Loading sessions… 37/128")
+	}, teatest.WithDuration(time.Second))
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second)).(Model)
+
+	teatest.RequireEqualOutput(t, []byte(normalizeGolden(final.View())))
+}
+
 func TestGoldenDetailFrame(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	child := &model.Session{

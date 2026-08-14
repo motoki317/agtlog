@@ -470,7 +470,13 @@ func (m Model) compactListView(layout listLayout) string {
 		content = append(content, panelLine{plain: summary, styled: m.styles.row.Render(summary)})
 	}
 	if len(content) < layout.compactPanelHeight-2 {
-		if len(m.visible) > 0 {
+		if m.discoveryLoading {
+			plain := fitPlain(m.discoveryLoadingLabel(), innerWidth, false)
+			content = append(content, panelLine{plain: plain, styled: m.styles.muted.Render(plain)})
+		} else if m.discoveryErr != nil {
+			plain := fitPlain("Session discovery failed; press r to retry.", innerWidth, false)
+			content = append(content, panelLine{plain: plain, styled: m.styles.warning.Render(plain)})
+		} else if len(m.visible) > 0 {
 			columns := listColumns(max(0, innerWidth-listCursorWidth), m.absoluteTime)
 			index := m.compactListIndex()
 			content = append(content, renderSessionPanelLine(m.visible[index], m.now(), columns, innerWidth, index == m.cursor, m.styles))
@@ -522,12 +528,28 @@ func (m Model) sessionsPanel(height int) string {
 		content = append(content, renderListHeaderLine(columns, innerWidth, m.sortState, m.columnFocus, m.styles))
 	}
 	rowCapacity := max(0, innerHeight-1)
-	start := min(max(0, m.listOffset), max(0, len(m.visible)-rowCapacity))
-	end := min(len(m.visible), start+rowCapacity)
-	for index := start; index < end; index++ {
-		content = append(content, renderSessionPanelLine(m.visible[index], m.now(), columns, innerWidth, index == m.cursor, m.styles))
+	if m.discoveryLoading && rowCapacity > 0 {
+		plain := fitPlain(m.discoveryLoadingLabel(), innerWidth, false)
+		content = append(content, panelLine{plain: plain, styled: m.styles.muted.Render(plain)})
+	} else if m.discoveryErr != nil && rowCapacity > 0 {
+		plain := fitPlain("Session discovery failed.", innerWidth, false)
+		content = append(content, panelLine{plain: plain, styled: m.styles.warning.Render(plain)})
+		if rowCapacity > 1 {
+			plain = fitPlain(terminalText(m.discoveryErr.Error(), 160), innerWidth, false)
+			content = append(content, panelLine{plain: plain, styled: m.styles.warning.Render(plain)})
+		}
+		if rowCapacity > 2 {
+			plain = fitPlain("Press r to retry; press ? for keys.", innerWidth, false)
+			content = append(content, panelLine{plain: plain, styled: m.styles.muted.Render(plain)})
+		}
+	} else {
+		start := min(max(0, m.listOffset), max(0, len(m.visible)-rowCapacity))
+		end := min(len(m.visible), start+rowCapacity)
+		for index := start; index < end; index++ {
+			content = append(content, renderSessionPanelLine(m.visible[index], m.now(), columns, innerWidth, index == m.cursor, m.styles))
+		}
 	}
-	if len(m.visible) == 0 && rowCapacity > 0 {
+	if !m.discoveryLoading && m.discoveryErr == nil && len(m.visible) == 0 && rowCapacity > 0 {
 		plain := fitPlain("No sessions found.", innerWidth, false)
 		content = append(content, panelLine{plain: plain, styled: m.styles.muted.Render(plain)})
 		if len(m.sessions) == 0 && rowCapacity > 1 {
@@ -658,6 +680,13 @@ func (m Model) renderKeyBar() string {
 }
 
 func (m Model) listSummary() string {
+	if m.discoveryLoading {
+		state := fmt.Sprintf("Discovering sessions · watching %d roots", m.watchedRootCount())
+		if m.theme.Name == "mono" {
+			state += " · theme:mono"
+		}
+		return state
+	}
 	totalLabel := formatCost(m.visibleCost)
 	if len(m.visibleCost.MissingPricingModels) > 0 {
 		totalLabel += " partial"
@@ -683,6 +712,13 @@ func (m Model) listSummary() string {
 		state += " · theme:mono"
 	}
 	return state
+}
+
+func (m Model) discoveryLoadingLabel() string {
+	if m.discoveryTotalKnown {
+		return fmt.Sprintf("Loading sessions… %d/%d", m.discoveryCompleted, m.discoveryTotal)
+	}
+	return "Loading sessions…"
 }
 
 func (m Model) watchedRootCount() int {

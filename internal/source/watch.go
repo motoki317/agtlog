@@ -26,9 +26,11 @@ type Change struct {
 }
 
 type SessionUpdate struct {
-	Paths        []string
-	RemovedPaths []string
-	Sessions     []*model.Session
+	Paths             []string
+	RemovedPaths      []string
+	Sessions          []*model.Session
+	DiscoveryComplete bool
+	DiscoveryErr      error
 }
 
 type Follower struct {

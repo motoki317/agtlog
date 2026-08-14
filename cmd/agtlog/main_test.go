@@ -200,32 +200,65 @@ func TestResolveVersionUsesLinkerThenModuleMetadata(t *testing.T) {
 }
 
 type staticSource struct {
-	session *model.Session
+	session    *model.Session
+	rootsCalls *int
+}
+
+type blockingParseSource struct {
+	parseStarted chan struct{}
+	releaseParse chan struct{}
+	parseDone    chan struct{}
+}
+
+func (s blockingParseSource) Agent() model.AgentKind   { return model.AgentClaude }
+func (s blockingParseSource) CacheFingerprint() string { return "test-blocking-parser-v1" }
+func (s blockingParseSource) Roots() []string          { return nil }
+func (s blockingParseSource) Discover(context.Context) ([]string, error) {
+	return []string{"session.jsonl"}, nil
+}
+func (s blockingParseSource) Parse(string) (*model.Session, error) {
+	close(s.parseStarted)
+	defer close(s.parseDone)
+	<-s.releaseParse
+	return &model.Session{ID: "session-a", Agent: model.AgentClaude}, nil
 }
 
 type reconcilingSource struct {
-	root      string
-	discovers int
+	root             string
+	discovers        int
+	discoveryStarted chan struct{}
+	releaseDiscovery chan struct{}
 }
 
 func (s *reconcilingSource) Agent() model.AgentKind   { return model.AgentClaude }
 func (s *reconcilingSource) CacheFingerprint() string { return "test-reconciling-parser-v1" }
 func (s *reconcilingSource) Roots() []string          { return []string{s.root} }
-func (s *reconcilingSource) Discover(context.Context) ([]string, error) {
+func (s *reconcilingSource) Discover(ctx context.Context) ([]string, error) {
 	s.discovers++
+	close(s.discoveryStarted)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-s.releaseDiscovery:
+	}
 	return []string{filepath.Join(s.root, "session.jsonl")}, nil
 }
 func (s *reconcilingSource) Parse(path string) (*model.Session, error) {
-	title := "Initial"
-	if s.discovers > 1 {
-		title = "Reconciled"
+	id, title := "session-a", "Initial"
+	if filepath.Base(path) == "watched.jsonl" {
+		id, title = "session-watched", "Watched"
 	}
-	return &model.Session{ID: "session-a", Agent: model.AgentClaude, Path: path, Title: title}, nil
+	return &model.Session{ID: id, Agent: model.AgentClaude, Path: path, Title: title}, nil
 }
 
 func (s staticSource) Agent() model.AgentKind   { return s.session.Agent }
 func (s staticSource) CacheFingerprint() string { return "test-static-parser-v1" }
-func (s staticSource) Roots() []string          { return nil }
+func (s staticSource) Roots() []string {
+	if s.rootsCalls != nil {
+		*s.rootsCalls++
+	}
+	return nil
+}
 func (s staticSource) Discover(context.Context) ([]string, error) {
 	return []string{"session.jsonl"}, nil
 }
@@ -464,17 +497,29 @@ func TestExecuteApplicationPassesSelectedThemeToTUI(t *testing.T) {
 	}
 }
 
-func TestExecuteTUIUsesStaticSnapshotWithoutWatch(t *testing.T) {
+func TestExecuteTUIDiscoversAfterStartingWithoutWatch(t *testing.T) {
 	session := &model.Session{ID: "session-a", Agent: model.AgentClaude, Project: "starship", Title: "Plan the launch"}
-	registry := source.NewRegistry([]source.Source{staticSource{session: session}}, source.Options{Workers: 1})
+	rootsCalls := 0
+	registry := source.NewRegistry([]source.Source{staticSource{session: session, rootsCalls: &rootsCalls}}, source.Options{Workers: 1})
+	rootsCalls = 0
 	called := false
 	runner := func(_ context.Context, _ io.Reader, _ io.Writer, initial tui.Model, updates <-chan source.SessionUpdate) error {
 		called = true
-		if updates != nil {
-			t.Fatal("static launch received live update channel")
+		if updates == nil {
+			t.Fatal("static launch received no discovery update channel")
 		}
-		if !strings.Contains(initial.View(), "Plan the launch") {
-			t.Fatalf("initial view missing discovered session:\n%s", initial.View())
+		if !initial.DiscoveryInFlight() || strings.Contains(initial.View(), "Plan the launch") || !strings.Contains(initial.View(), "Loading sessions") {
+			t.Fatalf("initial view was not a loading frame:\n%s", initial.View())
+		}
+		select {
+		case update := <-updates:
+			updated, _ := initial.Update(update)
+			initial = updated.(tui.Model)
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for discovery")
+		}
+		if initial.DiscoveryInFlight() || !strings.Contains(initial.View(), "Plan the launch") {
+			t.Fatalf("discovered session did not settle the model:\n%s", initial.View())
 		}
 		return nil
 	}
@@ -485,24 +530,124 @@ func TestExecuteTUIUsesStaticSnapshotWithoutWatch(t *testing.T) {
 	if !called {
 		t.Fatal("runner was not called")
 	}
+	if rootsCalls != 0 {
+		t.Fatalf("--no-watch called source Roots %d times after registry construction", rootsCalls)
+	}
 }
 
-func TestExecuteTUIReconcilesAfterWatcherStarts(t *testing.T) {
+func TestExecuteTUIQuitDoesNotWaitForInFlightParse(t *testing.T) {
+	for _, noWatch := range []bool{true, false} {
+		t.Run(fmt.Sprintf("no-watch-%t", noWatch), func(t *testing.T) {
+			adapter := blockingParseSource{
+				parseStarted: make(chan struct{}), releaseParse: make(chan struct{}), parseDone: make(chan struct{}),
+			}
+			registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1})
+			runner := func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error {
+				select {
+				case <-adapter.parseStarted:
+					return nil
+				case <-time.After(time.Second):
+					return errors.New("parse did not start")
+				}
+			}
+			done := make(chan error, 1)
+			go func() {
+				done <- executeTUI(context.Background(), cliOptions{noWatch: noWatch}, strings.NewReader(""), io.Discard, registry, runner)
+			}()
+
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("executeTUI() error = %v", err)
+				}
+			case <-time.After(time.Second):
+				close(adapter.releaseParse)
+				<-done
+				t.Fatal("quit waited for in-flight parse")
+			}
+			close(adapter.releaseParse)
+			select {
+			case <-adapter.parseDone:
+			case <-time.After(time.Second):
+				t.Fatal("released parse did not exit")
+			}
+		})
+	}
+}
+
+func TestExecuteTUIStartsWatcherBeforeSingleDiscovery(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "session.jsonl"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	adapter := &reconcilingSource{root: root}
+	adapter := &reconcilingSource{
+		root: root, discoveryStarted: make(chan struct{}), releaseDiscovery: make(chan struct{}),
+	}
+	release := func() {
+		select {
+		case <-adapter.releaseDiscovery:
+		default:
+			close(adapter.releaseDiscovery)
+		}
+	}
+	defer release()
 	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1})
-	runner := func(_ context.Context, _ io.Reader, _ io.Writer, initial tui.Model, _ <-chan source.SessionUpdate) error {
-		if !strings.Contains(initial.View(), "Reconciled") {
-			t.Fatalf("initial view was not reconciled after watcher setup:\n%s", initial.View())
+	runner := func(_ context.Context, _ io.Reader, _ io.Writer, initial tui.Model, updates <-chan source.SessionUpdate) error {
+		if !initial.DiscoveryInFlight() {
+			t.Fatalf("initial model was not loading:\n%s", initial.View())
+		}
+		select {
+		case <-adapter.discoveryStarted:
+		case <-time.After(time.Second):
+			t.Fatal("discovery did not start")
+		}
+		if err := os.WriteFile(filepath.Join(root, "watched.jsonl"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		release()
+		discoveryComplete, watcherUpdate := false, false
+		deadline := time.NewTimer(2 * time.Second)
+		defer deadline.Stop()
+		for !discoveryComplete || !watcherUpdate {
+			select {
+			case update, ok := <-updates:
+				if !ok {
+					t.Fatal("updates closed before discovery and watcher results arrived")
+				}
+				discoveryComplete = discoveryComplete || update.DiscoveryComplete
+				for _, session := range update.Sessions {
+					watcherUpdate = watcherUpdate || session.Title == "Watched"
+				}
+				updated, _ := initial.Update(update)
+				initial = updated.(tui.Model)
+			case <-deadline.C:
+				t.Fatal("timed out waiting for discovery and watcher update")
+			}
+		}
+		if !strings.Contains(initial.View(), "Initial") || !strings.Contains(initial.View(), "Watched") {
+			t.Fatalf("discovery and watcher result =\n%s", initial.View())
 		}
 		return nil
 	}
 
 	if err := executeTUI(context.Background(), cliOptions{}, strings.NewReader(""), io.Discard, registry, runner); err != nil {
 		t.Fatalf("executeTUI() error = %v", err)
+	}
+	if adapter.discovers != 1 {
+		t.Fatalf("Discover() calls = %d, want 1", adapter.discovers)
+	}
+}
+
+func TestExecuteTUINonTerminalWaitsForDiscovery(t *testing.T) {
+	session := &model.Session{ID: "session-a", Agent: model.AgentClaude, Title: "Plan the launch"}
+	registry := source.NewRegistry([]source.Source{staticSource{session: session}}, source.Options{Workers: 1})
+	var output bytes.Buffer
+
+	if err := executeTUI(context.Background(), cliOptions{noWatch: true}, strings.NewReader(""), &output, registry, runBubbleTea); err != nil {
+		t.Fatalf("executeTUI() error = %v", err)
+	}
+	if !strings.Contains(output.String(), "Plan the launch") || strings.Contains(output.String(), "Loading sessions") {
+		t.Fatalf("non-terminal output did not wait for discovery:\n%s", output.String())
 	}
 }
 
