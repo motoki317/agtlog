@@ -124,6 +124,7 @@ func (r *Registry) ReleaseDetail(session *model.Session) {
 type Options struct {
 	Workers  int
 	CacheDir string
+	Progress func(completed, total int)
 }
 
 type Registry struct {
@@ -178,6 +179,9 @@ func (r *Registry) DiscoverWithDiagnostics(ctx context.Context) ([]*model.Sessio
 			pending = append(pending, job{source: adapter, path: path})
 		}
 	}
+	if r.options.Progress != nil {
+		r.options.Progress(0, len(pending))
+	}
 
 	workers := r.options.Workers
 	if workers <= 0 {
@@ -210,19 +214,26 @@ func (r *Registry) DiscoverWithDiagnostics(ctx context.Context) ([]*model.Sessio
 			}
 		}()
 	}
-	group.Wait()
-	close(results)
-	if err := ctx.Err(); err != nil {
-		return nil, nil, err
-	}
+	go func() {
+		group.Wait()
+		close(results)
+	}()
 
-	allSessions := make([]*model.Session, 0, len(results))
+	allSessions := make([]*model.Session, 0, len(pending))
 	diagnostics := make([]DiscoveryDiagnostic, 0)
+	completed := 0
 	for item := range results {
+		completed++
+		if r.options.Progress != nil {
+			r.options.Progress(completed, len(pending))
+		}
 		diagnostics = append(diagnostics, item.diagnostics...)
 		if item.session != nil {
 			allSessions = append(allSessions, item.session)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
 	}
 	sort.Slice(diagnostics, func(i, j int) bool {
 		if diagnostics[i].Agent != diagnostics[j].Agent {

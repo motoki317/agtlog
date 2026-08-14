@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -178,6 +179,42 @@ func TestRegistryReportsPerPathDiagnostics(t *testing.T) {
 	legacySessions, err := registry.Discover(context.Background())
 	if err != nil || len(legacySessions) != 1 {
 		t.Fatalf("Discover() = %#v, %v", legacySessions, err)
+	}
+}
+
+func TestRegistryReportsDiscoveryProgress(t *testing.T) {
+	adapter := diagnosticSource{
+		sessions: map[string]*model.Session{
+			"one.jsonl": {ID: "session-one", Agent: model.AgentClaude},
+			"two.jsonl": {ID: "session-two", Agent: model.AgentClaude},
+		},
+		errors: map[string]error{
+			"broken.jsonl": errors.New("bad record"),
+		},
+	}
+	type progress struct {
+		completed int
+		total     int
+	}
+	var updates []progress
+	registry := source.NewRegistry([]source.Source{adapter}, source.Options{
+		Workers: 3,
+		Progress: func(completed, total int) {
+			updates = append(updates, progress{completed: completed, total: total})
+		},
+	})
+
+	if _, _, err := registry.DiscoverWithDiagnostics(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []progress{
+		{completed: 0, total: 3},
+		{completed: 1, total: 3},
+		{completed: 2, total: 3},
+		{completed: 3, total: 3},
+	}
+	if !reflect.DeepEqual(updates, want) {
+		t.Fatalf("progress updates = %#v, want %#v", updates, want)
 	}
 }
 
