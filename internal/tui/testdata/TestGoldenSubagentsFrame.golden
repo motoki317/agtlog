@@ -1,15 +1,15 @@
 ╭─ Session · starship ───────────────────────────────────────────────────────────────────╮
 │Plan route                                                                              │
 │claude │ starship (/workspace/starship) │ opus-4.8                                      │
-│branch orbit/alpha │ Jan 02 05:44→Jan 02 06:04 │ total ~$1.28                           │
+│branch orbit/alpha │ Jan 02 05:44→Jan 02 06:04 │ total ~$1.72                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Timeline  [Subagents (2)]  Info ──────────────────────────────────────────────────────╮
-│  AGENT      TITLE                                     MODEL         TOKENS    COST  AGE│
-│› claude     Scout the ridge                           opus-4.8         55k  ~$0.44  12m│
-│    codex    Map the cavern                            gpt-5.6          10k  ~$0.12   3m│
-│                                                                                        │
-│                                                                                        │
-│                                                                                        │
+╭─ Timeline  [Subagents (5)]  Info ──────────────────────────────────────────────────────╮
+│  AGENT  TITLE                                         MODEL         TOKENS    COST  AGE│
+│› claude Scout the ridge                               opus-4.8         60k  ~$0.68  12m│
+│  codex  ├─ Map the cavern                             gpt-5.6          12k  ~$0.20   3m│
+│  claude │  └─ Inspect the cave map                    sonnet-4-7      2000  ~$0.08   2m│
+│  codex  └─ Review the findings                        gpt-5.6         3000  ~$0.16   4m│
+│  codex  Ship the expedition                           gpt-5.6         4000   $0.20   1m│
 │                                                                                        │
 │                                                                                        │
 │                                                                                        │

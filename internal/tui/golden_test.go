@@ -132,20 +132,36 @@ func TestGoldenItemFrame(t *testing.T) {
 
 func TestGoldenSubagentsFrame(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
+	inspector := &model.Session{
+		ID: "inspector", Agent: model.AgentClaude, Title: "Inspect the cave map", Models: []string{"claude-sonnet-4-7"},
+		UpdatedAt: goldenNow.Add(-2 * time.Minute),
+		Usage:     []model.Usage{{InputTokens: 1_500, OutputTokens: 500}}, Cost: model.Cost{USD: 0.08, Estimated: true},
+	}
 	mapper := &model.Session{
 		ID: "mapper", Agent: model.AgentCodex, Title: "Map the cavern", Models: []string{"gpt-5.6-sol"},
 		UpdatedAt: goldenNow.Add(-3 * time.Minute),
 		Usage:     []model.Usage{{InputTokens: 8_000, OutputTokens: 2_000}}, Cost: model.Cost{USD: 0.12, Estimated: true},
+		Subagents: []*model.Session{inspector},
+	}
+	reviewer := &model.Session{
+		ID: "reviewer", Agent: model.AgentCodex, Title: "Review the findings", Models: []string{"gpt-5.6-sol"},
+		UpdatedAt: goldenNow.Add(-4 * time.Minute),
+		Usage:     []model.Usage{{InputTokens: 2_500, OutputTokens: 500}}, Cost: model.Cost{USD: 0.16, Estimated: true},
 	}
 	scout := &model.Session{
 		ID: "scout", Agent: model.AgentClaude, Title: "Scout the ridge", Models: []string{"claude-opus-4-8"},
 		UpdatedAt: goldenNow.Add(-12 * time.Minute),
-		Usage:     []model.Usage{{InputTokens: 40_000, OutputTokens: 5_000}}, Cost: model.Cost{USD: 0.32}, Subagents: []*model.Session{mapper},
+		Usage:     []model.Usage{{InputTokens: 40_000, OutputTokens: 5_000}}, Cost: model.Cost{USD: 0.32}, Subagents: []*model.Session{mapper, reviewer},
+	}
+	shipper := &model.Session{
+		ID: "shipper", Agent: model.AgentCodex, Title: "Ship the expedition", Models: []string{"gpt-5.6-sol"},
+		UpdatedAt: goldenNow.Add(-1 * time.Minute),
+		Usage:     []model.Usage{{InputTokens: 3_000, OutputTokens: 1_000}}, Cost: model.Cost{USD: 0.20},
 	}
 	root := &model.Session{
 		ID: "route", Agent: model.AgentClaude, Path: "/workspace/starship/route.jsonl", CWD: "/workspace/starship", Project: "starship", Title: "Plan route",
 		Models: []string{"claude-opus-4-8"}, GitBranch: "orbit/alpha", StartedAt: goldenNow.Add(-20 * time.Minute), UpdatedAt: goldenNow,
-		Usage: []model.Usage{{InputTokens: 120_000, OutputTokens: 8_000}}, Cost: model.Cost{USD: 0.84}, Subagents: []*model.Session{scout},
+		Usage: []model.Usage{{InputTokens: 120_000, OutputTokens: 8_000}}, Cost: model.Cost{USD: 0.84}, Subagents: []*model.Session{scout, shipper},
 	}
 	m := newModelWithClock([]*model.Session{root}, nil, func() time.Time { return goldenNow })
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(90, 18))

@@ -1194,9 +1194,9 @@ func TestSubagentsTabListsAllDescendantsInPreOrder(t *testing.T) {
 		prefix string
 		cells  []string
 	}{
-		{prefix: "│› claude", cells: []string{"Scout ridge", "opus-4.8", "175", "~$1.75"}},
-		{prefix: "│    claude", cells: []string{"Map cavern", "sonnet-4-7", "75", "~$0.75"}},
-		{prefix: "│      codex", cells: []string{"Verify cavern", "gpt-5.6", "25", "~$0.25"}},
+		{prefix: "│› claude Scout ridge", cells: []string{"opus-4.8", "175", "~$1.75"}},
+		{prefix: "│  claude └─ Map cavern", cells: []string{"sonnet-4-7", "75", "~$0.75"}},
+		{prefix: "│  codex     └─ Verify cavern", cells: []string{"gpt-5.6", "25", "~$0.25"}},
 	}
 	position := 0
 	for _, want := range wants {
@@ -1273,6 +1273,31 @@ func TestSubagentActiveSortPreservesParentChildPreorder(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSubagentRowsRenderSortedTreeGuides(t *testing.T) {
+	deep := &model.Session{ID: "deep", Title: "Deep survey"}
+	mid := &model.Session{ID: "mid", Title: "Bravo branch", Subagents: []*model.Session{deep}}
+	last := &model.Session{ID: "last", Title: "Zulu branch"}
+	alpha := &model.Session{ID: "alpha", Title: "Alpha root", Subagents: []*model.Session{last, mid}}
+	omega := &model.Session{ID: "omega", Title: "Omega root"}
+	root := &model.Session{ID: "root", Subagents: []*model.Session{omega, alpha}}
+
+	flattened := flattenSubagents(root, sortState{kind: columnTitle, active: true})
+	wants := []string{
+		"Alpha root",
+		"├─ Bravo branch",
+		"│  └─ Deep survey",
+		"└─ Zulu branch",
+		"Omega root",
+	}
+	columns := []listColumn{{kind: columnTitle, width: 40}}
+	for index, want := range wants {
+		row := subagentRow(flattened[index], time.Time{}, columns, "", "", "")
+		if got := strings.TrimRight(row, " "); got != want {
+			t.Errorf("row %d title = %q, want %q", index, got, want)
+		}
 	}
 }
 
@@ -1642,6 +1667,69 @@ func TestSubagentsRowsShowAgeAndDropItBeforeUsage(t *testing.T) {
 	}
 }
 
+func TestSubagentColumnsStayAlignedAtNarrowWidths(t *testing.T) {
+	child := &model.Session{ID: "map", Agent: model.AgentCodex, Title: "Map fictional cavern"}
+	root := &model.Session{ID: "scout", Subagents: []*model.Session{{
+		ID: "branch", Subagents: []*model.Session{child},
+	}}}
+	item := flattenSubagents(root, sortState{})[1]
+
+	tests := []struct {
+		width int
+		want  []listColumn
+	}{
+		{width: 28, want: []listColumn{
+			{kind: columnAgent, title: "AGENT", width: listAgentWidth},
+			{kind: columnTitle, title: "TITLE", width: 6},
+			{kind: columnTokens, title: "TOKENS", width: 6, right: true},
+			{kind: columnCost, title: "COST", width: listCostWidth, right: true},
+		}},
+		{width: 40, want: []listColumn{
+			{kind: columnAgent, title: "AGENT", width: listAgentWidth},
+			{kind: columnTitle, title: "TITLE", width: 4},
+			{kind: columnModel, title: "MODEL", width: listModelWidth},
+			{kind: columnTokens, title: "TOKENS", width: 6, right: true},
+			{kind: columnCost, title: "COST", width: listCostWidth, right: true},
+		}},
+	}
+	for _, test := range tests {
+		t.Run(strconv.Itoa(test.width), func(t *testing.T) {
+			columns := subagentColumns(test.width)
+			if !slices.Equal(columns, test.want) {
+				t.Fatalf("columns = %#v, want %#v", columns, test.want)
+			}
+			header := subagentHeader(columns, sortState{}, listColumnKind(-1), newStyles()).plain
+			row := subagentRow(item, time.Time{}, columns, "gpt-5.6", "2500", "~$0.75")
+			if got := ansi.StringWidth(header); got != test.width {
+				t.Errorf("header width = %d, want %d: %q", got, test.width, header)
+			}
+			if got := ansi.StringWidth(row); got != test.width {
+				t.Errorf("row width = %d, want %d: %q", got, test.width, row)
+			}
+
+			offset := 0
+			for _, column := range columns {
+				headerCell := ansi.Cut(header, offset, offset+column.width)
+				rowCell := ansi.Cut(row, offset, offset+column.width)
+				if ansi.StringWidth(headerCell) != column.width || ansi.StringWidth(rowCell) != column.width {
+					t.Errorf("%d-column %v cell widths = header %d row %d, want %d", test.width, column.kind, ansi.StringWidth(headerCell), ansi.StringWidth(rowCell), column.width)
+				}
+				switch column.kind {
+				case columnAgent:
+					if got := strings.TrimSpace(rowCell); got != "codex" {
+						t.Errorf("%d-column AGENT cell = %q, want codex", test.width, rowCell)
+					}
+				case columnTitle:
+					if !strings.HasPrefix(rowCell, "└─ ") {
+						t.Errorf("%d-column TITLE cell = %q, want child connector", test.width, rowCell)
+					}
+				}
+				offset += column.width + 1
+			}
+		})
+	}
+}
+
 func TestSubagentsRendersModelessWorkflowGroup(t *testing.T) {
 	group := &model.Session{
 		ID: "wf-expedition", Agent: model.AgentClaude, Title: "Coastal expedition", Group: true,
@@ -1696,14 +1784,41 @@ func TestSubagentsHeaderNamesAndAlignsColumns(t *testing.T) {
 }
 
 func TestDeepSubagentRowKeepsAgentIdentity(t *testing.T) {
+	deep := &model.Session{ID: "depth-0", Agent: model.AgentCodex, Title: "Inspect fictional depth"}
+	root := &model.Session{ID: "root", Subagents: []*model.Session{deep}}
+	for depth := 1; depth < 12; depth++ {
+		child := &model.Session{ID: fmt.Sprintf("depth-%d", depth), Agent: model.AgentCodex, Title: "Inspect fictional depth"}
+		deep.Subagents = []*model.Session{child}
+		deep = child
+	}
+	deep.Subagents = []*model.Session{
+		{ID: "deep-mid", Agent: model.AgentCodex, Title: "Inspect fictional mid depth"},
+		{ID: "deep-last", Agent: model.AgentCodex, Title: "Inspect fictional last depth"},
+	}
+	items := flattenSubagents(root, sortState{})
 	columns := subagentColumns(96)
-	row := subagentRow(
-		flattenedSubagent{depth: 12, s: &model.Session{ID: "deep", Agent: model.AgentCodex, Title: "Inspect fictional depth"}},
+	titleStart := columns[0].width + 1
+	depthElevenRow := subagentRow(
+		items[11],
 		time.Time{}, columns, "gpt-5.6", "2500", "~$0.75",
 	)
-	agentCell := ansi.Cut(row, 0, columns[0].width)
-	if !strings.Contains(agentCell, "codex") || !strings.Contains(agentCell, "…") {
-		t.Fatalf("deep agent cell = %q, want compact depth marker and full agent identity", agentCell)
+	depthElevenTitle := ansi.Cut(depthElevenRow, titleStart, titleStart+columns[1].width)
+	if wantPrefix := strings.Repeat(" ", 30) + "└─ "; !strings.HasPrefix(depthElevenTitle, wantPrefix) {
+		t.Errorf("depth-11 title cell = %q, want full prefix %q", depthElevenTitle, wantPrefix)
+	}
+	for index, wantPrefix := range []string{"…├─ ", "…└─ "} {
+		row := subagentRow(
+			items[12+index],
+			time.Time{}, columns, "gpt-5.6", "2500", "~$0.75",
+		)
+		agentCell := ansi.Cut(row, 0, columns[0].width)
+		if got := strings.TrimSpace(agentCell); got != "codex" {
+			t.Errorf("deep agent cell = %q, want unindented agent identity", agentCell)
+		}
+		titleCell := ansi.Cut(row, titleStart, titleStart+columns[1].width)
+		if !strings.HasPrefix(titleCell, wantPrefix) {
+			t.Errorf("deep title cell = %q, want elided prefix %q", titleCell, wantPrefix)
+		}
 	}
 }
 

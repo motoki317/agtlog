@@ -141,14 +141,22 @@ type detailRole int
 
 type detailTab int
 
+type subagentTreePosition struct {
+	parent *subagentTreePosition
+	last   bool
+}
+
 type flattenedSubagent struct {
-	depth int
-	s     *model.Session
+	depth  int
+	parent *subagentTreePosition
+	last   bool
+	s      *model.Session
 }
 
 const (
-	detailPreviewLineCap = 40
-	detailPreviewRuneCap = 4096
+	detailPreviewLineCap         = 40
+	detailPreviewRuneCap         = 4096
+	subagentTitleMinVisibleWidth = 20
 )
 
 const (
@@ -1004,7 +1012,7 @@ func subagentColumns(width int) []listColumn {
 		return nil
 	}
 	columns := []listColumn{
-		{kind: columnAgent, title: "AGENT", width: 10},
+		{kind: columnAgent, title: "AGENT", width: listAgentWidth},
 		{kind: columnTitle, title: "TITLE", width: 20},
 		{kind: columnModel, title: "MODEL", width: listModelWidth},
 		{kind: columnTokens, title: "TOKENS", width: 6, right: true},
@@ -1017,7 +1025,7 @@ func subagentColumns(width int) []listColumn {
 	for _, shrink := range []struct {
 		kind  listColumnKind
 		width int
-	}{{columnTitle, 4}, {columnModel, 9}, {columnAgent, 6}} {
+	}{{columnTitle, 4}, {columnModel, 9}} {
 		for index := range columns {
 			if columns[index].kind == shrink.kind && listColumnsWidth(columns) > width {
 				columns[index].width -= min(columns[index].width-shrink.width, listColumnsWidth(columns)-width)
@@ -1083,9 +1091,9 @@ func subagentRow(item flattenedSubagent, now time.Time, columns []listColumn, mo
 		value := ""
 		switch column.kind {
 		case columnAgent:
-			value = subagentAgentCell(item.depth, session.Agent, column.width)
+			value = terminalText(string(session.Agent), 32)
 		case columnTitle:
-			value = firstLine(session.Title)
+			value = subagentTitleCell(item, column.width)
 		case columnModel:
 			value = modelName
 		case columnTokens:
@@ -1102,20 +1110,44 @@ func subagentRow(item flattenedSubagent, now time.Time, columns []listColumn, mo
 	return strings.Join(cells, " ")
 }
 
-func subagentAgentCell(depth int, agent model.AgentKind, width int) string {
-	label := terminalText(string(agent), 32)
-	indentWidth := max(0, width-ansi.StringWidth(label))
-	indent := strings.Repeat(" ", min(depth*2, indentWidth))
-	if depth*2 > indentWidth && indentWidth > 0 {
-		indent = strings.Repeat(" ", indentWidth-1) + "…"
+func subagentTitleCell(item flattenedSubagent, width int) string {
+	title := firstLine(item.s.Title)
+	if item.depth == 0 {
+		return title
 	}
-	return indent + label
+	connector := "├─ "
+	if item.last {
+		connector = "└─ "
+	}
+	minimumTitleWidth := min(subagentTitleMinVisibleWidth, width/2)
+	if item.depth > 1 && item.depth*3+minimumTitleWidth > width {
+		return "…" + connector + title
+	}
+	continuations := make([]bool, max(0, item.depth-1))
+	ancestor := item.parent
+	for index := len(continuations) - 1; index >= 0; index-- {
+		continuations[index] = ancestor != nil && !ancestor.last
+		if ancestor != nil {
+			ancestor = ancestor.parent
+		}
+	}
+	var guides strings.Builder
+	guides.Grow(item.depth * 3)
+	for _, continues := range continuations {
+		if continues {
+			guides.WriteString("│  ")
+		} else {
+			guides.WriteString("   ")
+		}
+	}
+	guides.WriteString(connector)
+	return guides.String() + title
 }
 
 func flattenSubagents(session *model.Session, state sortState) []flattenedSubagent {
 	var flattened []flattenedSubagent
-	var appendChildren func(*model.Session, int)
-	appendChildren = func(parent *model.Session, depth int) {
+	var appendChildren func(*model.Session, int, *subagentTreePosition)
+	appendChildren = func(parent *model.Session, depth int, parentPosition *subagentTreePosition) {
 		children := append([]*model.Session(nil), parent.Subagents...)
 		if state.active {
 			sortSessions(children, state)
@@ -1128,12 +1160,16 @@ func flattenSubagents(session *model.Session, state sortState) []flattenedSubage
 				return left.StartedAt.Before(right.StartedAt)
 			})
 		}
-		for _, child := range children {
-			flattened = append(flattened, flattenedSubagent{depth: depth, s: child})
-			appendChildren(child, depth+1)
+		for index, child := range children {
+			last := index == len(children)-1
+			flattened = append(flattened, flattenedSubagent{
+				depth: depth, parent: parentPosition, last: last, s: child,
+			})
+			position := &subagentTreePosition{parent: parentPosition, last: last}
+			appendChildren(child, depth+1, position)
 		}
 	}
-	appendChildren(session, 0)
+	appendChildren(session, 0, nil)
 	return flattened
 }
 
