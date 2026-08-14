@@ -13,10 +13,15 @@ The list fills the terminal with three stacked regions:
    or refresh state. An active sort appears as its column and direction, such as `sort:cost↓`;
    cleared sorting has no summary label. During filter editing, a second inner line shows the live
    `/query▊` input and scrolls horizontally to keep the editing cursor visible.
+   During startup, `Discovering sessions · watching N roots` replaces the counts, cost, and filter
+   summary.
 2. A rounded `Sessions` panel. It contains the column header and the scrollable row window and
    consumes all height left between the context panel and key bar. The title becomes
    `Sessions · filtered` when a text or agent filter is active. The bottom border shows the
-   selected position when rows overflow.
+   selected position when rows overflow. During startup, the row window shows
+   `Loading sessions…` while paths are enumerated, then `Loading sessions… N/M` while they are
+   parsed. Discovery failure shows `Session discovery failed.`, the error, and the retry line
+   `Press r to retry; press ? for keys.`
 3. An unbordered one-line key bar:
 
    ```text
