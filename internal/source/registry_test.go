@@ -220,8 +220,9 @@ type diagnosticSource struct {
 	errors   map[string]error
 }
 
-func (s diagnosticSource) Agent() model.AgentKind { return model.AgentClaude }
-func (s diagnosticSource) Roots() []string        { return nil }
+func (s diagnosticSource) Agent() model.AgentKind   { return model.AgentClaude }
+func (s diagnosticSource) CacheFingerprint() string { return "test-diagnostic-parser-v1" }
+func (s diagnosticSource) Roots() []string          { return nil }
 func (s diagnosticSource) Discover(context.Context) ([]string, error) {
 	paths := make([]string, 0, len(s.sessions)+len(s.errors))
 	for path := range s.sessions {

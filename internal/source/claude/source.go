@@ -48,6 +48,10 @@ func (s Source) Roots() []string {
 	return append([]string(nil), s.roots...)
 }
 
+func (s Source) CacheFingerprint() string {
+	return s.parser.CacheFingerprint()
+}
+
 func (s Source) Discover(ctx context.Context) ([]string, error) {
 	seen := make(map[string]bool)
 	for _, root := range s.roots {

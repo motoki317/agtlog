@@ -457,8 +457,9 @@ func TestTimeAndThemeKeysRemainDistinct(t *testing.T) {
 	}
 }
 
-func (s *refreshTestSource) Agent() model.AgentKind { return model.AgentClaude }
-func (s *refreshTestSource) Roots() []string        { return []string{"/workspace"} }
+func (s *refreshTestSource) Agent() model.AgentKind   { return model.AgentClaude }
+func (s *refreshTestSource) CacheFingerprint() string { return "test-refresh-parser-v1" }
+func (s *refreshTestSource) Roots() []string          { return []string{"/workspace"} }
 func (s *refreshTestSource) Discover(context.Context) ([]string, error) {
 	return []string{s.session.Path}, nil
 }

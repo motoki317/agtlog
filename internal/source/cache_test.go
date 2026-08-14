@@ -2,11 +2,15 @@ package source
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,9 +18,11 @@ import (
 )
 
 type countingSource struct {
-	path    string
-	parses  int
-	details int
+	path             string
+	agent            model.AgentKind
+	cacheFingerprint string
+	parses           int
+	details          int
 }
 
 type changingFingerprintSource struct {
@@ -24,12 +30,23 @@ type changingFingerprintSource struct {
 	fingerprints int
 }
 
+type emptyCacheFingerprintSource struct {
+	*countingSource
+}
+
+type barrierSource struct {
+	*countingSource
+	ready   chan<- struct{}
+	release <-chan struct{}
+}
+
 type graphSource struct {
 	sessions map[string]*model.Session
 }
 
-func (s graphSource) Agent() model.AgentKind { return model.AgentCodex }
-func (s graphSource) Roots() []string        { return []string{"/fictional"} }
+func (s graphSource) Agent() model.AgentKind   { return model.AgentCodex }
+func (s graphSource) Roots() []string          { return []string{"/fictional"} }
+func (s graphSource) CacheFingerprint() string { return "test-graph-parser-v1" }
 func (s graphSource) Discover(context.Context) ([]string, error) {
 	paths := make([]string, 0, len(s.sessions))
 	for path := range s.sessions {
@@ -48,8 +65,34 @@ func (s *changingFingerprintSource) Fingerprint(string) (string, error) {
 	return "after", nil
 }
 
-func (s *countingSource) Agent() model.AgentKind { return model.AgentClaude }
-func (s *countingSource) Roots() []string        { return []string{filepath.Dir(s.path)} }
+func (s emptyCacheFingerprintSource) CacheFingerprint() string { return "" }
+
+func (s *barrierSource) Parse(path string) (*model.Session, error) {
+	s.ready <- struct{}{}
+	<-s.release
+	return s.countingSource.Parse(path)
+}
+
+func (s *countingSource) Agent() model.AgentKind {
+	if s.agent == "" {
+		return model.AgentClaude
+	}
+	return s.agent
+}
+func (s *countingSource) Roots() []string { return []string{filepath.Dir(s.path)} }
+func (s *countingSource) CacheFingerprint() string {
+	if s.cacheFingerprint == "" {
+		return "test-parser-v1:pricing"
+	}
+	return s.cacheFingerprint
+}
+func (s *countingSource) Fingerprint(path string) (string, error) {
+	fingerprint, err := fileFingerprint(path)
+	if err != nil {
+		return "", err
+	}
+	return s.CacheFingerprint() + "\x00" + fingerprint, nil
+}
 func (s *countingSource) Discover(context.Context) ([]string, error) {
 	return []string{s.path}, nil
 }
@@ -82,6 +125,333 @@ func TestRegistryReusesUnchangedCachedSummary(t *testing.T) {
 	}
 }
 
+func TestRegistryIgnoresAndPreservesLegacyCache(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := t.TempDir()
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: cacheDir})
+	fingerprint, err := sourceFingerprint(adapter, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(cacheEntry{
+		Version: cacheVersion, Agent: adapter.Agent(), Fingerprint: fingerprint,
+		Session: &model.Session{ID: "legacy-session", Agent: adapter.Agent(), Path: path},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(cacheDir, cacheEntryName(adapter, path))
+	if err := os.WriteFile(legacyPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for range 2 {
+		sessions, err := registry.Discover(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sessions) != 1 || sessions[0].ID != "cached-session" {
+			t.Fatalf("Discover() sessions = %#v, want parsed current session", sessions)
+		}
+	}
+
+	if adapter.parses != 1 {
+		t.Fatalf("Parse() called %d times, want legacy entry ignored then namespace reused", adapter.parses)
+	}
+	if got, err := os.ReadFile(legacyPath); err != nil || string(got) != string(data) {
+		t.Fatalf("legacy cache changed: data = %q, error = %v", got, err)
+	}
+}
+
+func TestRegistryKeepsParserFingerprintCachesIndependent(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := t.TempDir()
+	first := &countingSource{path: path, cacheFingerprint: "test-parser-v1:pricing-a"}
+	second := &countingSource{path: path, cacheFingerprint: "test-parser-v2:pricing-b"}
+	firstRegistry := NewRegistry([]Source{first}, Options{Workers: 1, CacheDir: cacheDir})
+	secondRegistry := NewRegistry([]Source{second}, Options{Workers: 1, CacheDir: cacheDir})
+
+	for _, registry := range []*Registry{firstRegistry, secondRegistry, firstRegistry, secondRegistry} {
+		if _, err := registry.Discover(context.Background()); err != nil {
+			t.Fatalf("Discover() error = %v", err)
+		}
+	}
+
+	if first.parses != 1 || second.parses != 1 {
+		t.Fatalf("Parse() calls = first %d, second %d, want one each", first.parses, second.parses)
+	}
+	firstPath := firstRegistry.cachePath(first, path)
+	secondPath := secondRegistry.cachePath(second, path)
+	if firstPath == secondPath {
+		t.Fatalf("cache paths share a namespace: %q", firstPath)
+	}
+	for _, cachePath := range []string{firstPath, secondPath} {
+		if _, err := os.Stat(cachePath); err != nil {
+			t.Fatalf("cache entry %q error = %v", cachePath, err)
+		}
+	}
+	expected := sha256.Sum256([]byte(first.CacheFingerprint()))
+	if got, want := filepath.Base(filepath.Dir(firstPath)), hex.EncodeToString(expected[:cacheNamespaceBytes]); got != want {
+		t.Fatalf("first cache namespace = %q, want parser fingerprint hash %q", got, want)
+	}
+	other := &countingSource{path: filepath.Join(root, "other.jsonl"), agent: model.AgentCodex, cacheFingerprint: first.CacheFingerprint()}
+	if got, want := filepath.Dir(firstRegistry.cachePath(other, other.path)), filepath.Dir(firstPath); got != want {
+		t.Fatalf("same parser fingerprint namespace = %q, want %q despite different agent and path", got, want)
+	}
+}
+
+func TestRegistryWritesParserFingerprintCachesConcurrently(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := t.TempDir()
+	ready := make(chan struct{}, 2)
+	release := make(chan struct{})
+	first := &barrierSource{countingSource: &countingSource{path: path, cacheFingerprint: "test-parser-v1:pricing-a"}, ready: ready, release: release}
+	second := &barrierSource{countingSource: &countingSource{path: path, cacheFingerprint: "test-parser-v2:pricing-b"}, ready: ready, release: release}
+	registries := []*Registry{
+		NewRegistry([]Source{first}, Options{Workers: 1, CacheDir: cacheDir}),
+		NewRegistry([]Source{second}, Options{Workers: 1, CacheDir: cacheDir}),
+	}
+
+	var group sync.WaitGroup
+	discoverErrors := make(chan error, len(registries))
+	for _, registry := range registries {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			_, err := registry.Discover(context.Background())
+			discoverErrors <- err
+		}()
+	}
+	for range registries {
+		<-ready
+	}
+	close(release)
+	group.Wait()
+	close(discoverErrors)
+	for err := range discoverErrors {
+		if err != nil {
+			t.Fatalf("Discover() error = %v", err)
+		}
+	}
+	for _, registry := range registries {
+		if _, err := registry.Discover(context.Background()); err != nil {
+			t.Fatalf("cached Discover() error = %v", err)
+		}
+	}
+
+	if first.parses != 1 || second.parses != 1 {
+		t.Fatalf("concurrent Parse() calls = first %d, second %d, want one each", first.parses, second.parses)
+	}
+}
+
+func TestRegistryChangedLogMissesWithinParserNamespace(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := t.TempDir()
+	adapter := &countingSource{path: path, cacheFingerprint: "test-parser-v1:pricing"}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: cacheDir})
+
+	if _, err := registry.Discover(context.Background()); err != nil {
+		t.Fatalf("first Discover() error = %v", err)
+	}
+	cachePath := registry.cachePath(adapter, path)
+	namespace := filepath.Dir(cachePath)
+	if namespace == cacheDir {
+		t.Fatalf("cache path %q has no parser namespace", cachePath)
+	}
+	namespaceName := filepath.Base(namespace)
+	if _, err := hex.DecodeString(namespaceName); err != nil || len(namespaceName) != 2*cacheNamespaceBytes {
+		t.Fatalf("cache namespace = %q, want %d hexadecimal characters", namespaceName, 2*cacheNamespaceBytes)
+	}
+	if err := os.WriteFile(path, []byte("{\"changed\":true}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Discover(context.Background()); err != nil {
+		t.Fatalf("second Discover() error = %v", err)
+	}
+
+	if adapter.parses != 2 {
+		t.Fatalf("Parse() called %d times, want changed log reparsed", adapter.parses)
+	}
+	if got := filepath.Dir(registry.cachePath(adapter, path)); got != namespace {
+		t.Fatalf("changed log namespace = %q, want %q", got, namespace)
+	}
+}
+
+func TestNewRegistrySweepsOnlyStaleSummaryTemps(t *testing.T) {
+	cacheDir := t.TempDir()
+	stalePath := filepath.Join(cacheDir, "summary-stale.tmp")
+	freshPath := filepath.Join(cacheDir, "summary-fresh.tmp")
+	for _, path := range []string{stalePath, freshPath} {
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	staleTime := time.Now().Add(-25 * time.Hour)
+	if err := os.Chtimes(stalePath, staleTime, staleTime); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &countingSource{path: filepath.Join(t.TempDir(), "session.jsonl")}
+	namespacePath, ok := (&Registry{options: Options{CacheDir: cacheDir}}).cacheNamespaceDir(adapter)
+	if !ok {
+		t.Fatal("cacheNamespaceDir() rejected test fingerprint")
+	}
+	if err := os.Mkdir(namespacePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	currentTempDir := filepath.Join(namespacePath, cacheTempDirName)
+	if err := os.Mkdir(currentTempDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	currentFreshPath := filepath.Join(currentTempDir, "summary-fresh.tmp")
+	if err := os.WriteFile(currentFreshPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := &countingSource{path: adapter.path, cacheFingerprint: "test-parser-previous:pricing"}
+	previousNamespace, ok := (&Registry{options: Options{CacheDir: cacheDir}}).cacheNamespaceDir(previous)
+	if !ok {
+		t.Fatal("cacheNamespaceDir() rejected previous test fingerprint")
+	}
+	previousTempDir := filepath.Join(previousNamespace, cacheTempDirName)
+	if err := os.MkdirAll(previousTempDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previousStalePath := filepath.Join(previousTempDir, "summary-stale.tmp")
+	if err := os.WriteFile(previousStalePath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(previousStalePath, staleTime, staleTime); err != nil {
+		t.Fatal(err)
+	}
+	namespaceEntry := filepath.Join(namespacePath, "entry.json")
+	legacyEntry := filepath.Join(cacheDir, "legacy.json")
+	unrelatedTemp := filepath.Join(cacheDir, "other.tmp")
+	for _, path := range []string{namespaceEntry, legacyEntry, unrelatedTemp} {
+		if err := os.WriteFile(path, []byte("preserve"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	linkedTarget := filepath.Join(t.TempDir(), "target.tmp")
+	if err := os.WriteFile(linkedTarget, []byte("preserve"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkedTemp := filepath.Join(cacheDir, "summary-linked.tmp")
+	if err := os.Symlink(linkedTarget, linkedTemp); err != nil {
+		t.Fatal(err)
+	}
+	directoryTemp := filepath.Join(cacheDir, "summary-directory.tmp")
+	if err := os.Mkdir(directoryTemp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: cacheDir})
+
+	if _, err := os.Stat(stalePath); !os.IsNotExist(err) {
+		t.Fatalf("stale temp error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(previousStalePath); !os.IsNotExist(err) {
+		t.Fatalf("previous-namespace stale temp error = %v, want not exist", err)
+	}
+	if _, err := os.Stat(freshPath); err != nil {
+		t.Fatalf("fresh temp error = %v, want preserved", err)
+	}
+	for _, path := range []string{currentFreshPath, namespaceEntry, legacyEntry, unrelatedTemp, linkedTemp, directoryTemp, linkedTarget} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("preserved path %q error = %v", path, err)
+		}
+	}
+}
+
+func TestCacheTempSweepBoundsRemovals(t *testing.T) {
+	cacheDir := t.TempDir()
+	adapter := &countingSource{path: filepath.Join(t.TempDir(), "session.jsonl")}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: cacheDir})
+	namespaceDir, ok := registry.cacheNamespaceDir(adapter)
+	if !ok {
+		t.Fatal("cacheNamespaceDir() rejected test fingerprint")
+	}
+	if err := os.Mkdir(namespaceDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	temporaryDir := filepath.Join(namespaceDir, cacheTempDirName)
+	if err := os.Mkdir(temporaryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	staleTime := now.Add(-staleCacheTempAge)
+	for index := range maxCacheTempSweepRemovals + 1 {
+		path := filepath.Join(temporaryDir, fmt.Sprintf("summary-%03d.tmp", index))
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, staleTime, staleTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	registry.sweepStaleCacheTemps(now)
+
+	entries, err := os.ReadDir(temporaryDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(entries); got != 1 {
+		t.Fatalf("remaining stale temps = %d, want one after %d-removal bound", got, maxCacheTempSweepRemovals)
+	}
+}
+
+func TestCacheTempSweepBoundsInspectedEntries(t *testing.T) {
+	cacheDir := t.TempDir()
+	temporaryDir := filepath.Join(cacheDir, cacheTempDirName)
+	if err := os.Mkdir(temporaryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
+	for _, name := range []string{"summary-a.tmp", "summary-b.tmp"} {
+		path := filepath.Join(temporaryDir, name)
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		staleTime := now.Add(-staleCacheTempAge)
+		if err := os.Chtimes(path, staleTime, staleTime); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	remainingEntries := 1
+	remainingRemovals := 2
+
+	sweepCacheTempDirectory(root, cacheTempDirName, now, &remainingEntries, &remainingRemovals)
+
+	entries, err := os.ReadDir(temporaryDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || remainingEntries != 0 || remainingRemovals != 1 {
+		t.Fatalf("sweep result = %d files, %d entry budget, %d removal budget", len(entries), remainingEntries, remainingRemovals)
+	}
+}
+
 func TestRegistryRejectsClaudeParserV15CacheFingerprint(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "session.jsonl")
@@ -97,6 +467,160 @@ func TestRegistryRejectsClaudeParserV15CacheFingerprint(t *testing.T) {
 	}
 	if cacheVersion != 4 {
 		t.Fatalf("cacheVersion = %d, want unchanged schema version 4", cacheVersion)
+	}
+}
+
+func TestRegistryRejectsUnsafeCacheNamespace(t *testing.T) {
+	for _, shape := range []string{"symlink", "regular file", "writable directory"} {
+		t.Run(shape, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "session.jsonl")
+			if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cacheDir := t.TempDir()
+			adapter := &countingSource{path: path}
+			registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: cacheDir})
+			namespacePath, ok := registry.cacheNamespaceDir(adapter)
+			if !ok {
+				t.Fatal("cacheNamespaceDir() rejected test fingerprint")
+			}
+			fingerprint := "source-fingerprint"
+			data, err := json.Marshal(cacheEntry{
+				Version: cacheVersion, Agent: adapter.Agent(), Fingerprint: fingerprint,
+				Session: &model.Session{ID: "unsafe", Agent: adapter.Agent(), Path: path},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			protectedPath := namespacePath
+			protectedData := []byte("preserve")
+			switch shape {
+			case "symlink":
+				target := t.TempDir()
+				protectedPath = filepath.Join(target, cacheEntryName(adapter, path))
+				protectedData = data
+				if err := os.WriteFile(protectedPath, protectedData, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, namespacePath); err != nil {
+					t.Fatal(err)
+				}
+			case "regular file":
+				if err := os.WriteFile(namespacePath, protectedData, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "writable directory":
+				if err := os.Mkdir(namespacePath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(namespacePath, 0o770); err != nil {
+					t.Fatal(err)
+				}
+				protectedPath = filepath.Join(namespacePath, cacheEntryName(adapter, path))
+				protectedData = data
+				if err := os.WriteFile(protectedPath, protectedData, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if _, _, loaded := registry.loadCached(adapter, path, fingerprint); loaded {
+				t.Fatal("loadCached() accepted an unsafe namespace")
+			}
+			registry.storeCached(adapter, path, fingerprint, &model.Session{ID: "replacement"}, nil)
+			registry.topLevelRemoved([]string{path})
+
+			got, err := os.ReadFile(protectedPath)
+			if err != nil || string(got) != string(protectedData) {
+				t.Fatalf("protected path changed: data = %q, error = %v", got, err)
+			}
+		})
+	}
+}
+
+func TestRegistryRejectsUnsafeCacheTempDirectory(t *testing.T) {
+	for _, shape := range []string{"symlink", "regular file", "writable directory"} {
+		t.Run(shape, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "session.jsonl")
+			if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cacheDir := t.TempDir()
+			adapter := &countingSource{path: path}
+			registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: cacheDir})
+			namespacePath, ok := registry.cacheNamespaceDir(adapter)
+			if !ok {
+				t.Fatal("cacheNamespaceDir() rejected test fingerprint")
+			}
+			if err := os.Mkdir(namespacePath, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			temporaryPath := filepath.Join(namespacePath, cacheTempDirName)
+			protectedPath := temporaryPath
+			protectedData := []byte("preserve")
+			switch shape {
+			case "symlink":
+				target := t.TempDir()
+				protectedPath = filepath.Join(target, "preserve")
+				if err := os.WriteFile(protectedPath, protectedData, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, temporaryPath); err != nil {
+					t.Fatal(err)
+				}
+			case "regular file":
+				if err := os.WriteFile(temporaryPath, protectedData, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "writable directory":
+				if err := os.Mkdir(temporaryPath, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(temporaryPath, 0o770); err != nil {
+					t.Fatal(err)
+				}
+				protectedPath = filepath.Join(temporaryPath, "preserve")
+				if err := os.WriteFile(protectedPath, protectedData, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			registry.storeCached(adapter, path, "source-fingerprint", &model.Session{ID: "replacement"}, nil)
+			registry.sweepStaleCacheTemps(time.Now().Add(48 * time.Hour))
+
+			if _, err := os.Stat(registry.cachePath(adapter, path)); !os.IsNotExist(err) {
+				t.Fatalf("cache entry error = %v, want not exist", err)
+			}
+			got, err := os.ReadFile(protectedPath)
+			if err != nil || string(got) != string(protectedData) {
+				t.Fatalf("protected path changed: data = %q, error = %v", got, err)
+			}
+		})
+	}
+}
+
+func TestRegistryDisablesCacheForEmptyParserFingerprint(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := emptyCacheFingerprintSource{countingSource: &countingSource{path: path}}
+	cacheDir := t.TempDir()
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: cacheDir})
+
+	for range 2 {
+		if _, err := registry.Discover(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if adapter.parses != 2 {
+		t.Fatalf("Parse() called %d times, want cache disabled", adapter.parses)
+	}
+	if entries, err := os.ReadDir(cacheDir); err != nil || len(entries) != 0 {
+		t.Fatalf("cache directory entries = %#v, error = %v, want empty", entries, err)
 	}
 }
 
@@ -178,6 +702,30 @@ func TestRegistryCachesThroughSymlinkOutsideSourceRoots(t *testing.T) {
 	}
 	if adapter.parses != 1 {
 		t.Fatalf("Parse() called %d times, want symlinked cache reused", adapter.parses)
+	}
+}
+
+func TestRegistryCreatesMissingCacheDirectoryComponents(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := filepath.Join(t.TempDir(), "cache", "agtlog")
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: cacheDir})
+
+	for range 2 {
+		if _, err := registry.Discover(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if adapter.parses != 1 {
+		t.Fatalf("Parse() called %d times, want missing cache directory created", adapter.parses)
+	}
+	if _, err := os.Stat(registry.cachePath(adapter, path)); err != nil {
+		t.Fatalf("cache entry error = %v", err)
 	}
 }
 

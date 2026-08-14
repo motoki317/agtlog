@@ -13,8 +13,9 @@ type ownershipTestSource struct {
 	sessions map[string]*model.Session
 }
 
-func (s ownershipTestSource) Agent() model.AgentKind { return model.AgentClaude }
-func (s ownershipTestSource) Roots() []string        { return nil }
+func (s ownershipTestSource) Agent() model.AgentKind   { return model.AgentClaude }
+func (s ownershipTestSource) CacheFingerprint() string { return "test-ownership-parser-v1" }
+func (s ownershipTestSource) Roots() []string          { return nil }
 func (s ownershipTestSource) Discover(context.Context) ([]string, error) {
 	paths := make([]string, 0, len(s.sessions))
 	for path := range s.sessions {

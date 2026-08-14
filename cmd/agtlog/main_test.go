@@ -208,8 +208,9 @@ type reconcilingSource struct {
 	discovers int
 }
 
-func (s *reconcilingSource) Agent() model.AgentKind { return model.AgentClaude }
-func (s *reconcilingSource) Roots() []string        { return []string{s.root} }
+func (s *reconcilingSource) Agent() model.AgentKind   { return model.AgentClaude }
+func (s *reconcilingSource) CacheFingerprint() string { return "test-reconciling-parser-v1" }
+func (s *reconcilingSource) Roots() []string          { return []string{s.root} }
 func (s *reconcilingSource) Discover(context.Context) ([]string, error) {
 	s.discovers++
 	return []string{filepath.Join(s.root, "session.jsonl")}, nil
@@ -222,8 +223,9 @@ func (s *reconcilingSource) Parse(path string) (*model.Session, error) {
 	return &model.Session{ID: "session-a", Agent: model.AgentClaude, Path: path, Title: title}, nil
 }
 
-func (s staticSource) Agent() model.AgentKind { return s.session.Agent }
-func (s staticSource) Roots() []string        { return nil }
+func (s staticSource) Agent() model.AgentKind   { return s.session.Agent }
+func (s staticSource) CacheFingerprint() string { return "test-static-parser-v1" }
+func (s staticSource) Roots() []string          { return nil }
 func (s staticSource) Discover(context.Context) ([]string, error) {
 	return []string{"session.jsonl"}, nil
 }

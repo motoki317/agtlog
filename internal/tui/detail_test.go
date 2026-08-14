@@ -69,8 +69,9 @@ func viewLineY(t testing.TB, view, match string, occurrence int) int {
 	return 0
 }
 
-func (s detailTestSource) Agent() model.AgentKind { return model.AgentClaude }
-func (s detailTestSource) Roots() []string        { return []string{"/workspace"} }
+func (s detailTestSource) Agent() model.AgentKind   { return model.AgentClaude }
+func (s detailTestSource) CacheFingerprint() string { return "test-detail-parser-v1" }
+func (s detailTestSource) Roots() []string          { return []string{"/workspace"} }
 func (s detailTestSource) Discover(context.Context) ([]string, error) {
 	return []string{s.session.Path}, nil
 }

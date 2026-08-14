@@ -21,6 +21,13 @@ func tempRoot(t *testing.T) string {
 	return root
 }
 
+func TestSourceCacheFingerprintDelegatesToParser(t *testing.T) {
+	parser := testParser()
+	if got, want := NewSource(parser, nil).CacheFingerprint(), parser.CacheFingerprint(); got != want {
+		t.Fatalf("CacheFingerprint() = %q, want %q", got, want)
+	}
+}
+
 func TestSourceDiscoverReturnsRolloutFiles(t *testing.T) {
 	root := filepath.Join("testdata", "sessions")
 	source := NewSource(testParser(), []string{root})

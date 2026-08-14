@@ -9,6 +9,7 @@ import (
 type Source interface {
 	Agent() model.AgentKind
 	Roots() []string
+	CacheFingerprint() string
 	Discover(context.Context) ([]string, error)
 	Parse(string) (*model.Session, error)
 }

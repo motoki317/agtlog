@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/motoki317/agtlog/internal/model"
 	"github.com/motoki317/agtlog/internal/source/jsonl"
@@ -148,7 +149,9 @@ func NewRegistry(sources []Source, options Options) *Registry {
 			options.CacheDir = ""
 		}
 	}
-	return &Registry{sources: sources, options: options}
+	registry := &Registry{sources: sources, options: options}
+	registry.sweepStaleCacheTemps(time.Now())
+	return registry
 }
 
 func (r *Registry) Discover(ctx context.Context) ([]*model.Session, error) {
