@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"crypto/sha256"
 
 	"github.com/motoki317/agtlog/internal/model"
@@ -14,10 +15,18 @@ type usageRecord struct {
 }
 
 func deduplicate(records []usageRecord) []usageRecord {
+	deduplicated, _ := deduplicateContext(context.Background(), records)
+	return deduplicated
+}
+
+func deduplicateContext(ctx context.Context, records []usageRecord) ([]usageRecord, error) {
 	out := make([]usageRecord, 0, len(records))
 	indices := make(map[[32]byte]int)
 	firstByMessage := make(map[string]int)
 	for _, record := range records {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if record.MessageID == "" {
 			out = append(out, record)
 			continue
@@ -45,7 +54,7 @@ func deduplicate(records []usageRecord) []usageRecord {
 		}
 		indices[key] = index
 	}
-	return out
+	return out, nil
 }
 
 func betterRecord(candidate, current usageRecord) bool {

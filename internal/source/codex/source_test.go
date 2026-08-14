@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -25,6 +26,15 @@ func TestSourceCacheFingerprintDelegatesToParser(t *testing.T) {
 	parser := testParser()
 	if got, want := NewSource(parser, nil).CacheFingerprint(), parser.CacheFingerprint(); got != want {
 		t.Fatalf("CacheFingerprint() = %q, want %q", got, want)
+	}
+}
+
+func TestSourceFingerprintStopsForCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	source := NewSource(testParser(), []string{filepath.Join("fictional", "sessions")})
+	if _, err := source.FingerprintContext(ctx, filepath.Join("fictional", "rollout.jsonl")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("FingerprintContext() error = %v, want context canceled", err)
 	}
 }
 

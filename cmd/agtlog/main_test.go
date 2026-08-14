@@ -222,6 +222,9 @@ func (s blockingParseSource) Parse(string) (*model.Session, error) {
 	<-s.releaseParse
 	return &model.Session{ID: "session-a", Agent: model.AgentClaude}, nil
 }
+func (s blockingParseSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
+	return s.Parse(path)
+}
 
 type reconcilingSource struct {
 	root             string
@@ -250,6 +253,9 @@ func (s *reconcilingSource) Parse(path string) (*model.Session, error) {
 	}
 	return &model.Session{ID: id, Agent: model.AgentClaude, Path: path, Title: title}, nil
 }
+func (s *reconcilingSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
+	return s.Parse(path)
+}
 
 func (s staticSource) Agent() model.AgentKind   { return s.session.Agent }
 func (s staticSource) CacheFingerprint() string { return "test-static-parser-v1" }
@@ -263,6 +269,9 @@ func (s staticSource) Discover(context.Context) ([]string, error) {
 	return []string{"session.jsonl"}, nil
 }
 func (s staticSource) Parse(string) (*model.Session, error) { return s.session, nil }
+func (s staticSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
+	return s.Parse(path)
+}
 
 func TestRunPrintsVersionWithoutDiscovery(t *testing.T) {
 	registry := source.NewRegistry(nil, source.Options{})
@@ -572,6 +581,27 @@ func TestExecuteTUIQuitDoesNotWaitForInFlightParse(t *testing.T) {
 				t.Fatal("released parse did not exit")
 			}
 		})
+	}
+}
+
+func TestReceiveDiscoveryResultReturnsWhenFollowerClosureRacesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	results := make(chan discoveryResult)
+	defer close(results)
+	done := make(chan bool, 1)
+	go func() {
+		_, received := receiveDiscoveryResult(ctx, results)
+		done <- received
+	}()
+
+	select {
+	case received := <-done:
+		if received {
+			t.Fatal("receiveDiscoveryResult() waited for a discovery result after cancellation")
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("receiveDiscoveryResult() blocked after cancellation")
 	}
 }
 

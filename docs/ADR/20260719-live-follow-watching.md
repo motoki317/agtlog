@@ -16,11 +16,12 @@ detail state.
 
 # Decision
 
-`Registry.Discover` builds the initial snapshot. `Registry.Follow` then creates a `Follower` whose
-`Updates()` channel emits:
+The TUI starts with an empty loading model and paints without waiting for discovery. In watch mode,
+`Registry.Follow` installs the watches before one asynchronous `Registry.Discover` builds the
+initial snapshot. Both operations reach the TUI as `SessionUpdate` values:
 
 ```text
-SessionUpdate{Paths, RemovedPaths, Sessions}
+SessionUpdate{Paths, RemovedPaths, Sessions, DiscoveryComplete, DiscoveryErr}
 ```
 
 The watcher uses fsnotify and registers every existing directory below each agent root. A newly
@@ -40,22 +41,38 @@ The list upserts sessions by agent, path, and session identity. It then reapplie
 filters and restores selection by identity. A matching open detail preserves its expansion and
 viewport state; removal returns safely to the list.
 
-`--no-watch` disables the follower and produces a static initial snapshot. The `r` key still calls
-`Registry.Discover`, so manual refresh uses the same authoritative path as startup.
+A watcher update can arrive before the initial snapshot. During discovery, the list records removed
+paths and successfully parsed session paths from watcher updates. It skips snapshot entries for
+those paths, so the snapshot cannot replace or duplicate newer watcher results.
+
+`--no-watch` skips the follower but still runs initial discovery asynchronously. Non-TTY output
+waits for the snapshot before it prints. The `r` key still calls `Registry.Discover`, so manual
+refresh uses the same authoritative path as startup.
 
 # Consequences
 
 - Active rows update without polling at the UI layer.
 - Debouncing prevents an append burst from causing a parse per filesystem event.
-- The two-second scan bounds how long a missed notification can leave the list stale.
+- A missed notification is detected by the next two-second scan, then follows the normal debounce
+  and parsing path.
 - Full parsing keeps one parser behavior for startup, refresh, and half-written-line recovery.
 - Very large, rapidly changing transcripts may eventually exceed the acceptable refresh budget.
+- Startup shows discovery progress without streaming or sorting partial session results.
 
 # Impact
 
-The watcher reads only JSONL metadata and content. It never modifies agent roots. Closing the TUI
-cancels the follower, closes fsnotify, and waits for its goroutines, which prevents terminal exit
-from leaving background work behind.
+The follower reads directory entries and JSONL metadata and content. It never modifies agent roots.
+`Follower.Close` cancels the follower context before closing fsnotify. Watch-tree and cache I/O use
+bounded batches; path mapping, fingerprints, JSONL parsing, parser finalization, graph linking, and
+ownership loops observe that context. An individual filesystem operation or JSON marshal finishes
+before the next context check.
+
+`Follower.Close` waits for follower-owned goroutines. The sole goroutine that sends updates closes
+`Updates()` before `Close` returns, so no sender can outlive the channel.
+
+The startup discovery runs in a separate goroutine. `discoverAndFollow` returns on cancellation
+without waiting for that goroutine or its parse workers. They publish only to private buffered
+result channels. Process exit reclaims any parse that has not returned.
 
 Watcher tests need real temporary directories and timing margins. UI tests can send
 `SessionUpdate` values directly to verify stable selection, filtering, sorting, detail replacement,
@@ -75,5 +92,5 @@ and has not crossed its measured ceiling.
 
 # Notes
 
-The application performs a second discovery after the follower starts. This closes the startup gap
-in which a file could change after the first snapshot but before watches are active.
+Starting the follower before the single discovery closes the startup gap. Path-based merging keeps
+an update that arrives after watches are active but before the snapshot reaches the TUI.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"math"
 	"os"
 	"path/filepath"
@@ -52,6 +53,14 @@ func parseTieredSession(t *testing.T, events ...string) *model.Session {
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
 	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v22:") {
 		t.Fatalf("CacheFingerprint() = %q, want v22 estimate metadata", got)
+	}
+}
+
+func TestParseContextStopsForCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := testParser().ParseContext(ctx, fixture("rollout-session-main.jsonl")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ParseContext() error = %v, want context canceled", err)
 	}
 }
 

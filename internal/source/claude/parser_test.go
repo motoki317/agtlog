@@ -153,6 +153,14 @@ func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
 	}
 }
 
+func TestParseContextStopsForCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := testParser().ParseContext(ctx, mainFixture()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ParseContext() error = %v, want context canceled", err)
+	}
+}
+
 func TestParseReparentsFlatSubagentsFromSidecars(t *testing.T) {
 	session, err := testParser().Parse(flatSidecarFixture())
 	if err != nil {

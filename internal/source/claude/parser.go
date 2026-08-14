@@ -147,18 +147,29 @@ func (p Parser) CacheFingerprint() string {
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
-	return p.parseSummary(path, nil)
+	return p.parseSummary(context.Background(), path, nil)
+}
+
+func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, error) {
+	return p.parseSummary(ctx, path, nil)
 }
 
 func (p Parser) ParseWithDiagnostics(path string, report func(string, error)) (*model.Session, error) {
-	return p.parseSummary(path, report)
+	return p.parseSummary(context.Background(), path, report)
 }
 
-func (p Parser) parseSummary(path string, report func(string, error)) (*model.Session, error) {
+func (p Parser) ParseWithDiagnosticsContext(ctx context.Context, path string, report func(string, error)) (*model.Session, error) {
+	return p.parseSummary(ctx, path, report)
+}
+
+func (p Parser) parseSummary(ctx context.Context, path string, report func(string, error)) (*model.Session, error) {
 	titlePrompts := make(map[*model.Session]string)
-	session, err := p.parse(path, 0, make(map[string]bool), report, titlePrompts)
-	if err == nil {
+	session, err := p.parse(ctx, path, 0, make(map[string]bool), report, titlePrompts)
+	if err == nil && ctx.Err() == nil {
 		resolveSubagentTitleCollisions(session.Subagents, titlePrompts)
+	}
+	if err == nil {
+		err = ctx.Err()
 	}
 	return session, err
 }
@@ -830,7 +841,10 @@ type flatClaudeSubagent struct {
 	parentID   string
 }
 
-func (p Parser) parse(path string, depth int, visited map[string]bool, report func(string, error), titlePrompts map[*model.Session]string) (*model.Session, error) {
+func (p Parser) parse(ctx context.Context, path string, depth int, visited map[string]bool, report func(string, error), titlePrompts map[*model.Session]string) (*model.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if depth > maxSubagentDepth {
 		return nil, fmt.Errorf("subagent nesting exceeds %d levels", maxSubagentDepth)
 	}
@@ -851,7 +865,7 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 	visited[absolute] = true
 	defer delete(visited, absolute)
 
-	session, workflowNames, titlePrompt, err := p.parseFile(path)
+	session, workflowNames, titlePrompt, err := p.parseFile(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -868,6 +882,9 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 			walk = filepath.Walk
 		}
 		walkErr := walk(subagentDir, func(subagentPath string, info os.FileInfo, walkErr error) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if walkErr != nil {
 				if report != nil {
 					report(subagentPath, walkErr)
@@ -879,8 +896,13 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 					return filepath.SkipDir
 				}
 				if subagentPath != subagentDir && subagentTranscriptCandidate(subagentPath, subagentDir) {
-					if _, parseErr := p.parse(subagentPath, depth+1, visited, report, titlePrompts); parseErr != nil && report != nil {
-						report(subagentPath, parseErr)
+					if _, parseErr := p.parse(ctx, subagentPath, depth+1, visited, report, titlePrompts); parseErr != nil {
+						if err := ctx.Err(); err != nil {
+							return err
+						}
+						if report != nil {
+							report(subagentPath, parseErr)
+						}
 					}
 					return filepath.SkipDir
 				}
@@ -890,8 +912,11 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 				return nil
 			}
 			parentDir := filepath.Dir(subagentPath)
-			subagent, parseErr := p.parse(subagentPath, depth+1, visited, report, titlePrompts)
+			subagent, parseErr := p.parse(ctx, subagentPath, depth+1, visited, report, titlePrompts)
 			if parseErr != nil {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
 				if report != nil {
 					report(subagentPath, parseErr)
 				}
@@ -938,12 +963,17 @@ func (p Parser) parse(path string, depth int, visited map[string]bool, report fu
 	if depth == 0 {
 		legacyPaths, _ := filepath.Glob(filepath.Join(filepath.Dir(path), "agent-*.jsonl"))
 		for _, legacyPath := range legacyPaths {
-			if sessionIDFromFile(legacyPath) != session.ID {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if sessionIDFromFileContext(ctx, legacyPath) != session.ID {
 				continue
 			}
-			subagent, parseErr := p.parse(legacyPath, depth+1, visited, report, titlePrompts)
+			subagent, parseErr := p.parse(ctx, legacyPath, depth+1, visited, report, titlePrompts)
 			if parseErr == nil {
 				attachSubagent(session, subagent)
+			} else if err := ctx.Err(); err != nil {
+				return nil, err
 			} else if report != nil {
 				report(legacyPath, parseErr)
 			}
@@ -1234,14 +1264,14 @@ func attachSubagent(parent, subagent *model.Session) {
 	}
 }
 
-func sessionIDFromFile(path string) string {
+func sessionIDFromFileContext(ctx context.Context, path string) string {
 	file, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
 	defer file.Close()
 	var sessionID string
-	_ = jsonl.ForEach(file, func(line []byte) {
+	_ = jsonl.ForEachContext(ctx, file, func(line []byte) {
 		if sessionID != "" {
 			return
 		}
@@ -1255,7 +1285,7 @@ func sessionIDFromFile(path string) string {
 	return sessionID
 }
 
-func (p Parser) parseFile(path string) (*model.Session, map[string]string, string, error) {
+func (p Parser) parseFile(ctx context.Context, path string) (*model.Session, map[string]string, string, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, nil, "", err
@@ -1272,7 +1302,7 @@ func (p Parser) parseFile(path string) (*model.Session, map[string]string, strin
 	// the user+assistant message lines the detail timeline shows, so a session with
 	// many interactions no longer reads as one message.
 	messages := 0
-	err = jsonl.ForEach(file, func(line []byte) {
+	err = jsonl.ForEachContext(ctx, file, func(line []byte) {
 		var envelope struct {
 			Type      string `json:"type"`
 			Timestamp string `json:"timestamp"`
@@ -1369,7 +1399,14 @@ func (p Parser) parseFile(path string) (*model.Session, map[string]string, strin
 	}
 	seenModels := make(map[string]bool)
 	missingPricing := make(map[string]bool)
-	for _, record := range deduplicate(usageRecords) {
+	deduplicated, err := deduplicateContext(ctx, usageRecords)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	for _, record := range deduplicated {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, "", err
+		}
 		session.Usage = append(session.Usage, record.Usage)
 		calculated := p.calculator.Calculate(record.Usage)
 		session.Requests = append(session.Requests, model.RequestUsage{

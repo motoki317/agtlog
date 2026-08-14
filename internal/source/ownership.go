@@ -1,6 +1,10 @@
 package source
 
-import "github.com/motoki317/agtlog/internal/model"
+import (
+	"context"
+
+	"github.com/motoki317/agtlog/internal/model"
+)
 
 type requestOwnershipKey struct {
 	agent                model.AgentKind
@@ -12,8 +16,15 @@ type requestOwnershipKey struct {
 // https://github.com/ryoppippi/ccusage. agtlog assigns the earliest origin instead of
 // whichever copy scan order encounters first.
 func AttributeOwnership(sessions []*model.Session) {
+	_ = attributeOwnershipContext(context.Background(), sessions)
+}
+
+func attributeOwnershipContext(ctx context.Context, sessions []*model.Session) error {
 	owners := make(map[requestOwnershipKey]*model.Session)
 	for _, session := range sessions {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if session == nil {
 			continue
 		}
@@ -23,6 +34,9 @@ func AttributeOwnership(sessions []*model.Session) {
 		session.DuplicatedByModel = nil
 		session.DuplicatedOwners = nil
 		for _, request := range session.Requests {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if request.MessageID == "" {
 				continue
 			}
@@ -34,11 +48,17 @@ func AttributeOwnership(sessions []*model.Session) {
 	}
 
 	for _, session := range sessions {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if session == nil {
 			continue
 		}
 		ownerIndexes := make(map[*model.Session]int)
 		for _, request := range session.Requests {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			if request.MessageID == "" {
 				continue
 			}
@@ -67,6 +87,7 @@ func AttributeOwnership(sessions []*model.Session) {
 			session.DuplicatedOwners[index].Count++
 		}
 	}
+	return nil
 }
 
 func sessionStartedEarlier(candidate, current *model.Session) bool {

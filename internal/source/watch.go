@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -37,6 +38,7 @@ type Follower struct {
 	watcher *Watcher
 	updates chan SessionUpdate
 	done    chan struct{}
+	cancel  context.CancelFunc
 	once    sync.Once
 	group   sync.WaitGroup
 }
@@ -49,11 +51,17 @@ type Watcher struct {
 	watched map[string]bool
 	events  chan Change
 	done    chan struct{}
+	ctx     context.Context
+	cancel  context.CancelFunc
 	once    sync.Once
 	group   sync.WaitGroup
 }
 
 func NewWatcher(roots []string, options WatchOptions) (*Watcher, error) {
+	return newWatcher(context.Background(), roots, options)
+}
+
+func newWatcher(ctx context.Context, roots []string, options WatchOptions) (*Watcher, error) {
 	if options.Debounce <= 0 {
 		options.Debounce = 300 * time.Millisecond
 	}
@@ -64,6 +72,7 @@ func NewWatcher(roots []string, options WatchOptions) (*Watcher, error) {
 	if err != nil {
 		return nil, err
 	}
+	watchCtx, cancel := context.WithCancel(ctx)
 	watcher := &Watcher{
 		watcher: native,
 		options: options,
@@ -72,8 +81,16 @@ func NewWatcher(roots []string, options WatchOptions) (*Watcher, error) {
 		watched: make(map[string]bool),
 		events:  make(chan Change, 16),
 		done:    make(chan struct{}),
+		ctx:     watchCtx,
+		cancel:  cancel,
 	}
-	watcher.known = watcher.scanFiles(true)
+	known, err := watcher.scanFiles(true)
+	if err != nil {
+		cancel()
+		_ = native.Close()
+		return nil, err
+	}
+	watcher.known = known
 	watcher.group.Add(1)
 	go watcher.run()
 	return watcher, nil
@@ -86,6 +103,7 @@ func (w *Watcher) Events() <-chan Change {
 func (w *Watcher) Close() error {
 	var err error
 	w.once.Do(func() {
+		w.cancel()
 		close(w.done)
 		err = w.watcher.Close()
 		w.group.Wait()
@@ -98,14 +116,17 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 	for _, adapter := range r.sources {
 		roots = append(roots, adapter.Roots()...)
 	}
-	watcher, err := NewWatcher(roots, options)
+	followCtx, cancel := context.WithCancel(ctx)
+	watcher, err := newWatcher(followCtx, roots, options)
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	follower := &Follower{
 		watcher: watcher,
 		updates: make(chan SessionUpdate, 16),
 		done:    make(chan struct{}),
+		cancel:  cancel,
 	}
 	follower.group.Add(1)
 	go func() {
@@ -113,7 +134,7 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 		defer close(follower.updates)
 		for {
 			select {
-			case <-ctx.Done():
+			case <-followCtx.Done():
 				return
 			case <-follower.done:
 				return
@@ -122,26 +143,29 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 					return
 				}
 				changed := append([]string(nil), change.Paths...)
-				changed = append(changed, r.removedParentPaths(change.RemovedPaths)...)
-				sessions := r.refresh(ctx, changed)
+				changed = append(changed, r.removedParentPaths(followCtx, change.RemovedPaths)...)
+				sessions := r.refresh(followCtx, changed)
 				needsSnapshot := r.pathsUseAgent(change.RemovedPaths, model.AgentCodex)
 				for _, session := range sessions {
 					needsSnapshot = needsSnapshot || session.Agent == model.AgentCodex
 				}
 				if needsSnapshot {
-					if snapshot, discoverErr := r.Discover(ctx); discoverErr == nil {
+					if snapshot, discoverErr := r.discoverFollowing(followCtx); discoverErr == nil {
 						sessions = snapshot
 					} else {
 						sessions = nil
 					}
 				}
-				removed := r.topLevelRemoved(change.RemovedPaths)
+				removed := r.topLevelRemoved(followCtx, change.RemovedPaths)
 				if len(sessions) == 0 && len(removed) == 0 {
 					continue
 				}
+				if followCtx.Err() != nil {
+					return
+				}
 				select {
 				case follower.updates <- SessionUpdate{Paths: change.Paths, RemovedPaths: removed, Sessions: sessions}:
-				case <-ctx.Done():
+				case <-followCtx.Done():
 					return
 				case <-follower.done:
 					return
@@ -163,16 +187,16 @@ func (r *Registry) pathsUseAgent(paths []string, agent model.AgentKind) bool {
 	return false
 }
 
-func (r *Registry) topLevelRemoved(paths []string) []string {
+func (r *Registry) topLevelRemoved(ctx context.Context, paths []string) []string {
 	var removed []string
 	for _, path := range paths {
 		for _, adapter := range r.sources {
 			if !insideAnyRoot(path, adapter.Roots()) {
 				continue
 			}
-			affected := path
-			if mapper, ok := adapter.(affectedPathMapper); ok {
-				affected = mapper.AffectedPath(path)
+			affected, err := affectedPath(ctx, adapter, path)
+			if err != nil {
+				return removed
 			}
 			if affected == path {
 				removed = append(removed, path)
@@ -187,7 +211,7 @@ func (r *Registry) topLevelRemoved(paths []string) []string {
 	return removed
 }
 
-func (r *Registry) removedParentPaths(paths []string) []string {
+func (r *Registry) removedParentPaths(ctx context.Context, paths []string) []string {
 	seen := make(map[string]bool)
 	var parents []string
 	for _, path := range paths {
@@ -195,12 +219,13 @@ func (r *Registry) removedParentPaths(paths []string) []string {
 			if !insideAnyRoot(path, adapter.Roots()) {
 				continue
 			}
-			if mapper, ok := adapter.(affectedPathMapper); ok {
-				affected := mapper.AffectedPath(path)
-				if affected != path && !seen[affected] {
-					parents = append(parents, affected)
-					seen[affected] = true
-				}
+			affected, err := affectedPath(ctx, adapter, path)
+			if err != nil {
+				return parents
+			}
+			if affected != path && !seen[affected] {
+				parents = append(parents, affected)
+				seen[affected] = true
 			}
 			break
 		}
@@ -216,6 +241,7 @@ func (f *Follower) Updates() <-chan SessionUpdate {
 func (f *Follower) Close() error {
 	var err error
 	f.once.Do(func() {
+		f.cancel()
 		close(f.done)
 		err = f.watcher.Close()
 		f.group.Wait()
@@ -225,6 +251,23 @@ func (f *Follower) Close() error {
 
 type affectedPathMapper interface {
 	AffectedPath(string) string
+}
+
+type affectedPathContextMapper interface {
+	AffectedPathContext(context.Context, string) (string, error)
+}
+
+func affectedPath(ctx context.Context, adapter Source, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if mapper, ok := adapter.(affectedPathContextMapper); ok {
+		return mapper.AffectedPathContext(ctx, path)
+	}
+	if mapper, ok := adapter.(affectedPathMapper); ok {
+		return mapper.AffectedPath(path), nil
+	}
+	return path, nil
 }
 
 func (r *Registry) refresh(ctx context.Context, changedPaths []string) []*model.Session {
@@ -239,9 +282,9 @@ func (r *Registry) refresh(ctx context.Context, changedPaths []string) []*model.
 			if !insideAnyRoot(changedPath, adapter.Roots()) {
 				continue
 			}
-			affectedPath := changedPath
-			if mapper, ok := adapter.(affectedPathMapper); ok {
-				affectedPath = mapper.AffectedPath(changedPath)
+			affectedPath, err := affectedPath(ctx, adapter, changedPath)
+			if err != nil {
+				return nil
 			}
 			key := string(adapter.Agent()) + "\x00" + affectedPath
 			if !seen[key] {
@@ -258,10 +301,16 @@ func (r *Registry) refresh(ctx context.Context, changedPaths []string) []*model.
 			break
 		}
 		// Full re-parse per change; add offset-incremental parsing if large-session refresh lags.
-		before, fingerprintErr := sourceFingerprint(target.adapter, target.path)
-		session, _, err := r.parseAndCache(target.adapter, target.path, before, fingerprintErr == nil)
+		before, fingerprintErr := sourceFingerprintContext(ctx, target.adapter, target.path)
+		if ctx.Err() != nil {
+			break
+		}
+		session, _, err := r.parseAndCacheContext(ctx, target.adapter, target.path, before, fingerprintErr == nil)
 		if err != nil {
 			continue
+		}
+		if ctx.Err() != nil {
+			break
 		}
 		sessions = append(sessions, session)
 	}
@@ -279,7 +328,7 @@ func insideAnyRoot(path string, roots []string) bool {
 }
 
 func (w *Watcher) addTree(root string) error {
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+	err := walkTreeContext(w.ctx, root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -352,6 +401,11 @@ func (w *Watcher) run() {
 
 	for {
 		select {
+		case <-w.ctx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
+			return
 		case <-w.done:
 			if timer != nil {
 				timer.Stop()
@@ -380,7 +434,10 @@ func (w *Watcher) run() {
 		case <-timerC:
 			flush()
 		case <-rescan.C:
-			current := w.scanFiles(true)
+			current, err := w.scanFiles(true)
+			if err != nil {
+				return
+			}
 			for path, fingerprint := range current {
 				if w.known[path] != fingerprint {
 					queue(path)
@@ -396,10 +453,10 @@ func (w *Watcher) run() {
 	}
 }
 
-func (w *Watcher) scanFiles(addWatches bool) map[string]string {
+func (w *Watcher) scanFiles(addWatches bool) (map[string]string, error) {
 	files := make(map[string]string)
 	for _, root := range w.roots {
-		_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		err := walkTreeContext(w.ctx, root, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return nil
 			}
@@ -419,8 +476,67 @@ func (w *Watcher) scanFiles(addWatches bool) map[string]string {
 			}
 			return nil
 		})
+		if err != nil {
+			return nil, err
+		}
 	}
-	return files
+	return files, nil
+}
+
+const walkBatchEntries = 128
+
+func walkTreeContext(ctx context.Context, root string, visit fs.WalkDirFunc) error {
+	info, err := os.Lstat(root)
+	if err != nil {
+		return visit(root, nil, err)
+	}
+	return walkEntryContext(ctx, root, fs.FileInfoToDirEntry(info), visit)
+}
+
+func walkEntryContext(ctx context.Context, path string, entry fs.DirEntry, visit fs.WalkDirFunc) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := visit(path, entry, nil); err != nil {
+		if errors.Is(err, fs.SkipDir) && entry.IsDir() {
+			return nil
+		}
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !entry.IsDir() {
+		return nil
+	}
+	directory, err := os.Open(path)
+	if err != nil {
+		return visit(path, entry, err)
+	}
+	defer func() { _ = directory.Close() }()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entries, readErr := directory.ReadDir(walkBatchEntries)
+		for _, child := range entries {
+			if err := walkEntryContext(ctx, filepath.Join(path, child.Name()), child, visit); err != nil {
+				if errors.Is(err, fs.SkipDir) {
+					continue
+				}
+				return err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return nil
+		}
+		if readErr != nil {
+			return visit(path, entry, readErr)
+		}
+	}
 }
 
 func (w *Watcher) forgetTree(root string) {

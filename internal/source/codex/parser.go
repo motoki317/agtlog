@@ -74,6 +74,13 @@ type userMessageRecord struct {
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
+	return p.ParseContext(context.Background(), path)
+}
+
+func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -84,7 +91,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	var replayCandidates []string
 	replayCandidateInvalid := false
 	metaSeen := false
-	scanCtx, stopScan := context.WithCancel(context.Background())
+	scanCtx, stopScan := context.WithCancel(ctx)
 	scanComplete := false
 	err = jsonl.ForEachContext(scanCtx, file, func(line []byte) {
 		var record logRecord
@@ -134,7 +141,7 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	hasLast := false
 	seenModels := make(map[string]bool)
 	metaSeen = false
-	err = jsonl.ForEachContextWithOffset(context.Background(), file, func(line []byte, offset, _ int64) {
+	err = jsonl.ForEachContextWithOffset(ctx, file, func(line []byte, offset, _ int64) {
 		var envelope struct {
 			Timestamp string `json:"timestamp"`
 			Type      string `json:"type"`
@@ -274,15 +281,24 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	if !cleanPartition {
 		pricingRecords = pricingRecords[:0]
 		for _, usageModel := range usageOrder {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			pricingRecords = append(pricingRecords, tokenUsageRecord{model: usageModel, usage: *usageByModel[usageModel], offset: -1})
 		}
 	}
 	for _, usageModel := range usageOrder {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		session.Usage = append(session.Usage, codexUsage(usageModel, *usageByModel[usageModel]))
 	}
 	missingPricing := make(map[string]bool)
 	estimatedRates := make(map[model.EstimatedRate]bool)
 	for _, record := range pricingRecords {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		usage := codexUsage(record.model, record.usage)
 		calculated := p.calculator.CalculateCodex(usage, p.defaultPricingModel)
 		session.Requests = append(session.Requests, model.RequestUsage{Offset: record.offset, Usage: usage, USD: calculated.USD})
@@ -314,6 +330,9 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 	}
 	if session.AgentPath != "" {
 		session.Title = model.CleanTitle(filepath.Base(session.AgentPath))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return session, nil
 }

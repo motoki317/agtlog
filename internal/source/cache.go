@@ -1,6 +1,8 @@
 package source
 
 import (
+	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -45,7 +47,18 @@ type fingerprinter interface {
 	Fingerprint(string) (string, error)
 }
 
+type contextFingerprinter interface {
+	FingerprintContext(context.Context, string) (string, error)
+}
+
 func (r *Registry) loadCached(adapter Source, path, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool) {
+	return r.loadCachedContext(context.Background(), adapter, path, fingerprint)
+}
+
+func (r *Registry) loadCachedContext(ctx context.Context, adapter Source, path, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool) {
+	if ctx.Err() != nil {
+		return nil, nil, false
+	}
 	root, ok := r.openCacheRoot()
 	if !ok {
 		return nil, nil, false
@@ -62,7 +75,7 @@ func (r *Registry) loadCached(adapter Source, path, fingerprint string) (*model.
 			return nil, nil, false
 		}
 		defer func() { _ = namespaceRoot.Close() }()
-		session, diagnostics, valid, exists := loadCacheEntry(namespaceRoot, cacheEntryName(adapter, path), adapter, fingerprint)
+		session, diagnostics, valid, exists := loadCacheEntryContext(ctx, namespaceRoot, cacheEntryName(adapter, path), adapter, fingerprint)
 		if valid {
 			return session, diagnostics, true
 		}
@@ -75,27 +88,82 @@ func (r *Registry) loadCached(adapter Source, path, fingerprint string) (*model.
 	return nil, nil, false
 }
 
-func loadCacheEntry(root *os.Root, path string, adapter Source, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool, bool) {
+func loadCacheEntryContext(ctx context.Context, root *os.Root, path string, adapter Source, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool, bool) {
+	if ctx.Err() != nil {
+		return nil, nil, false, false
+	}
 	info, err := root.Lstat(path)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() > maxSummaryCacheBytes {
 		return nil, nil, false, !os.IsNotExist(err)
 	}
-	data, err := root.ReadFile(path)
+	data, err := readRootFileContext(ctx, root, path, info.Size())
 	if err != nil {
 		return nil, nil, false, true
 	}
 	var entry cacheEntry
-	if json.Unmarshal(data, &entry) != nil || entry.Version != cacheVersion || entry.Agent != adapter.Agent() || entry.Fingerprint != fingerprint || entry.Session == nil {
+	decoder := json.NewDecoder(&contextReader{ctx: ctx, reader: bytes.NewReader(data)})
+	if decoder.Decode(&entry) != nil || decoder.Decode(&struct{}{}) != io.EOF || entry.Version != cacheVersion || entry.Agent != adapter.Agent() || entry.Fingerprint != fingerprint || entry.Session == nil {
 		return nil, nil, false, true
 	}
 	diagnostics := make([]DiscoveryDiagnostic, 0, len(entry.Diagnostics))
 	for _, diagnostic := range entry.Diagnostics {
+		if ctx.Err() != nil {
+			return nil, nil, false, true
+		}
 		diagnostics = append(diagnostics, DiscoveryDiagnostic{Agent: adapter.Agent(), Path: diagnostic.Path, Err: errors.New(diagnostic.Message)})
 	}
 	return entry.Session, diagnostics, true, true
 }
 
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r *contextReader) Read(buffer []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	if len(buffer) > 128<<10 {
+		buffer = buffer[:128<<10]
+	}
+	return r.reader.Read(buffer)
+}
+
+func readRootFileContext(ctx context.Context, root *os.Root, path string, size int64) ([]byte, error) {
+	file, err := root.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	data := make([]byte, 0, min(size, maxSummaryCacheBytes))
+	buffer := make([]byte, 128<<10)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		read, readErr := file.Read(buffer)
+		if len(data)+read > maxSummaryCacheBytes {
+			return nil, errors.New("cache entry exceeds size limit")
+		}
+		data = append(data, buffer[:read]...)
+		if errors.Is(readErr, io.EOF) {
+			return data, nil
+		}
+		if readErr != nil {
+			return nil, readErr
+		}
+	}
+}
+
 func (r *Registry) storeCached(adapter Source, path, fingerprint string, session *model.Session, diagnostics []DiscoveryDiagnostic) {
+	r.storeCachedContext(context.Background(), adapter, path, fingerprint, session, diagnostics)
+}
+
+func (r *Registry) storeCachedContext(ctx context.Context, adapter Source, path, fingerprint string, session *model.Session, diagnostics []DiscoveryDiagnostic) {
+	if ctx.Err() != nil {
+		return
+	}
 	if r.options.CacheDir == "" || !r.cacheDirSafe() {
 		return
 	}
@@ -105,10 +173,16 @@ func (r *Registry) storeCached(adapter Source, path, fingerprint string, session
 	}
 	cachedDiagnostics := make([]cacheDiagnostic, 0, len(diagnostics))
 	for _, diagnostic := range diagnostics {
+		if ctx.Err() != nil {
+			return
+		}
 		cachedDiagnostics = append(cachedDiagnostics, cacheDiagnostic{Path: diagnostic.Path, Message: diagnostic.Err.Error()})
 	}
 	data, err := json.Marshal(cacheEntry{Version: cacheVersion, Agent: adapter.Agent(), Fingerprint: fingerprint, Session: session, Diagnostics: cachedDiagnostics})
 	if err != nil || len(data) > maxSummaryCacheBytes {
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 	root, ok := r.openOrCreateCacheRoot()
@@ -131,6 +205,9 @@ func (r *Registry) storeCached(adapter Source, path, fingerprint string, session
 	if !ensureCacheDirectory(namespaceRoot, cacheTempDirName) {
 		return
 	}
+	if ctx.Err() != nil {
+		return
+	}
 	temporary, temporaryPath, err := createCacheTemp(namespaceRoot)
 	if err != nil {
 		return
@@ -140,14 +217,38 @@ func (r *Registry) storeCached(adapter Source, path, fingerprint string, session
 		_ = temporary.Close()
 		return
 	}
-	if _, err := temporary.Write(data); err != nil {
+	if err := writeFileContext(ctx, temporary, data); err != nil {
 		_ = temporary.Close()
 		return
 	}
 	if err := temporary.Close(); err != nil {
 		return
 	}
+	if ctx.Err() != nil {
+		return
+	}
 	_ = namespaceRoot.Rename(temporaryPath, cacheEntryName(adapter, path))
+}
+
+func writeFileContext(ctx context.Context, file io.Writer, data []byte) error {
+	for len(data) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		chunk := data
+		if len(chunk) > 128<<10 {
+			chunk = chunk[:128<<10]
+		}
+		written, err := file.Write(chunk)
+		if err != nil {
+			return err
+		}
+		if written == 0 {
+			return io.ErrShortWrite
+		}
+		data = data[written:]
+	}
+	return nil
 }
 
 func ensureCacheDirectory(root *os.Root, path string) bool {
@@ -480,50 +581,73 @@ func resolveExistingPath(path string) (string, error) {
 }
 
 func (r *Registry) discoverSession(adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
+	return r.discoverSessionContext(context.Background(), adapter, path)
+}
+
+func (r *Registry) discoverSessionContext(ctx context.Context, adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
 	if r.options.CacheDir == "" {
-		return parseSessionWithDiagnostics(adapter, path)
+		return parseSessionWithDiagnosticsContext(ctx, adapter, path)
 	}
-	fingerprint, err := sourceFingerprint(adapter, path)
+	fingerprint, err := sourceFingerprintContext(ctx, adapter, path)
 	if err == nil {
-		if session, diagnostics, ok := r.loadCached(adapter, path, fingerprint); ok {
+		if session, diagnostics, ok := r.loadCachedContext(ctx, adapter, path, fingerprint); ok {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
 			return session, diagnostics, nil
 		}
 	}
-	return r.parseAndCache(adapter, path, fingerprint, err == nil)
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	return r.parseAndCacheContext(ctx, adapter, path, fingerprint, err == nil)
 }
 
-func (r *Registry) parseAndCache(adapter Source, path, before string, cacheable bool) (*model.Session, []DiscoveryDiagnostic, error) {
-	session, diagnostics, err := parseSessionWithDiagnostics(adapter, path)
+func (r *Registry) parseAndCacheContext(ctx context.Context, adapter Source, path, before string, cacheable bool) (*model.Session, []DiscoveryDiagnostic, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	session, diagnostics, err := parseSessionWithDiagnosticsContext(ctx, adapter, path)
 	if err != nil {
 		return nil, diagnostics, err
 	}
 	if cacheable {
-		after, fingerprintErr := sourceFingerprint(adapter, path)
+		after, fingerprintErr := sourceFingerprintContext(ctx, adapter, path)
 		if fingerprintErr == nil && before == after {
-			r.storeCached(adapter, path, after, session, diagnostics)
+			r.storeCachedContext(ctx, adapter, path, after, session, diagnostics)
 		}
 	}
 	return session, diagnostics, nil
 }
 
-type diagnosticParser interface {
-	ParseWithDiagnostics(string, func(string, error)) (*model.Session, error)
+type diagnosticContextParser interface {
+	ParseWithDiagnosticsContext(context.Context, string, func(string, error)) (*model.Session, error)
 }
 
-func parseSessionWithDiagnostics(adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
-	parser, ok := adapter.(diagnosticParser)
+func parseSessionWithDiagnosticsContext(ctx context.Context, adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
+	parser, ok := adapter.(diagnosticContextParser)
 	if !ok {
-		session, err := adapter.Parse(path)
+		session, err := adapter.ParseContext(ctx, path)
 		return session, nil, err
 	}
 	var diagnostics []DiscoveryDiagnostic
-	session, err := parser.ParseWithDiagnostics(path, func(diagnosticPath string, diagnosticErr error) {
+	session, err := parser.ParseWithDiagnosticsContext(ctx, path, func(diagnosticPath string, diagnosticErr error) {
 		diagnostics = append(diagnostics, DiscoveryDiagnostic{Agent: adapter.Agent(), Path: diagnosticPath, Err: diagnosticErr})
 	})
 	return session, diagnostics, err
 }
 
 func sourceFingerprint(adapter Source, path string) (string, error) {
+	return sourceFingerprintContext(context.Background(), adapter, path)
+}
+
+func sourceFingerprintContext(ctx context.Context, adapter Source, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if custom, ok := adapter.(contextFingerprinter); ok {
+		return custom.FingerprintContext(ctx, path)
+	}
 	if custom, ok := adapter.(fingerprinter); ok {
 		return custom.Fingerprint(path)
 	}

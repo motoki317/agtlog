@@ -277,6 +277,9 @@ func (s diagnosticSource) Parse(path string) (*model.Session, error) {
 	session := *s.sessions[path]
 	return &session, nil
 }
+func (s diagnosticSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
+	return s.Parse(path)
+}
 
 func TestRegistryLinksCodexSubagentSidecarUsage(t *testing.T) {
 	root := t.TempDir()

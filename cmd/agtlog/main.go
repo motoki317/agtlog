@@ -157,6 +157,11 @@ type tuiRunner func(context.Context, io.Reader, io.Writer, tui.Model, <-chan sou
 
 type registryFactory func(context.Context, cliOptions) (*source.Registry, error)
 
+type discoveryResult struct {
+	sessions []*model.Session
+	err      error
+}
+
 func executeTUI(ctx context.Context, options cliOptions, input io.Reader, output io.Writer, registry *source.Registry, runner tuiRunner) error {
 	theme, err := tui.ResolveTheme(options.theme)
 	if err != nil {
@@ -197,10 +202,6 @@ func executeTUI(ctx context.Context, options cliOptions, input io.Reader, output
 
 func discoverAndFollow(ctx context.Context, registry, discoveryRegistry *source.Registry, watch bool, updates chan<- source.SessionUpdate) error {
 	defer close(updates)
-	type discoveryResult struct {
-		sessions []*model.Session
-		err      error
-	}
 	startDiscovery := func() <-chan discoveryResult {
 		results := make(chan discoveryResult, 1)
 		go func() {
@@ -237,7 +238,11 @@ func discoverAndFollow(ctx context.Context, registry, discoveryRegistry *source.
 			return ctx.Err()
 		case update, ok := <-followerUpdates:
 			if !ok {
-				result := <-results
+				result, received := receiveDiscoveryResult(ctx, results)
+				if !received {
+					closeFollower()
+					return ctx.Err()
+				}
 				_ = sendSessionUpdate(ctx, updates, source.SessionUpdate{Sessions: result.sessions, DiscoveryComplete: true, DiscoveryErr: result.err})
 				closeFollower()
 				return result.err
@@ -284,6 +289,15 @@ func discoverAndFollow(ctx context.Context, registry, discoveryRegistry *source.
 				}
 			}
 		}
+	}
+}
+
+func receiveDiscoveryResult(ctx context.Context, results <-chan discoveryResult) (discoveryResult, bool) {
+	select {
+	case <-ctx.Done():
+		return discoveryResult{}, false
+	case result := <-results:
+		return result, true
 	}
 }
 

@@ -1,11 +1,14 @@
 package source
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -34,6 +37,49 @@ type emptyCacheFingerprintSource struct {
 	*countingSource
 }
 
+type cancelingWriter struct {
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (w *cancelingWriter) Write(data []byte) (int, error) {
+	w.calls++
+	w.cancel()
+	return len(data), nil
+}
+
+type zeroWriter struct{}
+
+func (zeroWriter) Write([]byte) (int, error) { return 0, nil }
+
+func TestContextReaderStopsBetweenChunks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := &contextReader{ctx: ctx, reader: bytes.NewReader(make([]byte, 256<<10))}
+	buffer := make([]byte, 256<<10)
+	if read, err := reader.Read(buffer); err != nil || read != 128<<10 {
+		t.Fatalf("first Read() = %d, %v; want one bounded chunk", read, err)
+	}
+	cancel()
+	if _, err := reader.Read(buffer); !errors.Is(err, context.Canceled) {
+		t.Fatalf("second Read() error = %v, want context canceled", err)
+	}
+}
+
+func TestWriteFileContextStopsBetweenChunks(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	writer := &cancelingWriter{cancel: cancel}
+	err := writeFileContext(ctx, writer, make([]byte, 256<<10))
+	if !errors.Is(err, context.Canceled) || writer.calls != 1 {
+		t.Fatalf("writeFileContext() = %v after %d writes, want cancellation after one chunk", err, writer.calls)
+	}
+}
+
+func TestWriteFileContextRejectsZeroLengthWrite(t *testing.T) {
+	if err := writeFileContext(context.Background(), zeroWriter{}, []byte("cache")); !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("writeFileContext() error = %v, want short write", err)
+	}
+}
+
 type barrierSource struct {
 	*countingSource
 	ready   chan<- struct{}
@@ -56,6 +102,9 @@ func (s graphSource) Discover(context.Context) ([]string, error) {
 	return paths, nil
 }
 func (s graphSource) Parse(path string) (*model.Session, error) { return s.sessions[path], nil }
+func (s graphSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
+	return s.Parse(path)
+}
 
 func (s *changingFingerprintSource) Fingerprint(string) (string, error) {
 	s.fingerprints++
@@ -71,6 +120,9 @@ func (s *barrierSource) Parse(path string) (*model.Session, error) {
 	s.ready <- struct{}{}
 	<-s.release
 	return s.countingSource.Parse(path)
+}
+func (s *barrierSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
+	return s.Parse(path)
 }
 
 func (s *countingSource) Agent() model.AgentKind {
@@ -99,6 +151,9 @@ func (s *countingSource) Discover(context.Context) ([]string, error) {
 func (s *countingSource) Parse(path string) (*model.Session, error) {
 	s.parses++
 	return &model.Session{ID: "cached-session", Agent: model.AgentClaude, Path: path}, nil
+}
+func (s *countingSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
+	return s.Parse(path)
 }
 func (s *countingSource) LoadEvents(_ context.Context, session *model.Session) error {
 	s.details++
@@ -528,7 +583,7 @@ func TestRegistryRejectsUnsafeCacheNamespace(t *testing.T) {
 				t.Fatal("loadCached() accepted an unsafe namespace")
 			}
 			registry.storeCached(adapter, path, fingerprint, &model.Session{ID: "replacement"}, nil)
-			registry.topLevelRemoved([]string{path})
+			registry.topLevelRemoved(context.Background(), []string{path})
 
 			got, err := os.ReadFile(protectedPath)
 			if err != nil || string(got) != string(protectedData) {

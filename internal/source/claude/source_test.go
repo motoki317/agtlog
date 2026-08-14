@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -25,6 +26,18 @@ func TestSourceCacheFingerprintDelegatesToParser(t *testing.T) {
 	parser := testParser()
 	if got, want := NewSource(parser, nil).CacheFingerprint(), parser.CacheFingerprint(); got != want {
 		t.Fatalf("CacheFingerprint() = %q, want %q", got, want)
+	}
+}
+
+func TestSourceFingerprintAndAffectedPathStopForCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	source := NewSource(testParser(), []string{filepath.Join("fictional", "projects")})
+	if _, err := source.FingerprintContext(ctx, filepath.Join("fictional", "session.jsonl")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("FingerprintContext() error = %v, want context canceled", err)
+	}
+	if _, err := source.AffectedPathContext(ctx, filepath.Join("fictional", "agent-scout.jsonl")); !errors.Is(err, context.Canceled) {
+		t.Fatalf("AffectedPathContext() error = %v, want context canceled", err)
 	}
 }
 

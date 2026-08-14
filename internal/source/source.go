@@ -11,5 +11,5 @@ type Source interface {
 	Roots() []string
 	CacheFingerprint() string
 	Discover(context.Context) ([]string, error)
-	Parse(string) (*model.Session, error)
+	ParseContext(context.Context, string) (*model.Session, error)
 }

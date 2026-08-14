@@ -167,6 +167,19 @@ func (r *Registry) Discover(ctx context.Context) ([]*model.Session, error) {
 }
 
 func (r *Registry) DiscoverWithDiagnostics(ctx context.Context) ([]*model.Session, []DiscoveryDiagnostic, error) {
+	return r.discoverWithDiagnostics(ctx, r.discoverSession)
+}
+
+type sessionDiscoverer func(Source, string) (*model.Session, []DiscoveryDiagnostic, error)
+
+func (r *Registry) discoverFollowing(ctx context.Context) ([]*model.Session, error) {
+	sessions, _, err := r.discoverWithDiagnostics(ctx, func(adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
+		return r.discoverSessionContext(ctx, adapter, path)
+	})
+	return sessions, err
+}
+
+func (r *Registry) discoverWithDiagnostics(ctx context.Context, discover sessionDiscoverer) ([]*model.Session, []DiscoveryDiagnostic, error) {
 	type job struct {
 		source Source
 		path   string
@@ -210,7 +223,7 @@ func (r *Registry) DiscoverWithDiagnostics(ctx context.Context) ([]*model.Sessio
 				if ctx.Err() != nil {
 					return
 				}
-				session, diagnostics, err := r.discoverSession(item.source, item.path)
+				session, diagnostics, err := discover(item.source, item.path)
 				if err != nil {
 					diagnostics = append(diagnostics, DiscoveryDiagnostic{Agent: item.source.Agent(), Path: item.path, Err: err})
 					results <- result{diagnostics: diagnostics}
@@ -247,9 +260,15 @@ func (r *Registry) DiscoverWithDiagnostics(ctx context.Context) ([]*model.Sessio
 		}
 		return diagnostics[i].Path < diagnostics[j].Path
 	})
-	linkedChildren := linkSessionGraphs(allSessions)
+	linkedChildren, err := linkSessionGraphsContext(ctx, allSessions)
+	if err != nil {
+		return nil, nil, err
+	}
 	sessions := make([]*model.Session, 0, len(allSessions))
 	for _, session := range allSessions {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
 		if linkedChildren[session] {
 			continue
 		}
@@ -264,23 +283,36 @@ func (r *Registry) DiscoverWithDiagnostics(ctx context.Context) ([]*model.Sessio
 		}
 		return sessions[i].ID < sessions[j].ID
 	})
-	AttributeOwnership(sessions)
+	if err := attributeOwnershipContext(ctx, sessions); err != nil {
+		return nil, nil, err
+	}
 	return sessions, diagnostics, nil
 }
 
 func linkSessionGraphs(sessions []*model.Session) map[*model.Session]bool {
+	linked, _ := linkSessionGraphsContext(context.Background(), sessions)
+	return linked
+}
+
+func linkSessionGraphsContext(ctx context.Context, sessions []*model.Session) (map[*model.Session]bool, error) {
 	byParentAndID := make(map[string]*model.Session, len(sessions))
 	for _, session := range sessions {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if session != nil && session.ParentID != "" && session.ID != "" {
 			key := string(session.Agent) + "\x00" + session.ParentID + "\x00" + session.ID
 			byParentAndID[key] = session
 		}
 	}
 	linkedChildren := make(map[*model.Session]bool)
-	var link func(*model.Session, map[*model.Session]bool)
-	link = func(session *model.Session, visiting map[*model.Session]bool) {
+	var link func(*model.Session, map[*model.Session]bool) error
+	link = func(session *model.Session, visiting map[*model.Session]bool) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if session == nil || visiting[session] {
-			return
+			return nil
 		}
 		visiting[session] = true
 		defer delete(visiting, session)
@@ -301,14 +333,25 @@ func linkSessionGraphs(sessions []*model.Session) map[*model.Session]bool {
 					child.Path = basePath + "#" + name
 				}
 			}
-			link(child, visiting)
+			if err := link(child, visiting); err != nil {
+				return err
+			}
 			if child.UpdatedAt.After(session.UpdatedAt) {
 				session.UpdatedAt = child.UpdatedAt
 			}
 		}
+		return nil
 	}
 	for _, session := range sessions {
-		link(session, make(map[*model.Session]bool))
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := link(session, make(map[*model.Session]bool)); err != nil {
+			return nil, err
+		}
 	}
-	return linkedChildren
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return linkedChildren, nil
 }

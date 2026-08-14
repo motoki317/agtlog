@@ -108,8 +108,16 @@ func (s Source) Parse(path string) (*model.Session, error) {
 	return s.parser.Parse(path)
 }
 
+func (s Source) ParseContext(ctx context.Context, path string) (*model.Session, error) {
+	return s.parser.ParseContext(ctx, path)
+}
+
 func (s Source) ParseWithDiagnostics(path string, report func(string, error)) (*model.Session, error) {
 	return s.parser.ParseWithDiagnostics(path, report)
+}
+
+func (s Source) ParseWithDiagnosticsContext(ctx context.Context, path string, report func(string, error)) (*model.Session, error) {
+	return s.parser.ParseWithDiagnosticsContext(ctx, path, report)
 }
 
 func (s Source) LoadEvents(ctx context.Context, session *model.Session) error {
@@ -121,6 +129,13 @@ func (s Source) LoadNodeEvents(ctx context.Context, session *model.Session) erro
 }
 
 func (s Source) Fingerprint(path string) (string, error) {
+	return s.FingerprintContext(context.Background(), path)
+}
+
+func (s Source) FingerprintContext(ctx context.Context, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	hash := sha256.New()
 	_, _ = fmt.Fprintln(hash, s.parser.CacheFingerprint())
 	paths := []string{path, strings.TrimSuffix(path, filepath.Ext(path))}
@@ -128,6 +143,9 @@ func (s Source) Fingerprint(path string) (string, error) {
 	paths = append(paths, legacyPaths...)
 	for _, candidate := range paths {
 		err := filepath.Walk(candidate, func(current string, info os.FileInfo, err error) error {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			if err != nil {
 				return err
 			}
@@ -142,21 +160,35 @@ func (s Source) Fingerprint(path string) (string, error) {
 }
 
 func (s Source) AffectedPath(path string) string {
+	affected, _ := s.AffectedPathContext(context.Background(), path)
+	return affected
+}
+
+func (s Source) AffectedPathContext(ctx context.Context, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	for dir := filepath.Dir(path); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
 		if filepath.Base(dir) == "subagents" {
-			return filepath.Dir(dir) + ".jsonl"
+			return filepath.Dir(dir) + ".jsonl", nil
 		}
 	}
 	if isLegacyAgentFile(path) {
-		parentID := sessionIDFromFile(path)
+		parentID := sessionIDFromFileContext(ctx, path)
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		candidates, _ := filepath.Glob(filepath.Join(filepath.Dir(path), "*.jsonl"))
 		for _, candidate := range candidates {
-			if !isLegacyAgentFile(candidate) && sessionIDFromFile(candidate) == parentID {
-				return candidate
+			if err := ctx.Err(); err != nil {
+				return "", err
+			}
+			if !isLegacyAgentFile(candidate) && sessionIDFromFileContext(ctx, candidate) == parentID {
+				return candidate, nil
 			}
 		}
 	}
-	return path
+	return path, nil
 }
 
 func isLegacyAgentFile(path string) bool {

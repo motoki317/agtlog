@@ -78,6 +78,9 @@ func (s detailTestSource) Discover(context.Context) ([]string, error) {
 	return []string{s.session.Path}, nil
 }
 func (s detailTestSource) Parse(string) (*model.Session, error) { return s.session, nil }
+func (s detailTestSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
+	return s.Parse(path)
+}
 func (s detailTestSource) LoadEvents(ctx context.Context, session *model.Session) error {
 	if s.loadEvents != nil {
 		return s.loadEvents(ctx, session)

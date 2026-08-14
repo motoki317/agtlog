@@ -110,6 +110,49 @@ func TestDiscoveryErrorIsVisibleAtNarrowWidth(t *testing.T) {
 	}
 }
 
+func TestSuccessfulRefreshClearsDiscoveryError(t *testing.T) {
+	m := NewModel(nil, nil).WithDiscoveryProgress(func() (int, int, bool) {
+		return 0, 1, true
+	})
+	updated, _ := m.Update(source.SessionUpdate{
+		DiscoveryComplete: true,
+		DiscoveryErr:      errors.New("fictional root is unreadable"),
+	})
+	m = updated.(Model)
+	session := &model.Session{ID: "recovered", Agent: model.AgentClaude, Title: "Recovered session"}
+	updated, _ = m.Update(refreshedMsg{generation: m.refreshGeneration, sessions: []*model.Session{session}})
+	m = updated.(Model)
+	view := ansi.Strip(m.View())
+
+	if m.DiscoveryError() != nil || !strings.Contains(view, "Recovered session") || strings.Contains(view, "Session discovery failed") {
+		t.Fatalf("successful refresh did not clear discovery error:\n%s", view)
+	}
+}
+
+func TestFailedDiscoveryRetryShowsLatestError(t *testing.T) {
+	m := NewModel(nil, nil).WithDiscoveryProgress(func() (int, int, bool) {
+		return 0, 1, true
+	})
+	updated, _ := m.Update(source.SessionUpdate{
+		DiscoveryComplete: true,
+		DiscoveryErr:      errors.New("fictional initial failure"),
+	})
+	m = updated.(Model)
+	updated, _ = m.Update(refreshedMsg{
+		generation: m.refreshGeneration,
+		err:        errors.New("fictional retry failure"),
+	})
+	m = updated.(Model)
+	view := ansi.Strip(m.View())
+
+	if got := m.DiscoveryError(); got == nil || got.Error() != "fictional retry failure" {
+		t.Fatalf("discovery error = %v, want latest retry failure", got)
+	}
+	if !strings.Contains(view, "fictional retry failure") || strings.Contains(view, "fictional initial failure") {
+		t.Fatalf("failed retry left stale discovery error:\n%s", view)
+	}
+}
+
 func TestListSummaryReportsWatchingRoots(t *testing.T) {
 	m := NewModel(nil, nil).WithWatchingRoots(3)
 	if summary := m.listSummary(); !strings.Contains(summary, "watching 3 roots") {
@@ -540,6 +583,9 @@ func (s *refreshTestSource) Discover(context.Context) ([]string, error) {
 	return []string{s.session.Path}, nil
 }
 func (s *refreshTestSource) Parse(string) (*model.Session, error) { return s.session, nil }
+func (s *refreshTestSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
+	return s.Parse(path)
+}
 
 func TestFilterNarrowsRowsByFuzzyTitle(t *testing.T) {
 	sessions := []*model.Session{

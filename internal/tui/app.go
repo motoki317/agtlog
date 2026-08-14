@@ -191,6 +191,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if refreshed.err != nil {
+			if m.discoveryErr != nil {
+				m.discoveryErr = refreshed.err
+			}
 			m.status = "refresh: " + terminalText(refreshed.err.Error(), 160)
 			return m, nil
 		}
@@ -201,6 +204,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			openOwnership = snapshotOwnershipAttribution(root.session)
 		}
 		m.sessions = refreshed.sessions
+		m.discoveryErr = nil
 		m.status = "refreshed"
 		m.rebuildList()
 		if openIdentity != "" {
