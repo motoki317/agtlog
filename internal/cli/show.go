@@ -44,8 +44,7 @@ func runShow(ctx context.Context, args []string, help io.Writer, factory Registr
 	if err != nil {
 		return nil, "", runtimeError("internal", err.Error())
 	}
-	roots, commandDiags := addressableRoots(roots, commandDiagnostics(diagnostics))
-	nodes := indexSessionGraphs(roots)
+	_, nodes, commandDiags := addressableGraph(roots, commandDiagnostics(diagnostics))
 	selected, err := resolveSelector(selector, nodes, commandDiags)
 	if err != nil {
 		return nil, "", err

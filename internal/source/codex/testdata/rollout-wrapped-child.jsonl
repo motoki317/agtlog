@@ -1,0 +1,2 @@
+{"timestamp":"2026-01-02T03:04:05.000Z","type":"session_meta","payload":{"id":"thread-wrap-child","session_id":"thread-wrap-child","parent_thread_id":"thread-wrap-root","cwd":"/workspace/moon-lab","thread_source":"subagent","agent_path":"/root/reviewer_a"}}
+{"timestamp":"2026-01-02T03:04:11.000Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"thread-wrap-child","item":{"type":"SubAgentActivity","id":"call_fixture","kind":"interacted","agent_thread_id":"thread-wrap-root","agent_path":"/root"}}}

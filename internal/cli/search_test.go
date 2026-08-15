@@ -439,3 +439,36 @@ func TestSearchKeepsReadableRootHitsWhenDescendantFails(t *testing.T) {
 		t.Fatalf("response = %#v", response)
 	}
 }
+
+func TestSearchSkipsUnaddressableChildWithoutEmptyRefs(t *testing.T) {
+	children := []*model.Session{
+		{ID: "thread-duplicate", Agent: model.AgentCodex, AgentPath: "/root/orbit_review", Path: "/fictional/orbit/root.jsonl#first", Events: []model.Event{{Kind: model.EventUser, Text: "collision marker"}}},
+		{ID: "thread-duplicate", Agent: model.AgentCodex, AgentPath: "/root/orbit_review", Path: "/fictional/orbit/root.jsonl#second", Events: []model.Event{{Kind: model.EventUser, Text: "collision marker"}}},
+		{ID: "thread-duplicate", Agent: model.AgentCodex, AgentPath: "/root/orbit_review", Path: "/fictional/orbit/root.jsonl#third", Events: []model.Event{{Kind: model.EventUser, Text: "collision marker"}}},
+	}
+	root := &model.Session{
+		ID: "thread-orbit-root", Agent: model.AgentCodex, Path: "/fictional/orbit/root.jsonl", Events: []model.Event{{Kind: model.EventUser, Text: "collision marker"}}, Subagents: children,
+	}
+	registry := &fakeRegistry{sessions: []*model.Session{root}}
+	var output bytes.Buffer
+	if err := Execute(context.Background(), []string{"search", "collision marker", "--all"}, &output, io.Discard, func(context.Context, Options) (Registry, error) {
+		return registry, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var response SearchResponse
+	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Hits) != 2 || response.Hits[0].Session.Ref != "codex:thread-orbit-root" || response.Hits[1].Session.Ref != "codex:thread-orbit-root#orbit_review" {
+		t.Fatalf("search hits = %#v; want root and the one addressable child", response.Hits)
+	}
+	for _, hit := range response.Hits {
+		if hit.Session.Ref == "" {
+			t.Fatalf("search returned an empty ref: %#v", hit)
+		}
+	}
+	if len(response.Warnings) != 2 || response.Page.Complete || response.Page.Total != nil {
+		t.Fatalf("search page = %#v, warnings = %#v; want two diagnostics and an incomplete page", response.Page, response.Warnings)
+	}
+}

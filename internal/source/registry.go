@@ -295,17 +295,59 @@ func linkSessionGraphs(sessions []*model.Session) map[*model.Session]bool {
 }
 
 func linkSessionGraphsContext(ctx context.Context, sessions []*model.Session) (map[*model.Session]bool, error) {
+	// Newer Codex sidecars carry ParentID without a parent-side spawn announcement,
+	// so graph ownership must be recoverable from parsed sessions alone.
 	byParentAndID := make(map[string]*model.Session, len(sessions))
+	ambiguousParentAndID := make(map[string]bool)
+	byAgentAndID := make(map[string][]*model.Session, len(sessions))
+	parsed := make(map[*model.Session]bool, len(sessions))
 	for _, session := range sessions {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if session != nil && session.ParentID != "" && session.ID != "" {
+		if session == nil {
+			continue
+		}
+		parsed[session] = true
+		if session.ID != "" {
+			key := string(session.Agent) + "\x00" + session.ID
+			byAgentAndID[key] = append(byAgentAndID[key], session)
+		}
+		if session.ParentID != "" && session.ID != "" {
 			key := string(session.Agent) + "\x00" + session.ParentID + "\x00" + session.ID
-			byParentAndID[key] = session
+			if !ambiguousParentAndID[key] {
+				if existing := byParentAndID[key]; existing != nil && existing != session {
+					delete(byParentAndID, key)
+					ambiguousParentAndID[key] = true
+				} else {
+					byParentAndID[key] = session
+				}
+			}
 		}
 	}
 	linkedChildren := make(map[*model.Session]bool)
+	parentOf := make(map[*model.Session]*model.Session)
+	canLink := func(parent, child *model.Session) bool {
+		if parent == nil || child == nil || parent == child {
+			return false
+		}
+		if !parsed[child] {
+			return true
+		}
+		if owner := parentOf[child]; owner != nil && owner != parent {
+			return false
+		}
+		for current := parent; current != nil; current = parentOf[current] {
+			if current == child {
+				return false
+			}
+		}
+		if parentOf[child] == nil {
+			parentOf[child] = parent
+			linkedChildren[child] = true
+		}
+		return true
+	}
 	var link func(*model.Session, map[*model.Session]bool) error
 	link = func(session *model.Session, visiting map[*model.Session]bool) error {
 		if err := ctx.Err(); err != nil {
@@ -316,12 +358,14 @@ func linkSessionGraphsContext(ctx context.Context, sessions []*model.Session) (m
 		}
 		visiting[session] = true
 		defer delete(visiting, session)
-		for index, child := range session.Subagents {
+		for index := 0; index < len(session.Subagents); {
+			child := session.Subagents[index]
 			key := string(session.Agent) + "\x00" + session.ID + "\x00" + child.ID
 			if actual := byParentAndID[key]; actual != nil && actual != session {
-				session.Subagents[index] = actual
-				child = actual
-				linkedChildren[actual] = true
+				if canLink(session, actual) {
+					session.Subagents[index] = actual
+					child = actual
+				}
 			} else if child.Path != "" && !strings.Contains(child.Path, "#") {
 				info, err := os.Lstat(child.Path)
 				if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
@@ -333,12 +377,24 @@ func linkSessionGraphsContext(ctx context.Context, sessions []*model.Session) (m
 					child.Path = basePath + "#" + name
 				}
 			}
+			if parsed[child] {
+				if owner := parentOf[child]; owner == nil {
+					if !canLink(session, child) {
+						session.Subagents = append(session.Subagents[:index], session.Subagents[index+1:]...)
+						continue
+					}
+				} else if owner != session {
+					session.Subagents = append(session.Subagents[:index], session.Subagents[index+1:]...)
+					continue
+				}
+			}
 			if err := link(child, visiting); err != nil {
 				return err
 			}
 			if child.UpdatedAt.After(session.UpdatedAt) {
 				session.UpdatedAt = child.UpdatedAt
 			}
+			index++
 		}
 		return nil
 	}
@@ -348,6 +404,44 @@ func linkSessionGraphsContext(ctx context.Context, sessions []*model.Session) (m
 		}
 		if err := link(session, make(map[*model.Session]bool)); err != nil {
 			return nil, err
+		}
+	}
+	childDriven := make([]*model.Session, 0, len(sessions))
+	for _, child := range sessions {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		key := ""
+		if child != nil && child.ParentID != "" && child.ID != "" {
+			key = string(child.Agent) + "\x00" + child.ParentID + "\x00" + child.ID
+		}
+		if key != "" && !ambiguousParentAndID[key] {
+			childDriven = append(childDriven, child)
+		}
+	}
+	sort.SliceStable(childDriven, func(i, j int) bool {
+		if !childDriven[i].StartedAt.Equal(childDriven[j].StartedAt) {
+			return childDriven[i].StartedAt.Before(childDriven[j].StartedAt)
+		}
+		return childDriven[i].ID < childDriven[j].ID
+	})
+	for _, child := range childDriven {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		parents := byAgentAndID[string(child.Agent)+"\x00"+child.ParentID]
+		if len(parents) != 1 || parentOf[child] != nil {
+			continue
+		}
+		parent := parents[0]
+		if !canLink(parent, child) {
+			continue
+		}
+		parent.Subagents = append(parent.Subagents, child)
+		for current := parent; current != nil; current = parentOf[current] {
+			if child.UpdatedAt.After(current.UpdatedAt) {
+				current.UpdatedAt = child.UpdatedAt
+			}
 		}
 	}
 	if err := ctx.Err(); err != nil {

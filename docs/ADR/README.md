@@ -37,3 +37,4 @@ trade-offs and alternatives that led to each choice.
 | 2026-07-26 | [Always-present raw item records](./20260726-always-present-raw-item-records.md) | Load raw records on item open and present valid JSON as terminal-safe indented lines |
 | 2026-08-05 | [Machine-readable CLI](./20260805-machine-readable-cli.md) | Add versioned list, show, and deterministic search commands with stable refs |
 | 2026-08-15 | [Summary cache repricing](./20260815-summary-cache-repricing.md) | Cache billed usage without prices and apply current pricing on every cache hit |
+| 2026-08-15 | [Codex sidecar linking](./20260815-codex-sidecar-linking.md) | Link Codex sidecars from child parent IDs and decode wrapped message items |

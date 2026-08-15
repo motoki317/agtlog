@@ -25,6 +25,14 @@ type codexTextBlock struct {
 	Text string `json:"text"`
 }
 
+type codexItemRecord struct {
+	Type          string          `json:"type"`
+	Kind          string          `json:"kind"`
+	AgentPath     string          `json:"agent_path"`
+	AgentThreadID string          `json:"agent_thread_id"`
+	Content       json.RawMessage `json:"content"`
+}
+
 func (p Parser) loadEvents(ctx context.Context, session *model.Session, recursive bool) error {
 	clearCodexEvents(session)
 	return p.loadEventsRecursive(ctx, session, 0, make(map[string]bool), recursive)
@@ -85,7 +93,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				Type         string           `json:"type"`
 				Role         string           `json:"role"`
 				Model        string           `json:"model"`
-				Message      string           `json:"message"`
+				Message      json.RawMessage  `json:"message"`
 				CallID       string           `json:"call_id"`
 				Name         string           `json:"name"`
 				Arguments    string           `json:"arguments"`
@@ -96,6 +104,7 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				Kind         string           `json:"kind"`
 				ThreadSource string           `json:"thread_source"`
 				Content      []codexTextBlock `json:"content"`
+				Item         codexItemRecord  `json:"item"`
 				// Codex reuses "summary" across payload variants with different
 				// shapes: an array of blocks under reasoning, a bare string under
 				// turn_context. Decoding it lazily keeps a turn_context line from
@@ -142,18 +151,36 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 		if record.Type == "event_msg" {
 			switch record.Payload.Type {
 			case "user_message":
-				event.Kind, event.Text = model.EventUser, codexTimelineUserMessage(record.Payload.Message)
+				event.Kind, event.Text = model.EventUser, codexTimelineUserMessage(codexMessageText(record.Payload.Message))
 				if event.Text == "" {
 					return
 				}
 			case "agent_message":
-				event.Kind, event.Text = model.EventAssistantText, record.Payload.Message
+				event.Kind, event.Text = model.EventAssistantText, codexMessageText(record.Payload.Message)
 				if event.Text == "" {
 					return
 				}
 			case "sub_agent_activity":
 				appendCodexSubagentEvent(session, record.Payload.AgentPath, record.Payload.AgentID, record.Payload.Kind, timestamp, recordRef)
 				return
+			case "item_completed":
+				switch record.Payload.Item.Type {
+				case "UserMessage":
+					event.Kind, event.Text = model.EventUser, codexTimelineUserMessage(joinCodexText(codexTextBlocks(record.Payload.Item.Content)))
+					if event.Text == "" {
+						return
+					}
+				case "AgentMessage":
+					event.Kind, event.Text = model.EventAssistantText, joinCodexText(codexTextBlocks(record.Payload.Item.Content))
+					if event.Text == "" {
+						return
+					}
+				case "SubAgentActivity":
+					appendCodexSubagentEvent(session, record.Payload.Item.AgentPath, record.Payload.Item.AgentThreadID, record.Payload.Item.Kind, timestamp, recordRef)
+					return
+				default:
+					return
+				}
 			case "context_compacted":
 				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: "context compacted", RecordRef: recordRef, Model: currentModel})
 				return
@@ -508,6 +535,14 @@ func codexTextBlocks(raw json.RawMessage) []codexTextBlock {
 		return nil
 	}
 	return blocks
+}
+
+func codexMessageText(raw json.RawMessage) string {
+	var text string
+	if jsonl.Unmarshal(raw, &text) != nil {
+		return ""
+	}
+	return text
 }
 
 func joinCodexText(blocks []codexTextBlock) string {

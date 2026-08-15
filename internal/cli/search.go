@@ -85,8 +85,7 @@ func runSearch(ctx context.Context, args []string, help io.Writer, factory Regis
 	if err != nil {
 		return nil, "", runtimeError("internal", err.Error())
 	}
-	roots, commandDiags := addressableRoots(roots, commandDiagnostics(diagnostics))
-	allNodes := indexSessionGraphs(roots)
+	roots, allNodes, commandDiags := addressableGraph(roots, commandDiagnostics(diagnostics))
 	nodesBySession := make(map[*model.Session]graphNode, len(allNodes))
 	for _, node := range allNodes {
 		nodesBySession[node.session] = node
@@ -242,9 +241,11 @@ func subtreeNodes(start graphNode, nodesBySession map[*model.Session]graphNode) 
 	result := make([]graphNode, 0)
 	var appendSession func(*model.Session)
 	appendSession = func(session *model.Session) {
-		if node, exists := nodesBySession[session]; exists {
-			result = append(result, node)
+		node, exists := nodesBySession[session]
+		if !exists {
+			return
 		}
+		result = append(result, node)
 		for _, child := range session.Subagents {
 			appendSession(child)
 		}

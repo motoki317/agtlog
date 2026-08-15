@@ -138,6 +138,120 @@ func TestCanonicalRefSurvivesInlineChildThreadUpgrade(t *testing.T) {
 	}
 }
 
+func TestRepeatedAgentPathChildrenKeepDistinctRefs(t *testing.T) {
+	first := &model.Session{
+		ID:        "thread-orbit-first",
+		Agent:     model.AgentCodex,
+		Title:     "First orbit review",
+		AgentPath: "/root/orbit_review",
+		Path:      "/fictional/orbit/first.jsonl",
+	}
+	second := &model.Session{
+		ID:        "thread-orbit-second",
+		Agent:     model.AgentCodex,
+		Title:     "Second orbit review",
+		AgentPath: "/root/orbit_review",
+		Path:      "/fictional/orbit/second.jsonl",
+	}
+	root := &model.Session{
+		ID:        "thread-orbit-root",
+		Agent:     model.AgentCodex,
+		Project:   "moon-lab",
+		CWD:       "/workspace/moon-lab",
+		Path:      "/fictional/orbit/root.jsonl",
+		Subagents: []*model.Session{first, second},
+	}
+	registry := &fakeRegistry{sessions: []*model.Session{root}}
+
+	var listOutput bytes.Buffer
+	if err := Execute(context.Background(), []string{"list", "--agent", "codex", "--all"}, &listOutput, io.Discard, func(context.Context, Options) (Registry, error) {
+		return registry, nil
+	}); err != nil {
+		t.Fatalf("list error = %v", err)
+	}
+	var listResponse ListResponse
+	if err := json.Unmarshal(listOutput.Bytes(), &listResponse); err != nil {
+		t.Fatalf("list JSON error = %v", err)
+	}
+	if len(listResponse.Sessions) != 1 || listResponse.Sessions[0].Ref != "codex:thread-orbit-root" || len(listResponse.Warnings) != 0 {
+		t.Fatalf("list response = %#v, want one addressable root without warnings", listResponse)
+	}
+
+	nodes := indexSessionGraphs([]*model.Session{root})
+	if len(nodes) != 3 || nodes[1].ref != "codex:thread-orbit-root#orbit_review" || nodes[2].ref != "codex:thread-orbit-root#thread-orbit-second" {
+		t.Fatalf("indexed refs = %#v, want agent path then thread-id fallback", nodes)
+	}
+	for _, want := range []struct {
+		ref   string
+		title string
+	}{
+		{ref: nodes[1].ref, title: first.Title},
+		{ref: nodes[2].ref, title: second.Title},
+	} {
+		var output bytes.Buffer
+		if err := Execute(context.Background(), []string{"show", want.ref, "--no-events"}, &output, io.Discard, func(context.Context, Options) (Registry, error) {
+			return registry, nil
+		}); err != nil {
+			t.Fatalf("show %q error = %v", want.ref, err)
+		}
+		var response ShowResponse
+		if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+			t.Fatalf("show %q JSON error = %v", want.ref, err)
+		}
+		if response.Session.Ref != want.ref || response.Session.Title != want.title {
+			t.Fatalf("show %q response = %#v, want title %q", want.ref, response.Session, want.title)
+		}
+	}
+}
+
+func TestChildRefCollisionDoesNotHideRoot(t *testing.T) {
+	children := []*model.Session{
+		{ID: "thread-duplicate", Agent: model.AgentCodex, AgentPath: "/root/orbit_review", Path: "/fictional/orbit/root.jsonl#first"},
+		{ID: "thread-duplicate", Agent: model.AgentCodex, AgentPath: "/root/orbit_review", Path: "/fictional/orbit/root.jsonl#second"},
+		{ID: "thread-duplicate", Agent: model.AgentCodex, AgentPath: "/root/orbit_review", Path: "/fictional/orbit/root.jsonl#third"},
+	}
+	root := &model.Session{ID: "thread-orbit-root", Agent: model.AgentCodex, Path: "/fictional/orbit/root.jsonl", Subagents: children}
+
+	roots, nodes, diagnostics := addressableGraph([]*model.Session{root}, nil)
+	if len(roots) != 1 || roots[0] != root || len(root.Subagents) != len(children) {
+		t.Fatalf("addressable graph = roots %#v, children %#v; want root and all children", roots, root.Subagents)
+	}
+	if len(nodes) != 2 || nodes[0].session != root || nodes[1].session != children[0] {
+		t.Fatalf("addressable nodes = %#v; want root and only the first child indexed", nodes)
+	}
+	if len(diagnostics) != 2 || diagnostics[0].path != children[1].Path || diagnostics[1].path != children[2].Path {
+		t.Fatalf("child collision diagnostics = %#v, want the two affected child paths", diagnostics)
+	}
+}
+
+func TestShowRetainsUnaddressableChildUsage(t *testing.T) {
+	children := []*model.Session{
+		{ID: "thread-duplicate", Agent: model.AgentCodex, AgentPath: "/root/orbit_review", Path: "/fictional/orbit/root.jsonl#first", Usage: []model.Usage{{InputTokens: 2}}},
+		{ID: "thread-duplicate", Agent: model.AgentCodex, AgentPath: "/root/orbit_review", Path: "/fictional/orbit/root.jsonl#second", Usage: []model.Usage{{InputTokens: 3}}},
+		{ID: "thread-duplicate", Agent: model.AgentCodex, AgentPath: "/root/orbit_review", Path: "/fictional/orbit/root.jsonl#third", Usage: []model.Usage{{InputTokens: 4}}},
+	}
+	root := &model.Session{
+		ID: "thread-orbit-root", Agent: model.AgentCodex, Path: "/fictional/orbit/root.jsonl", Usage: []model.Usage{{InputTokens: 1}}, Subagents: children,
+	}
+	registry := &fakeRegistry{sessions: []*model.Session{root}}
+	var output bytes.Buffer
+	if err := Execute(context.Background(), []string{"show", "codex:thread-orbit-root", "--no-events"}, &output, io.Discard, func(context.Context, Options) (Registry, error) {
+		return registry, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var response ShowResponse
+	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Session.Subagents != 3 || !reflect.DeepEqual(response.SubagentRefs, []string{"codex:thread-orbit-root#orbit_review"}) {
+		t.Fatalf("show response = %#v; want all children counted and only the addressable ref listed", response)
+	}
+	if response.Totals.Tokens.Total.Total != 10 {
+		t.Fatalf("show totals = %#v; want usage from all three children", response.Totals)
+	}
+}
+
 func TestShowListsAndResolvesNestedWorkflowRef(t *testing.T) {
 	parser := claude.NewParser(cost.NewCalculator(cost.Table{}))
 	fixture := filepath.Join("..", "source", "claude", "testdata", "workflow", "subagents", "session-workflow.jsonl")

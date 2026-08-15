@@ -28,29 +28,51 @@ func indexSessionGraphs(roots []*model.Session) []graphNode {
 }
 
 func addressableRoots(roots []*model.Session, diagnostics []commandDiagnostic) ([]*model.Session, []commandDiagnostic) {
+	valid, _, diagnostics := addressableGraph(roots, diagnostics)
+	return valid, diagnostics
+}
+
+func addressableGraph(roots []*model.Session, diagnostics []commandDiagnostic) ([]*model.Session, []graphNode, []commandDiagnostic) {
 	invalid := make(map[*model.Session]string)
 	for _, root := range roots {
 		if root.ID == "" {
 			invalid[root] = "session has no stable id"
 		}
 	}
+	nodes := indexSessionGraphs(roots)
 	byRef := make(map[string]graphNode)
-	for _, node := range indexSessionGraphs(roots) {
+	for _, node := range nodes {
 		if previous, exists := byRef[node.ref]; exists {
-			invalid[previous.root] = "session graph contains a duplicate canonical ref"
-			invalid[node.root] = "session graph contains a duplicate canonical ref"
+			invalid[previous.session] = "session graph contains a duplicate canonical ref"
+			invalid[node.session] = "session graph contains a duplicate canonical ref"
 			continue
 		}
 		byRef[node.ref] = node
 	}
-	valid := make([]*model.Session, 0, len(roots)-len(invalid))
-	for _, root := range roots {
-		message, rejected := invalid[root]
-		if !rejected {
-			valid = append(valid, root)
+	reported := make(map[*model.Session]bool, len(invalid))
+	for _, node := range nodes {
+		message, rejected := invalid[node.session]
+		if !rejected || reported[node.session] {
 			continue
 		}
-		diagnostics = append(diagnostics, commandDiagnostic{agent: root.Agent, path: root.Path, err: errors.New(message), code: "unaddressable_session"})
+		reported[node.session] = true
+		diagnostics = append(diagnostics, commandDiagnostic{agent: node.session.Agent, path: node.session.Path, err: errors.New(message), code: "unaddressable_session"})
+	}
+	valid := make([]*model.Session, 0, len(roots))
+	for _, root := range roots {
+		if _, rejected := invalid[root]; !rejected {
+			valid = append(valid, root)
+		}
+	}
+	addressable := make([]graphNode, 0, len(nodes))
+	for _, node := range nodes {
+		if _, rejected := invalid[node.root]; rejected {
+			continue
+		}
+		if _, rejected := invalid[node.session]; rejected {
+			continue
+		}
+		addressable = append(addressable, node)
 	}
 	slices.SortFunc(diagnostics, func(left, right commandDiagnostic) int {
 		if left.agent != right.agent {
@@ -58,12 +80,17 @@ func addressableRoots(roots []*model.Session, diagnostics []commandDiagnostic) (
 		}
 		return strings.Compare(left.path, right.path)
 	})
-	return valid, diagnostics
+	return valid, addressable, diagnostics
 }
 
 func appendChildNodes(nodes *[]graphNode, root, parent *model.Session, rootRef, parentPath string) {
+	usedPaths := make(map[string]bool, len(parent.Subagents))
 	for _, child := range parent.Subagents {
 		path := canonicalChildPath(child, parentPath)
+		if usedPaths[path] {
+			path = canonicalChildIDPath(child, parentPath)
+		}
+		usedPaths[path] = true
 		*nodes = append(*nodes, graphNode{root: root, session: child, ref: rootRef + "#" + path, path: path})
 		appendChildNodes(nodes, root, child, rootRef, path)
 	}
@@ -77,9 +104,17 @@ func canonicalChildPath(child *model.Session, parentPath string) string {
 			return escapeRefPath(path)
 		}
 	}
+	return canonicalChildPathFallback(child, parentPath)
+}
+
+func canonicalChildPathFallback(child *model.Session, parentPath string) string {
 	if _, suffix, ok := strings.Cut(child.Path, "#"); ok && suffix != "" {
 		return escapeRefPath(strings.Trim(suffix, "/"))
 	}
+	return canonicalChildIDPath(child, parentPath)
+}
+
+func canonicalChildIDPath(child *model.Session, parentPath string) string {
 	segment := child.ID
 	if segment == "" {
 		segment = strings.TrimSuffix(strings.TrimPrefix(filepath.Base(child.Path), "agent-"), filepath.Ext(child.Path))

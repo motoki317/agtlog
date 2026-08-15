@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -25,7 +26,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v23"
+	return "codex-parser-v24"
 }
 
 type tokenUsage struct {
@@ -46,17 +47,19 @@ type logRecord struct {
 	Timestamp string `json:"timestamp"`
 	Type      string `json:"type"`
 	Payload   struct {
-		Type           string `json:"type"`
-		Model          string `json:"model"`
-		ID             string `json:"id"`
-		SessionID      string `json:"session_id"`
-		CWD            string `json:"cwd"`
-		AgentPath      string `json:"agent_path"`
-		AgentThreadID  string `json:"agent_thread_id"`
-		ParentThreadID string `json:"parent_thread_id"`
-		ForkedFromID   string `json:"forked_from_id"`
-		Kind           string `json:"kind"`
-		ThreadSource   string `json:"thread_source"`
+		Type           string          `json:"type"`
+		Message        json.RawMessage `json:"message"`
+		Model          string          `json:"model"`
+		ID             string          `json:"id"`
+		SessionID      string          `json:"session_id"`
+		CWD            string          `json:"cwd"`
+		AgentPath      string          `json:"agent_path"`
+		AgentThreadID  string          `json:"agent_thread_id"`
+		ParentThreadID string          `json:"parent_thread_id"`
+		Item           codexItemRecord `json:"item"`
+		ForkedFromID   string          `json:"forked_from_id"`
+		Kind           string          `json:"kind"`
+		ThreadSource   string          `json:"thread_source"`
 		Git            struct {
 			Branch string `json:"branch"`
 		} `json:"git"`
@@ -64,12 +67,6 @@ type logRecord struct {
 			Total *tokenUsage `json:"total_token_usage"`
 			Last  *tokenUsage `json:"last_token_usage"`
 		} `json:"info"`
-	} `json:"payload"`
-}
-
-type userMessageRecord struct {
-	Payload struct {
-		Message string `json:"message"`
 	} `json:"payload"`
 }
 
@@ -161,7 +158,7 @@ func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, 
 			}
 		}
 		if envelope.Type != "session_meta" && envelope.Type != "turn_context" &&
-			!(envelope.Type == "event_msg" && (envelope.Payload.Type == "user_message" || envelope.Payload.Type == "agent_message" || envelope.Payload.Type == "sub_agent_activity" || envelope.Payload.Type == "token_count")) {
+			!(envelope.Type == "event_msg" && (envelope.Payload.Type == "user_message" || envelope.Payload.Type == "agent_message" || envelope.Payload.Type == "sub_agent_activity" || envelope.Payload.Type == "item_completed" || envelope.Payload.Type == "token_count")) {
 			return
 		}
 		var record logRecord
@@ -197,18 +194,26 @@ func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, 
 		// timeline shows. Ceiling: a subagent-heavy run undercounts, since work
 		// delegated to subagents surfaces in the timeline through the deduplicated
 		// bridge, not as event_msg turns here; the recursive size lives in TOKENS.
+		itemType := record.Payload.Type
+		if itemType == "item_completed" {
+			itemType = record.Payload.Item.Type
+		}
 		if record.Type == "event_msg" && !inReplayPrefix &&
-			(record.Payload.Type == "user_message" || record.Payload.Type == "agent_message") {
-			if session.Title == "" && record.Payload.Type == "user_message" {
-				var user userMessageRecord
-				if jsonl.Unmarshal(line, &user) == nil {
-					session.Title = titleFromUserMessage(user.Payload.Message)
+			(itemType == "user_message" || itemType == "agent_message" || itemType == "UserMessage" || itemType == "AgentMessage") {
+			if session.Title == "" && (itemType == "user_message" || itemType == "UserMessage") {
+				itemMessage := codexMessageText(record.Payload.Message)
+				if record.Payload.Type == "item_completed" {
+					itemMessage = joinCodexText(codexTextBlocks(record.Payload.Item.Content))
 				}
+				session.Title = titleFromUserMessage(itemMessage)
 			}
 			session.Messages++
 		}
 		if record.Type == "event_msg" && !inReplayPrefix && record.Payload.Type == "sub_agent_activity" && record.Payload.Kind == "started" {
 			addSubagent(session, path, record.Payload.AgentPath, record.Payload.AgentThreadID, session.UpdatedAt)
+		}
+		if record.Type == "event_msg" && !inReplayPrefix && record.Payload.Type == "item_completed" && record.Payload.Item.Type == "SubAgentActivity" && record.Payload.Item.Kind == "started" {
+			addSubagent(session, path, record.Payload.Item.AgentPath, record.Payload.Item.AgentThreadID, session.UpdatedAt)
 		}
 		if validTotal {
 			copy := *record.Payload.Info.Total

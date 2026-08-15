@@ -51,8 +51,8 @@ func parseTieredSession(t *testing.T, events ...string) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); got != "codex-parser-v23" {
-		t.Fatalf("CacheFingerprint() = %q, want parse-only v23 fingerprint", got)
+	if got := testParser().CacheFingerprint(); got != "codex-parser-v24" {
+		t.Fatalf("CacheFingerprint() = %q, want parse-only v24 fingerprint", got)
 	}
 }
 
@@ -849,6 +849,47 @@ func TestParseKeepsFirstSubagentMetadata(t *testing.T) {
 	}
 	if got := session.TotalUsage().TotalTokens(); got != 128 {
 		t.Fatalf("Parse() usage = %d tokens, want 128", got)
+	}
+}
+
+func TestParseWrappedEnvelopeMessagesAndSubagents(t *testing.T) {
+	session, err := testParser().Parse(filepath.Join("testdata", "rollout-wrapped-envelope.jsonl"))
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if session.Messages != 2 || session.Title != "Chart the fictional moon." {
+		t.Fatalf("Parse() messages/title = %d/%q, want 2/%q", session.Messages, session.Title, "Chart the fictional moon.")
+	}
+	if len(session.Subagents) != 1 {
+		t.Fatalf("Parse() subagents = %#v, want one reviewer", session.Subagents)
+	}
+	reviewer := session.Subagents[0]
+	if reviewer.ID != "thread-wrap-child" || reviewer.Title != "reviewer_a" || len(reviewer.Subagents) != 1 || reviewer.Subagents[0].ID != "thread-wrap-grandchild" {
+		t.Fatalf("Parse() subagent tree = %#v, want reviewer_a with mapper child", session.Subagents)
+	}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 3 || session.Events[0].Kind != model.EventUser || session.Events[0].Text != "Chart the fictional moon." || session.Events[1].Kind != model.EventAssistantText || session.Events[1].Text != "The fictional moon is charted." || session.Events[2].Kind != model.EventSubagent || session.Events[2].Subagent != reviewer {
+		t.Fatalf("LoadEvents() root events = %#v, want wrapped messages and reviewer marker", session.Events)
+	}
+	if len(reviewer.Events) != 1 || reviewer.Events[0].Kind != model.EventSubagent || reviewer.Events[0].Subagent != reviewer.Subagents[0] {
+		t.Fatalf("LoadEvents() reviewer events = %#v, want mapper marker", reviewer.Events)
+	}
+
+	child, err := testParser().Parse(filepath.Join("testdata", "rollout-wrapped-child.jsonl"))
+	if err != nil {
+		t.Fatalf("Parse(child) error = %v", err)
+	}
+	if child.ParentID != session.ID || len(child.Subagents) != 0 {
+		t.Fatalf("Parse(child) identity/tree = parent %q, subagents %#v, want parent %q and no subagents", child.ParentID, child.Subagents, session.ID)
+	}
+	if err := testParser().LoadEvents(context.Background(), child); err != nil {
+		t.Fatalf("LoadEvents(child) error = %v", err)
+	}
+	if len(child.Events) != 0 {
+		t.Fatalf("LoadEvents(child) events = %#v, want no bogus self-parent marker", child.Events)
 	}
 }
 
