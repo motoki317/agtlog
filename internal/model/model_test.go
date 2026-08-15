@@ -250,7 +250,7 @@ func TestSessionOwnedUsageSubtractsDuplicatesAcrossSubagents(t *testing.T) {
 	}
 }
 
-func TestSessionJSONCachesRequestsButNotOwnership(t *testing.T) {
+func TestSessionJSONCachesPricingInputsButNotPricedValues(t *testing.T) {
 	session := Session{
 		Requests: []RequestUsage{{
 			MessageID: "message-fiction",
@@ -258,6 +258,11 @@ func TestSessionJSONCachesRequestsButNotOwnership(t *testing.T) {
 			Usage:     Usage{Model: "claude-fable-5", InputTokens: 10},
 			USD:       0.25,
 		}},
+		ModelCosts: map[string]float64{"claude-fable-5": 0.25},
+		ModelCostBreakdowns: map[string]CostBreakdown{
+			"claude-fable-5": {Input: CostBuckets{{RatePerToken: 0.025, Tokens: 10}}},
+		},
+		Cost:              Cost{USD: 0.25},
 		DuplicatedUSD:     0.25,
 		DuplicatedUsage:   Usage{InputTokens: 10},
 		DuplicatedCount:   1,
@@ -278,12 +283,51 @@ func TestSessionJSONCachesRequestsButNotOwnership(t *testing.T) {
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(decoded.Requests, session.Requests) {
-		t.Fatalf("cached Requests = %#v, want %#v", decoded.Requests, session.Requests)
+	wantRequests := append([]RequestUsage(nil), session.Requests...)
+	wantRequests[0].USD = 0
+	if !reflect.DeepEqual(decoded.Requests, wantRequests) {
+		t.Fatalf("cached Requests = %#v, want ledger without priced USD %#v", decoded.Requests, wantRequests)
 	}
-	if decoded.DuplicatedUSD != 0 || decoded.DuplicatedUsage.TotalTokens() != 0 ||
+	if !reflect.DeepEqual(decoded.Cost, Cost{}) || decoded.ModelCosts != nil || decoded.ModelCostBreakdowns != nil ||
+		decoded.DuplicatedUSD != 0 || decoded.DuplicatedUsage.TotalTokens() != 0 ||
 		decoded.DuplicatedCount != 0 || decoded.DuplicatedByModel != nil || decoded.DuplicatedOwners != nil {
-		t.Fatalf("cached ownership fields = %#v, want zero runtime attribution", decoded)
+		t.Fatalf("cached runtime fields = %#v, want zero pricing and ownership", decoded)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"ModelCosts", "ModelCostBreakdowns", "Cost"} {
+		if _, exists := fields[name]; exists {
+			t.Fatalf("cached session contains priced field %q", name)
+		}
+	}
+	var requestFields []map[string]json.RawMessage
+	if err := json.Unmarshal(fields["Requests"], &requestFields); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := requestFields[0]["USD"]; exists {
+		t.Fatal("cached request contains priced field USD")
+	}
+}
+
+func TestSessionJSONKeepsEventPricing(t *testing.T) {
+	session := Session{Events: []Event{{
+		Cost:          CostBreakdown{Input: CostBuckets{{RatePerToken: 2, Tokens: 3}}},
+		Priced:        true,
+		CostEstimated: true,
+	}}}
+
+	encoded, err := json.Marshal(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded Session
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(decoded.Events, session.Events) {
+		t.Fatalf("cached Events = %#v, want pricing preserved %#v", decoded.Events, session.Events)
 	}
 }
 

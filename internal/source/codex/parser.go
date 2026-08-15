@@ -25,7 +25,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v22:" + p.defaultPricingModel + ":" + p.calculator.Fingerprint()
+	return "codex-parser-v23"
 }
 
 type tokenUsage struct {
@@ -293,41 +293,14 @@ func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, 
 		}
 		session.Usage = append(session.Usage, codexUsage(usageModel, *usageByModel[usageModel]))
 	}
-	missingPricing := make(map[string]bool)
-	estimatedRates := make(map[model.EstimatedRate]bool)
 	for _, record := range pricingRecords {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		usage := codexUsage(record.model, record.usage)
-		calculated := p.calculator.CalculateCodex(usage, p.defaultPricingModel)
-		session.Requests = append(session.Requests, model.RequestUsage{Offset: record.offset, Usage: usage, USD: calculated.USD})
-		if session.ModelCosts == nil {
-			session.ModelCosts = make(map[string]float64)
-		}
-		session.ModelCosts[usage.Model] += calculated.USD
-		if p.calculator.HasCodexPricing(usage, p.defaultPricingModel) {
-			if session.ModelCostBreakdowns == nil {
-				session.ModelCostBreakdowns = make(map[string]model.CostBreakdown)
-			}
-			current := session.ModelCostBreakdowns[usage.Model]
-			session.ModelCostBreakdowns[usage.Model] = current.Add(p.calculator.BreakdownCodex(usage, p.defaultPricingModel))
-		}
-		session.Cost.USD += calculated.USD
-		session.Cost.Estimated = session.Cost.Estimated || calculated.Estimated
-		for _, rate := range calculated.EstimatedRates {
-			if !estimatedRates[rate] {
-				session.Cost.EstimatedRates = append(session.Cost.EstimatedRates, rate)
-				estimatedRates[rate] = true
-			}
-		}
-		for _, name := range calculated.MissingPricingModels {
-			if !missingPricing[name] {
-				session.Cost.MissingPricingModels = append(session.Cost.MissingPricingModels, name)
-				missingPricing[name] = true
-			}
-		}
+		session.Requests = append(session.Requests, model.RequestUsage{Offset: record.offset, Usage: usage})
 	}
+	p.calculator.ApplySessionCodex(session, p.defaultPricingModel)
 	if session.AgentPath != "" {
 		session.Title = model.CleanTitle(filepath.Base(session.AgentPath))
 	}

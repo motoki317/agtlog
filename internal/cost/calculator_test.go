@@ -196,6 +196,147 @@ func TestCalculatorReportsRateAvailabilitySeparatelyFromRecordedCost(t *testing.
 	}
 }
 
+func TestApplySessionRebuildsPricingPostOrder(t *testing.T) {
+	calculator := NewCalculator(Table{
+		"model-root":  {Input: 2},
+		"model-child": {Input: 3},
+	})
+	childUsage := model.Usage{Model: "model-child", InputTokens: 4}
+	child := &model.Session{
+		Requests:   []model.RequestUsage{{Usage: childUsage, USD: 999}},
+		ModelCosts: map[string]float64{"stale": 999},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{
+			"stale": {Input: model.CostBuckets{{RatePerToken: 999, Tokens: 1}}},
+		},
+		Cost: model.Cost{USD: 999, Estimated: true, MissingPricingModels: []string{"stale"}},
+	}
+	group := &model.Session{
+		Group:      true,
+		Subagents:  []*model.Session{child},
+		ModelCosts: map[string]float64{"stale": 999},
+		Cost:       model.Cost{USD: 999},
+	}
+	rootUsage := model.Usage{Model: "model-root", InputTokens: 5}
+	root := &model.Session{
+		Requests:   []model.RequestUsage{{Usage: rootUsage, USD: 999}},
+		Subagents:  []*model.Session{group},
+		ModelCosts: map[string]float64{"stale": 999},
+		Cost:       model.Cost{USD: 999},
+	}
+
+	calculator.ApplySession(root)
+
+	if root.Cost.USD != 10 || root.Requests[0].USD != 10 ||
+		!reflect.DeepEqual(root.ModelCosts, map[string]float64{"model-root": 10}) {
+		t.Fatalf("root pricing = cost %#v, requests %#v, models %#v", root.Cost, root.Requests, root.ModelCosts)
+	}
+	if child.Cost.USD != 12 || child.Requests[0].USD != 12 ||
+		!reflect.DeepEqual(child.ModelCosts, map[string]float64{"model-child": 12}) {
+		t.Fatalf("child pricing = cost %#v, requests %#v, models %#v", child.Cost, child.Requests, child.ModelCosts)
+	}
+	if group.Cost.USD != 0 || !reflect.DeepEqual(group.ModelCosts, child.ModelCosts) {
+		t.Fatalf("group pricing = cost %#v, models %#v, want child rollup %#v", group.Cost, group.ModelCosts, child.ModelCosts)
+	}
+	if got := root.ModelCostBreakdowns["model-root"].Input; !reflect.DeepEqual(got, model.CostBuckets{{RatePerToken: 2, Tokens: 5}}) {
+		t.Fatalf("root breakdown = %#v, want rebuilt input bucket", got)
+	}
+	if got := child.ModelCostBreakdowns["model-child"].Input; !reflect.DeepEqual(got, model.CostBuckets{{RatePerToken: 3, Tokens: 4}}) {
+		t.Fatalf("child breakdown = %#v, want rebuilt input bucket", got)
+	}
+
+	want := pricingSnapshot(root)
+	calculator.ApplySession(root)
+	if got := pricingSnapshot(root); !reflect.DeepEqual(got, want) {
+		t.Fatalf("second ApplySession() = %#v, want idempotent %#v", got, want)
+	}
+}
+
+func TestApplySessionCodexPricesStoredRequestsIndividually(t *testing.T) {
+	above := 2.0
+	calculator := NewCalculator(Table{
+		"gpt-5.6": {Input: 1, InputAbove272K: &above},
+	})
+	request := model.RequestUsage{Usage: model.Usage{
+		Model: "gpt-5.6", InputTokens: 150_000, InputIncludesCacheRead: true,
+	}}
+	session := &model.Session{
+		Usage:    []model.Usage{{Model: "gpt-5.6", InputTokens: 300_000, InputIncludesCacheRead: true}},
+		Requests: []model.RequestUsage{request, request},
+	}
+
+	calculator.ApplySessionCodex(session, "gpt-5")
+
+	if session.Cost.USD != 300_000 || session.Requests[0].USD != 150_000 || session.Requests[1].USD != 150_000 {
+		t.Fatalf("ApplySessionCodex() costs = %#v, requests %#v, want two base-tier requests", session.Cost, session.Requests)
+	}
+	want := model.CostBuckets{{RatePerToken: 1, Tokens: 300_000}}
+	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ApplySessionCodex() input buckets = %#v, want %#v", got, want)
+	}
+}
+
+func TestApplySessionCodexRebuildsMetadataInRequestOrder(t *testing.T) {
+	calculator := NewCalculator(Table{"fallback": {Input: 1}})
+	requests := []model.RequestUsage{
+		{Usage: model.Usage{Model: "future-z", InputTokens: 1}},
+		{Usage: model.Usage{Model: "future-a", InputTokens: 2}},
+		{Usage: model.Usage{Model: "future-z", InputTokens: 3}},
+	}
+	session := &model.Session{
+		Requests: requests,
+		Cost: model.Cost{
+			USD:                  999,
+			Estimated:            true,
+			EstimatedRates:       []model.EstimatedRate{{Model: "stale", PricingModel: "stale"}},
+			MissingPricingModels: []string{"stale"},
+		},
+	}
+
+	calculator.ApplySessionCodex(session, "fallback")
+
+	wantRates := []model.EstimatedRate{
+		{Model: "future-z", PricingModel: "fallback"},
+		{Model: "future-a", PricingModel: "fallback"},
+	}
+	if session.Cost.USD != 6 || !session.Cost.Estimated ||
+		!reflect.DeepEqual(session.Cost.EstimatedRates, wantRates) || session.Cost.MissingPricingModels != nil {
+		t.Fatalf("mapped metadata = %#v, want request-ordered rates %#v", session.Cost, wantRates)
+	}
+
+	NewCalculator(nil).ApplySessionCodex(session, "missing-fallback")
+
+	wantMissing := []string{"future-z", "future-a"}
+	if session.Cost.USD != 0 || !session.Cost.Estimated || session.Cost.EstimatedRates != nil ||
+		!reflect.DeepEqual(session.Cost.MissingPricingModels, wantMissing) {
+		t.Fatalf("missing metadata = %#v, want request-ordered missing models %#v", session.Cost, wantMissing)
+	}
+}
+
+type sessionPricingSnapshot struct {
+	Cost                model.Cost
+	ModelCosts          map[string]float64
+	ModelCostBreakdowns map[string]model.CostBreakdown
+	RequestUSD          []float64
+	Subagents           []sessionPricingSnapshot
+}
+
+func pricingSnapshot(session *model.Session) sessionPricingSnapshot {
+	result := sessionPricingSnapshot{
+		Cost:                session.Cost,
+		ModelCosts:          session.ModelCosts,
+		ModelCostBreakdowns: session.ModelCostBreakdowns,
+		RequestUSD:          make([]float64, len(session.Requests)),
+		Subagents:           make([]sessionPricingSnapshot, len(session.Subagents)),
+	}
+	for index := range session.Requests {
+		result.RequestUSD[index] = session.Requests[index].USD
+	}
+	for index, subagent := range session.Subagents {
+		result.Subagents[index] = pricingSnapshot(subagent)
+	}
+	return result
+}
+
 func TestCalculateSubtractsCachedTokensFromInclusiveInput(t *testing.T) {
 	cacheRead := 0.1
 	calculator := NewCalculator(Table{"model-a": {Input: 1, CacheRead: &cacheRead}})

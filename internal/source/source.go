@@ -12,4 +12,5 @@ type Source interface {
 	CacheFingerprint() string
 	Discover(context.Context) ([]string, error)
 	ParseContext(context.Context, string) (*model.Session, error)
+	Reprice(*model.Session)
 }

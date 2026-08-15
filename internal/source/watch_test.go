@@ -45,6 +45,7 @@ func (s *cancelableFingerprintSource) Parse(string) (*model.Session, error) {
 func (s *cancelableFingerprintSource) ParseContext(context.Context, string) (*model.Session, error) {
 	return &model.Session{Agent: model.AgentClaude, Path: s.path}, nil
 }
+func (s *cancelableFingerprintSource) Reprice(*model.Session) {}
 func (s *cancelableFingerprintSource) Fingerprint(string) (string, error) {
 	s.startedOnce.Do(func() { close(s.started) })
 	<-s.release
@@ -94,6 +95,7 @@ func (s *cancelableSnapshotSource) ParseContext(ctx context.Context, _ string) (
 		return &model.Session{Agent: model.AgentCodex, Path: s.path}, nil
 	}
 }
+func (s *cancelableSnapshotSource) Reprice(*model.Session) {}
 
 func (s *cancelableRefreshSource) Agent() model.AgentKind { return model.AgentClaude }
 func (s *cancelableRefreshSource) Roots() []string        { return []string{s.root} }
@@ -117,6 +119,7 @@ func (s *cancelableRefreshSource) ParseContext(ctx context.Context, _ string) (*
 		return &model.Session{Agent: model.AgentClaude, Path: s.path}, nil
 	}
 }
+func (s *cancelableRefreshSource) Reprice(*model.Session) {}
 
 func TestWatcherEmitsDebouncedAppend(t *testing.T) {
 	root := t.TempDir()

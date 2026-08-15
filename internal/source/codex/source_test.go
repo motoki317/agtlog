@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/motoki317/agtlog/internal/cost"
 )
 
 // tempRoot returns a temporary directory with symlinks resolved so it matches
@@ -26,6 +28,27 @@ func TestSourceCacheFingerprintDelegatesToParser(t *testing.T) {
 	parser := testParser()
 	if got, want := NewSource(parser, nil).CacheFingerprint(), parser.CacheFingerprint(); got != want {
 		t.Fatalf("CacheFingerprint() = %q, want %q", got, want)
+	}
+}
+
+func TestSourceFingerprintExcludesPricingPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := NewSource(NewParser(cost.NewCalculator(cost.Table{"fallback-a": {Input: 1}}), "fallback-a"), nil)
+	second := NewSource(NewParser(cost.NewCalculator(cost.Table{"fallback-b": {Input: 2}}), "fallback-b"), nil)
+
+	firstFingerprint, err := first.Fingerprint(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondFingerprint, err := second.Fingerprint(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstFingerprint != secondFingerprint {
+		t.Fatalf("pricing policy changed source fingerprint from %q to %q", firstFingerprint, secondFingerprint)
 	}
 }
 

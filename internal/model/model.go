@@ -31,7 +31,7 @@ type RequestUsage struct {
 	// negative offset for an authoritative aggregate with no physical record.
 	Offset int64
 	Usage  Usage
-	USD    float64
+	USD    float64 `json:"-"`
 }
 
 func (u Usage) Add(other Usage) Usage {
@@ -298,14 +298,14 @@ type Session struct {
 	// Requests is the serialized billed ledger. Codex stores per-request entries
 	// for clean partitions and authoritative per-model aggregates otherwise.
 	Requests            []RequestUsage
-	ModelCosts          map[string]float64
-	ModelCostBreakdowns map[string]CostBreakdown
-	Cost                Cost
-	DuplicatedUSD       float64            `json:"-"`
-	DuplicatedUsage     Usage              `json:"-"`
-	DuplicatedCount     int                `json:"-"`
-	DuplicatedByModel   map[string]float64 `json:"-"`
-	DuplicatedOwners    []DuplicateOwner   `json:"-"`
+	ModelCosts          map[string]float64       `json:"-"`
+	ModelCostBreakdowns map[string]CostBreakdown `json:"-"`
+	Cost                Cost                     `json:"-"`
+	DuplicatedUSD       float64                  `json:"-"`
+	DuplicatedUsage     Usage                    `json:"-"`
+	DuplicatedCount     int                      `json:"-"`
+	DuplicatedByModel   map[string]float64       `json:"-"`
+	DuplicatedOwners    []DuplicateOwner         `json:"-"`
 	Events              []Event
 	Group               bool
 	Subagents           []*Session

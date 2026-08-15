@@ -81,6 +81,7 @@ func (s detailTestSource) Parse(string) (*model.Session, error) { return s.sessi
 func (s detailTestSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
 	return s.Parse(path)
 }
+func (s detailTestSource) Reprice(*model.Session) {}
 func (s detailTestSource) LoadEvents(ctx context.Context, session *model.Session) error {
 	if s.loadEvents != nil {
 		return s.loadEvents(ctx, session)

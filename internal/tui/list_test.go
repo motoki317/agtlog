@@ -586,6 +586,7 @@ func (s *refreshTestSource) Parse(string) (*model.Session, error) { return s.ses
 func (s *refreshTestSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
 	return s.Parse(path)
 }
+func (s *refreshTestSource) Reprice(*model.Session) {}
 
 func TestFilterNarrowsRowsByFuzzyTitle(t *testing.T) {
 	sessions := []*model.Session{

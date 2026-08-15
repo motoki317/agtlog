@@ -1,9 +1,6 @@
 package cost
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"strings"
 
 	"github.com/motoki317/agtlog/internal/model"
@@ -30,18 +27,94 @@ type Pricing struct {
 type Table map[string]Pricing
 
 type Calculator struct {
-	table       Table
-	fingerprint string
+	table Table
 }
 
 func NewCalculator(table Table) Calculator {
-	data, _ := json.Marshal(table)
-	digest := sha256.Sum256(data)
-	return Calculator{table: table, fingerprint: hex.EncodeToString(digest[:])}
+	return Calculator{table: table}
 }
 
-func (c Calculator) Fingerprint() string {
-	return c.fingerprint
+type sessionPricer struct {
+	calculate  func(model.Usage) model.Cost
+	breakdown  func(model.Usage) model.CostBreakdown
+	hasPricing func(model.Usage) bool
+}
+
+func (c Calculator) ApplySession(session *model.Session) {
+	applySession(session, sessionPricer{
+		calculate:  c.Calculate,
+		breakdown:  c.Breakdown,
+		hasPricing: c.HasPricing,
+	})
+}
+
+func (c Calculator) ApplySessionCodex(session *model.Session, defaultModel string) {
+	applySession(session, sessionPricer{
+		calculate: func(usage model.Usage) model.Cost {
+			return c.CalculateCodex(usage, defaultModel)
+		},
+		breakdown: func(usage model.Usage) model.CostBreakdown {
+			return c.BreakdownCodex(usage, defaultModel)
+		},
+		hasPricing: func(usage model.Usage) bool {
+			return c.HasCodexPricing(usage, defaultModel)
+		},
+	})
+}
+
+func applySession(session *model.Session, pricer sessionPricer) {
+	if session == nil {
+		return
+	}
+	for _, subagent := range session.Subagents {
+		applySession(subagent, pricer)
+	}
+
+	session.Cost = model.Cost{}
+	session.ModelCosts = nil
+	session.ModelCostBreakdowns = nil
+	missingPricing := make(map[string]bool)
+	estimatedRates := make(map[model.EstimatedRate]bool)
+	for index := range session.Requests {
+		request := &session.Requests[index]
+		calculated := pricer.calculate(request.Usage)
+		request.USD = calculated.USD
+		if session.ModelCosts == nil {
+			session.ModelCosts = make(map[string]float64)
+		}
+		session.ModelCosts[request.Usage.Model] += calculated.USD
+		if pricer.hasPricing(request.Usage) {
+			if session.ModelCostBreakdowns == nil {
+				session.ModelCostBreakdowns = make(map[string]model.CostBreakdown)
+			}
+			current := session.ModelCostBreakdowns[request.Usage.Model]
+			session.ModelCostBreakdowns[request.Usage.Model] = current.Add(pricer.breakdown(request.Usage))
+		}
+		session.Cost.USD += calculated.USD
+		session.Cost.Estimated = session.Cost.Estimated || calculated.Estimated
+		for _, rate := range calculated.EstimatedRates {
+			if !estimatedRates[rate] {
+				session.Cost.EstimatedRates = append(session.Cost.EstimatedRates, rate)
+				estimatedRates[rate] = true
+			}
+		}
+		for _, name := range calculated.MissingPricingModels {
+			if !missingPricing[name] {
+				session.Cost.MissingPricingModels = append(session.Cost.MissingPricingModels, name)
+				missingPricing[name] = true
+			}
+		}
+	}
+	if session.Group {
+		for _, subagent := range session.Subagents {
+			for name, childCost := range subagent.ModelCosts {
+				if session.ModelCosts == nil {
+					session.ModelCosts = make(map[string]float64)
+				}
+				session.ModelCosts[name] += childCost
+			}
+		}
+	}
 }
 
 func (c Calculator) CalculateCodex(usage model.Usage, defaultModel string) model.Cost {

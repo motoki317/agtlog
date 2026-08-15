@@ -60,8 +60,8 @@ files beneath Claude Code or Codex roots.
 
 Changes to `Session`, usage semantics, or recursive rollup affect every adapter and both views.
 Adapter tests must therefore cover their native log shape and model tests must cover recursive
-behavior. Cache fingerprints include parser and pricing inputs so a changed interpretation does not
-reuse an incompatible summary.
+behavior. Parser cache fingerprints cover parse inputs. Priced values stay outside summary caches,
+and the current calculator reapplies them on load.
 
 The read-only invariant limits future features. Editing transcripts, agent settings, or source-log
 metadata would require a separate product decision and cannot be added through the cache layer.

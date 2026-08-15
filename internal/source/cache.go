@@ -591,6 +591,7 @@ func (r *Registry) discoverSessionContext(ctx context.Context, adapter Source, p
 	fingerprint, err := sourceFingerprintContext(ctx, adapter, path)
 	if err == nil {
 		if session, diagnostics, ok := r.loadCachedContext(ctx, adapter, path, fingerprint); ok {
+			adapter.Reprice(session)
 			if err := ctx.Err(); err != nil {
 				return nil, nil, err
 			}

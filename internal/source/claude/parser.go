@@ -143,7 +143,7 @@ func NewParser(calculator cost.Calculator) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v17:" + p.calculator.Fingerprint()
+	return "claude-parser-v18"
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
@@ -167,6 +167,7 @@ func (p Parser) parseSummary(ctx context.Context, path string, report func(strin
 	session, err := p.parse(ctx, path, 0, make(map[string]bool), report, titlePrompts)
 	if err == nil && ctx.Err() == nil {
 		resolveSubagentTitleCollisions(session.Subagents, titlePrompts)
+		p.calculator.ApplySession(session)
 	}
 	if err == nil {
 		err = ctx.Err()
@@ -1249,12 +1250,6 @@ func attachSubagent(parent, subagent *model.Session) {
 				seenModels[name] = true
 			}
 		}
-		for name, childCost := range subagent.ModelCosts {
-			if parent.ModelCosts == nil {
-				parent.ModelCosts = make(map[string]float64)
-			}
-			parent.ModelCosts[name] += childCost
-		}
 	}
 	if parent.Group && !subagent.StartedAt.IsZero() && (parent.StartedAt.IsZero() || subagent.StartedAt.Before(parent.StartedAt)) {
 		parent.StartedAt = subagent.StartedAt
@@ -1398,7 +1393,6 @@ func (p Parser) parseFile(ctx context.Context, path string) (*model.Session, map
 		return nil, nil, "", err
 	}
 	seenModels := make(map[string]bool)
-	missingPricing := make(map[string]bool)
 	deduplicated, err := deduplicateContext(ctx, usageRecords)
 	if err != nil {
 		return nil, nil, "", err
@@ -1408,35 +1402,14 @@ func (p Parser) parseFile(ctx context.Context, path string) (*model.Session, map
 			return nil, nil, "", err
 		}
 		session.Usage = append(session.Usage, record.Usage)
-		calculated := p.calculator.Calculate(record.Usage)
 		session.Requests = append(session.Requests, model.RequestUsage{
 			MessageID: record.MessageID,
 			RequestID: record.RequestID,
 			Usage:     record.Usage,
-			USD:       calculated.USD,
 		})
 		if !seenModels[record.Usage.Model] {
 			session.Models = append(session.Models, record.Usage.Model)
 			seenModels[record.Usage.Model] = true
-		}
-		if session.ModelCosts == nil {
-			session.ModelCosts = make(map[string]float64)
-		}
-		session.ModelCosts[record.Usage.Model] += calculated.USD
-		if p.calculator.HasPricing(record.Usage) {
-			if session.ModelCostBreakdowns == nil {
-				session.ModelCostBreakdowns = make(map[string]model.CostBreakdown)
-			}
-			current := session.ModelCostBreakdowns[record.Usage.Model]
-			session.ModelCostBreakdowns[record.Usage.Model] = current.Add(p.calculator.Breakdown(record.Usage))
-		}
-		session.Cost.USD += calculated.USD
-		session.Cost.Estimated = session.Cost.Estimated || calculated.Estimated
-		for _, name := range calculated.MissingPricingModels {
-			if !missingPricing[name] {
-				session.Cost.MissingPricingModels = append(session.Cost.MissingPricingModels, name)
-				missingPricing[name] = true
-			}
 		}
 	}
 	session.Messages = messages

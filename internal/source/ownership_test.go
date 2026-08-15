@@ -27,6 +27,7 @@ func (s ownershipTestSource) Parse(path string) (*model.Session, error) { return
 func (s ownershipTestSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
 	return s.Parse(path)
 }
+func (s ownershipTestSource) Reprice(*model.Session) {}
 
 func TestAttributeOwnershipAssignsSharedRequestToEarliestSession(t *testing.T) {
 	started := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)

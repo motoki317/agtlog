@@ -148,8 +148,8 @@ func parseFlatSidecarBaseline(t *testing.T) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "claude-parser-v17:") {
-		t.Fatalf("CacheFingerprint() = %q, want v17 sidecar hierarchy", got)
+	if got := testParser().CacheFingerprint(); got != "claude-parser-v18" {
+		t.Fatalf("CacheFingerprint() = %q, want parse-only v18 fingerprint", got)
 	}
 }
 

@@ -257,6 +257,24 @@ type diagnosticSource struct {
 	errors   map[string]error
 }
 
+type parseCountingSource struct {
+	source.Source
+	parses int
+	paths  []string
+}
+
+func (s *parseCountingSource) Discover(ctx context.Context) ([]string, error) {
+	if s.paths == nil {
+		return s.Source.Discover(ctx)
+	}
+	return append([]string(nil), s.paths...), nil
+}
+
+func (s *parseCountingSource) ParseContext(ctx context.Context, path string) (*model.Session, error) {
+	s.parses++
+	return s.Source.ParseContext(ctx, path)
+}
+
 func (s diagnosticSource) Agent() model.AgentKind   { return model.AgentClaude }
 func (s diagnosticSource) CacheFingerprint() string { return "test-diagnostic-parser-v1" }
 func (s diagnosticSource) Roots() []string          { return nil }
@@ -280,6 +298,7 @@ func (s diagnosticSource) Parse(path string) (*model.Session, error) {
 func (s diagnosticSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
 	return s.Parse(path)
 }
+func (s diagnosticSource) Reprice(*model.Session) {}
 
 func TestRegistryLinksCodexSubagentSidecarUsage(t *testing.T) {
 	root := t.TempDir()
@@ -368,7 +387,7 @@ func TestRegistryInvalidatesClaudeCacheForSubagentChange(t *testing.T) {
 	}
 }
 
-func TestRegistryInvalidatesCacheWhenPricingChanges(t *testing.T) {
+func TestRegistryRepricesCachedSummaryWhenPricingChanges(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "session-main.jsonl")
 	line := `{"type":"assistant","timestamp":"2026-01-02T00:00:00Z","sessionId":"session-main","requestId":"request-a","message":{"id":"message-a","model":"claude-opus-4-8","usage":{"input_tokens":10}}}` + "\n"
@@ -376,23 +395,204 @@ func TestRegistryInvalidatesCacheWhenPricingChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	cacheDir := t.TempDir()
-	discoverCost := func(inputRate float64) float64 {
+	discoverCost := func(inputRate float64) (float64, int) {
 		calculator := cost.NewCalculator(cost.Table{"claude-opus-4-8": {Input: inputRate}})
-		adapter := claude.NewSource(claude.NewParser(calculator), []string{root})
+		concrete := claude.NewSource(claude.NewParser(calculator), []string{root})
+		adapter := &parseCountingSource{Source: concrete}
 		registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1, CacheDir: cacheDir})
 		sessions, err := registry.Discover(context.Background())
 		if err != nil {
 			t.Fatalf("Discover() error = %v", err)
 		}
-		return sessions[0].Cost.USD
+		return sessions[0].Cost.USD, adapter.parses
 	}
 
-	if got := discoverCost(1); got != 10 {
-		t.Fatalf("first cost = %v, want 10", got)
+	if got, parses := discoverCost(1); got != 10 || parses != 1 {
+		t.Fatalf("first discovery = cost %v, parses %d, want 10 and 1", got, parses)
 	}
-	if got := discoverCost(2); got != 20 {
-		t.Fatalf("cost after pricing change = %v, want 20", got)
+	if got, parses := discoverCost(2); got != 20 || parses != 0 {
+		t.Fatalf("priced cache hit = cost %v, parses %d, want 20 and 0", got, parses)
 	}
+}
+
+func TestRegistryCachedPricingMatchesColdNestedClaudeParse(t *testing.T) {
+	calculator := cost.NewCalculator(cost.Table{"claude-opus-4-8": {Input: 2, Output: 3}})
+	path := filepath.Join("claude", "testdata", "workflow", "subagents", "session-workflow.jsonl")
+	concrete := claude.NewSource(claude.NewParser(calculator), nil)
+	adapter := &parseCountingSource{Source: concrete, paths: []string{path}}
+	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1, CacheDir: t.TempDir()})
+
+	cold, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := sessionPricingViewOf(cold[0])
+	warm, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := sessionPricingViewOf(warm[0]); !reflect.DeepEqual(got, want) {
+		t.Fatalf("cached pricing = %#v, want cold parse %#v", got, want)
+	}
+	if adapter.parses != 1 || !hasNestedPricingGroup(warm[0]) {
+		t.Fatalf("round trip = %d parses, graph %#v, want one parse and nested subagents", adapter.parses, warm[0])
+	}
+}
+
+func TestRegistryCachedCodexPricingKeepsRequestTiers(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "rollout-tiered.jsonl")
+	lines := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"turn_context","payload":{"model":"gpt-5.6"}}`,
+		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
+		`{"timestamp":"2026-01-02T03:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":150000}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	above := 2.0
+	calculator := cost.NewCalculator(cost.Table{"gpt-5.6": {Input: 1, InputAbove272K: &above}})
+	concrete := codex.NewSource(codex.NewParser(calculator, "gpt-5"), []string{root})
+	adapter := &parseCountingSource{Source: concrete}
+	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1, CacheDir: t.TempDir()})
+
+	if _, err := registry.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := sessions[0]
+	if session.Cost.USD != 300_000 || len(session.Requests) != 2 ||
+		session.Requests[0].USD != 150_000 || session.Requests[1].USD != 150_000 {
+		t.Fatalf("cached Codex pricing = cost %#v, requests %#v, want separate base tiers", session.Cost, session.Requests)
+	}
+	if adapter.parses != 1 {
+		t.Fatalf("ParseContext() called %d times, want one cold parse", adapter.parses)
+	}
+}
+
+func TestRegistryRepricesCachedCodexSummaryWhenFallbackChanges(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "rollout-fallback.jsonl")
+	lines := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"turn_context","payload":{"model":"future-codex-model"}}`,
+		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := t.TempDir()
+	discover := func(defaultModel string, inputRate float64) (*model.Session, int) {
+		calculator := cost.NewCalculator(cost.Table{defaultModel: {Input: inputRate}})
+		concrete := codex.NewSource(codex.NewParser(calculator, defaultModel), []string{root})
+		adapter := &parseCountingSource{Source: concrete}
+		sessions, err := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1, CacheDir: cacheDir}).Discover(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sessions[0], adapter.parses
+	}
+
+	if session, parses := discover("fallback-a", 1); session.Cost.USD != 10 || parses != 1 {
+		t.Fatalf("first discovery = cost %#v, parses %d, want $10 and one parse", session.Cost, parses)
+	}
+	session, parses := discover("fallback-b", 3)
+	wantRates := []model.EstimatedRate{{Model: "future-codex-model", PricingModel: "fallback-b"}}
+	if session.Cost.USD != 30 || parses != 0 || !reflect.DeepEqual(session.Cost.EstimatedRates, wantRates) {
+		t.Fatalf("fallback cache hit = cost %#v, parses %d, want $30, zero parses, rates %#v", session.Cost, parses, wantRates)
+	}
+}
+
+func TestRegistryCachedOwnershipUsesRepricedRequests(t *testing.T) {
+	root := t.TempDir()
+	logs := map[string]string{
+		"session-origin.jsonl": `{"type":"assistant","timestamp":"2026-01-02T00:00:00Z","sessionId":"session-origin","requestId":"request-shared","message":{"id":"message-shared","model":"claude-opus-4-8","usage":{"input_tokens":10}}}` + "\n",
+		"session-replay.jsonl": `{"type":"assistant","timestamp":"2026-01-02T00:01:00Z","sessionId":"session-replay","requestId":"request-shared","message":{"id":"message-shared","model":"claude-opus-4-8","usage":{"input_tokens":10}}}` + "\n",
+	}
+	for name, data := range logs {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cacheDir := t.TempDir()
+	oldCalculator := cost.NewCalculator(cost.Table{"claude-opus-4-8": {Input: 1}})
+	oldSource := claude.NewSource(claude.NewParser(oldCalculator), []string{root})
+	oldAdapter := &parseCountingSource{Source: oldSource}
+	if _, err := source.NewRegistry([]source.Source{oldAdapter}, source.Options{Workers: 1, CacheDir: cacheDir}).Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	newCalculator := cost.NewCalculator(cost.Table{"claude-opus-4-8": {Input: 2}})
+	newSource := claude.NewSource(claude.NewParser(newCalculator), []string{root})
+	fresh, err := source.NewRegistry([]source.Source{newSource}, source.Options{Workers: 1}).Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachedAdapter := &parseCountingSource{Source: newSource}
+	cached, err := source.NewRegistry([]source.Source{cachedAdapter}, source.Options{Workers: 1, CacheDir: cacheDir}).Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cachedAdapter.parses != 0 {
+		t.Fatalf("cached pricing parsed %d files, want none", cachedAdapter.parses)
+	}
+	freshByID := sessionsByID(fresh)
+	for _, session := range cached {
+		want := freshByID[session.ID]
+		if want == nil || session.DuplicatedUSD != want.DuplicatedUSD || !reflect.DeepEqual(session.OwnedCost(), want.OwnedCost()) {
+			t.Fatalf("cached ownership for %q = duplicated %v, owned %#v; want %v and %#v", session.ID, session.DuplicatedUSD, session.OwnedCost(), want.DuplicatedUSD, want.OwnedCost())
+		}
+		if session.OwnedCost().USD < 0 {
+			t.Fatalf("cached owned cost for %q = %v, want nonnegative", session.ID, session.OwnedCost().USD)
+		}
+	}
+	if replay := sessionsByID(cached)["session-replay"]; replay.DuplicatedUSD != 20 || replay.OwnedCost().USD != 0 {
+		t.Fatalf("cached replay = %#v, want $20 fully duplicated", replay)
+	}
+}
+
+type sessionPricingView struct {
+	Cost                model.Cost
+	ModelCosts          map[string]float64
+	ModelCostBreakdowns map[string]model.CostBreakdown
+	RequestUSD          []float64
+	Subagents           []sessionPricingView
+}
+
+func sessionPricingViewOf(session *model.Session) sessionPricingView {
+	view := sessionPricingView{
+		Cost: session.Cost, ModelCosts: session.ModelCosts, ModelCostBreakdowns: session.ModelCostBreakdowns,
+		RequestUSD: make([]float64, len(session.Requests)), Subagents: make([]sessionPricingView, len(session.Subagents)),
+	}
+	for index := range session.Requests {
+		view.RequestUSD[index] = session.Requests[index].USD
+	}
+	for index, subagent := range session.Subagents {
+		view.Subagents[index] = sessionPricingViewOf(subagent)
+	}
+	return view
+}
+
+func sessionsByID(sessions []*model.Session) map[string]*model.Session {
+	result := make(map[string]*model.Session, len(sessions))
+	for _, session := range sessions {
+		result[session.ID] = session
+	}
+	return result
+}
+
+func hasNestedPricingGroup(session *model.Session) bool {
+	if session.Group && len(session.Subagents) > 0 && len(session.ModelCosts) > 0 {
+		return true
+	}
+	for _, subagent := range session.Subagents {
+		if hasNestedPricingGroup(subagent) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestRegistryLoadsDetailThroughBothAdapters(t *testing.T) {

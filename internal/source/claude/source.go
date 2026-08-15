@@ -112,6 +112,10 @@ func (s Source) ParseContext(ctx context.Context, path string) (*model.Session, 
 	return s.parser.ParseContext(ctx, path)
 }
 
+func (s Source) Reprice(session *model.Session) {
+	s.parser.calculator.ApplySession(session)
+}
+
 func (s Source) ParseWithDiagnostics(path string, report func(string, error)) (*model.Session, error) {
 	return s.parser.ParseWithDiagnostics(path, report)
 }

@@ -51,8 +51,8 @@ func parseTieredSession(t *testing.T, events ...string) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); !strings.HasPrefix(got, "codex-parser-v22:") {
-		t.Fatalf("CacheFingerprint() = %q, want v22 estimate metadata", got)
+	if got := testParser().CacheFingerprint(); got != "codex-parser-v23" {
+		t.Fatalf("CacheFingerprint() = %q, want parse-only v23 fingerprint", got)
 	}
 }
 

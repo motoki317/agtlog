@@ -33,9 +33,9 @@ start times use the lexicographically smallest session `ID`. Ownership never dep
 `UpdatedAt`, because a long-running origin can finish after its replay, or on file birth time,
 because birth time is not portable.
 
-The Claude parser retains a cached request ledger containing identity, usage, and priced USD. This
-duplicates token data already held in `Session.Usage`, but avoids changing gross readers in the same
-release. A pure two-pass attribution function clears runtime duplicate fields, selects owners, and
+The Claude parser retains a cached request ledger containing identity and usage. This duplicates
+token data already held in `Session.Usage`, but avoids changing gross readers in the same release.
+A pure two-pass attribution function clears runtime duplicate fields, selects owners, and
 recomputes duplicate cost, usage, request count, model totals, and owner summaries over the full
 set. Discovery and every live session update rerun that function.
 
@@ -50,8 +50,8 @@ shows owned and gross totals plus the replayed amount, request count, and origin
 - Ownership is independent of concurrent parser completion and last-activity sorting.
 - The info tab reconciles the owned headline with the gross timeline without marking or hiding
   replayed events.
-- Runtime attribution is excluded from JSON caches and recomputed after load. The cached request
-  ledger changes the Claude parser fingerprint from `v13` to `v14`.
+- Runtime attribution and request prices are excluded from JSON caches and recomputed after load.
+  The cached request ledger changes the Claude parser fingerprint from `v13` to `v14`.
 - Attribution is linear in the number of top-level request-ledger entries, which keeps live
   re-attribution practical at interactive scale.
 

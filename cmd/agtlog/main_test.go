@@ -225,6 +225,7 @@ func (s blockingParseSource) Parse(string) (*model.Session, error) {
 func (s blockingParseSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
 	return s.Parse(path)
 }
+func (s blockingParseSource) Reprice(*model.Session) {}
 
 type reconcilingSource struct {
 	root             string
@@ -256,6 +257,7 @@ func (s *reconcilingSource) Parse(path string) (*model.Session, error) {
 func (s *reconcilingSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
 	return s.Parse(path)
 }
+func (s *reconcilingSource) Reprice(*model.Session) {}
 
 func (s staticSource) Agent() model.AgentKind   { return s.session.Agent }
 func (s staticSource) CacheFingerprint() string { return "test-static-parser-v1" }
@@ -272,6 +274,7 @@ func (s staticSource) Parse(string) (*model.Session, error) { return s.session, 
 func (s staticSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
 	return s.Parse(path)
 }
+func (s staticSource) Reprice(*model.Session) {}
 
 func TestRunPrintsVersionWithoutDiscovery(t *testing.T) {
 	registry := source.NewRegistry(nil, source.Options{})

@@ -11,12 +11,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/motoki317/agtlog/internal/cost"
 	"github.com/motoki317/agtlog/internal/model"
 )
 
@@ -26,6 +28,8 @@ type countingSource struct {
 	cacheFingerprint string
 	parses           int
 	details          int
+	reprices         int
+	reprice          func(*model.Session)
 }
 
 type changingFingerprintSource struct {
@@ -105,6 +109,7 @@ func (s graphSource) Parse(path string) (*model.Session, error) { return s.sessi
 func (s graphSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
 	return s.Parse(path)
 }
+func (s graphSource) Reprice(*model.Session) {}
 
 func (s *changingFingerprintSource) Fingerprint(string) (string, error) {
 	s.fingerprints++
@@ -154,6 +159,12 @@ func (s *countingSource) Parse(path string) (*model.Session, error) {
 }
 func (s *countingSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
 	return s.Parse(path)
+}
+func (s *countingSource) Reprice(session *model.Session) {
+	s.reprices++
+	if s.reprice != nil {
+		s.reprice(session)
+	}
 }
 func (s *countingSource) LoadEvents(_ context.Context, session *model.Session) error {
 	s.details++
@@ -976,22 +987,38 @@ func TestRegistryRoundTripsWorkflowGroupInCurrentCache(t *testing.T) {
 	}
 	started := time.Date(2026, 2, 3, 4, 0, 0, 0, time.UTC)
 	updated := started.Add(time.Hour)
+	usage := model.Usage{Model: "claude-opus-4-8", InputTokens: 3}
 	session := &model.Session{ID: "session-workflow", Agent: model.AgentClaude, Path: path, Subagents: []*model.Session{{
 		ID: "wf-river-run", Agent: model.AgentClaude, Path: path + "#wf-river-run", Title: "River survey", Group: true,
-		StartedAt: started, UpdatedAt: updated, Subagents: []*model.Session{{ID: "nested-mapper", Agent: model.AgentClaude, Path: filepath.Join(root, "agent-nested-mapper.jsonl")}},
+		StartedAt: started, UpdatedAt: updated, Subagents: []*model.Session{{
+			ID: "nested-mapper", Agent: model.AgentClaude, Path: filepath.Join(root, "agent-nested-mapper.jsonl"),
+			Requests: []model.RequestUsage{{Usage: usage}},
+		}},
 	}}}
-	adapter := &countingSource{path: path}
+	calculator := cost.NewCalculator(cost.Table{"claude-opus-4-8": {Input: 2}})
+	calculator.ApplySession(session)
+	adapter := &countingSource{path: path, reprice: calculator.ApplySession}
 	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
-	registry.storeCached(adapter, path, "fingerprint", session, nil)
+	fingerprint, err := sourceFingerprint(adapter, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.storeCached(adapter, path, fingerprint, session, nil)
 
-	loaded, _, ok := registry.loadCached(adapter, path, "fingerprint")
-	if !ok || loaded == nil || len(loaded.Subagents) != 1 {
-		t.Fatalf("loadCached() = %#v, %t", loaded, ok)
+	loaded, _, err := registry.discoverSession(adapter, path)
+	if err != nil || loaded == nil || len(loaded.Subagents) != 1 {
+		t.Fatalf("discoverSession() = %#v, %v", loaded, err)
 	}
 	group := loaded.Subagents[0]
 	if !group.Group || group.Path != path+"#wf-river-run" || !group.StartedAt.Equal(started) || !group.UpdatedAt.Equal(updated) ||
 		len(group.Subagents) != 1 || loaded.DescendantAgentCount() != 1 {
 		t.Fatalf("cached workflow graph = %#v", loaded)
+	}
+	if want := map[string]float64{"claude-opus-4-8": 6}; !reflect.DeepEqual(group.ModelCosts, want) {
+		t.Fatalf("cached workflow ModelCosts = %#v, want child rollup %#v", group.ModelCosts, want)
+	}
+	if adapter.parses != 0 || adapter.reprices != 1 {
+		t.Fatalf("cache path calls = %d parses, %d reprices, want 0 and 1", adapter.parses, adapter.reprices)
 	}
 }
 

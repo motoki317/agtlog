@@ -78,10 +78,11 @@ keeps its background timing and silent-failure behavior; only an explicit reques
 
 # Impact
 
-Changing token normalization, model aliases, thresholds, or the overlay table invalidates cached
-session summaries because the calculator fingerprint changes. Tests cover the formula, marginal
-tiers, defaults, fast mode, Codex cache semantics, missing prices, overlay precedence, freshness,
-and offline behavior.
+Token normalization changes the cached usage ledger and requires a parser fingerprint bump. Model
+aliases, pricing thresholds, and overlay tables do not invalidate cached summaries because agtlog
+reapplies them to the ledger on every cache hit. Tests cover the formula, marginal tiers, defaults,
+fast mode, Codex cache semantics, missing prices, overlay precedence, freshness, and offline
+behavior.
 
 The estimate cannot answer subscription-plan questions such as quota, marginal charge, or invoice
 total. The UI and documentation must keep the `~` gloss visible wherever users could mistake the
