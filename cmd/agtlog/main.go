@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -30,7 +31,10 @@ import (
 
 var version = "dev"
 
+const defaultMaxProcs = 8
+
 func main() {
+	capGOMAXPROCS(os.LookupEnv, runtime.GOMAXPROCS)
 	ctx, stop := newApplicationContext()
 	defer stop()
 	err := executeWithDiagnostics(ctx, os.Args[1:], os.Stdout, os.Stderr, defaultRegistry)
@@ -40,6 +44,15 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "agtlog: %s\n", terminalField(err.Error(), 512))
 		os.Exit(1)
+	}
+}
+
+func capGOMAXPROCS(lookupEnv func(string) (string, bool), gomaxprocs func(int) int) {
+	if _, set := lookupEnv("GOMAXPROCS"); set {
+		return
+	}
+	if gomaxprocs(0) > defaultMaxProcs {
+		gomaxprocs(defaultMaxProcs)
 	}
 }
 

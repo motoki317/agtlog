@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,36 @@ func TestApplicationContextCancelsOnInterrupt(t *testing.T) {
 	case <-ctx.Done():
 	case <-time.After(time.Second):
 		t.Fatal("application context was not cancelled by interrupt")
+	}
+}
+
+func TestCapGOMAXPROCS(t *testing.T) {
+	tests := []struct {
+		name        string
+		environment map[string]string
+		current     int
+		wantCalls   []int
+	}{
+		{name: "caps larger default", current: 24, wantCalls: []int{0, defaultMaxProcs}},
+		{name: "keeps smaller default", current: 4, wantCalls: []int{0}},
+		{name: "keeps explicit value", environment: map[string]string{"GOMAXPROCS": "24"}, current: 24},
+		{name: "keeps explicit empty value", environment: map[string]string{"GOMAXPROCS": ""}, current: 24},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var calls []int
+			capGOMAXPROCS(func(name string) (string, bool) {
+				value, ok := test.environment[name]
+				return value, ok
+			}, func(value int) int {
+				calls = append(calls, value)
+				return test.current
+			})
+			if !reflect.DeepEqual(calls, test.wantCalls) {
+				t.Fatalf("GOMAXPROCS calls = %v, want %v", calls, test.wantCalls)
+			}
+		})
 	}
 }
 
