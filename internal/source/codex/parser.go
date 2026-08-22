@@ -70,6 +70,212 @@ type logRecord struct {
 	} `json:"payload"`
 }
 
+type summaryAccumulator struct {
+	parser         Parser
+	session        *model.Session
+	currentModel   string
+	lastTotal      *tokenUsage
+	lastTotalModel string
+	summedLast     tokenUsage
+	usageByModel   map[string]*tokenUsage
+	usageOrder     []string
+	pricingRecords []tokenUsageRecord
+	replaySecond   string
+	replayBaseline tokenUsage
+	runningMax     tokenUsage
+	replayActive   bool
+	hasLast        bool
+	seenModels     map[string]bool
+	metaSeen       bool
+}
+
+func newSummaryAccumulator(parser Parser, path, replaySecond string) *summaryAccumulator {
+	return &summaryAccumulator{
+		parser:       parser,
+		session:      &model.Session{Agent: model.AgentCodex, Path: path},
+		usageByModel: make(map[string]*tokenUsage),
+		replaySecond: replaySecond,
+		replayActive: replaySecond != "",
+		seenModels:   make(map[string]bool),
+	}
+}
+
+func (a *summaryAccumulator) ingest(line []byte, offset int64) {
+	var envelope struct {
+		Timestamp string `json:"timestamp"`
+		Type      string `json:"type"`
+		Payload   struct {
+			Type string `json:"type"`
+		} `json:"payload"`
+	}
+	if jsonl.Unmarshal(line, &envelope) != nil {
+		return
+	}
+	if timestamp, parseErr := time.Parse(time.RFC3339Nano, envelope.Timestamp); parseErr == nil {
+		if a.session.StartedAt.IsZero() {
+			a.session.StartedAt = timestamp
+		}
+		if a.session.UpdatedAt.IsZero() || timestamp.After(a.session.UpdatedAt) {
+			a.session.UpdatedAt = timestamp
+		}
+	}
+	if envelope.Type != "session_meta" && envelope.Type != "turn_context" &&
+		!(envelope.Type == "event_msg" && (envelope.Payload.Type == "user_message" || envelope.Payload.Type == "agent_message" || envelope.Payload.Type == "sub_agent_activity" || envelope.Payload.Type == "item_completed" || envelope.Payload.Type == "token_count")) {
+		return
+	}
+	var record logRecord
+	if jsonl.Unmarshal(line, &record) != nil {
+		return
+	}
+	second, validSecond := codexTimestampSecond(record.Timestamp)
+	inReplayPrefix := a.replayActive && validSecond && second == a.replaySecond
+	isTokenCount := record.Type == "event_msg" && record.Payload.Type == "token_count"
+	validTotal := isTokenCount && record.Payload.Info.Total != nil && validTokenUsage(record.Payload.Info.Total)
+	// Newer Codex embeds the parent's session_meta after the child's in subagent sidecars.
+	if record.Type == "session_meta" && !a.metaSeen {
+		a.metaSeen = true
+		a.session.ID = record.Payload.ID
+		if a.session.ID == "" {
+			a.session.ID = record.Payload.SessionID
+		}
+		a.session.CWD = record.Payload.CWD
+		a.session.Project = filepath.Base(record.Payload.CWD)
+		a.session.GitBranch = record.Payload.Git.Branch
+		a.session.AgentPath = record.Payload.AgentPath
+		a.session.ParentID = record.Payload.ParentThreadID
+	}
+	if record.Type == "turn_context" && record.Payload.Model != "" {
+		a.currentModel = record.Payload.Model
+		if !a.seenModels[a.currentModel] {
+			a.session.Models = append(a.session.Models, a.currentModel)
+			a.seenModels[a.currentModel] = true
+		}
+	}
+	// Messages counts this session's own conversation turns (user prompts +
+	// agent replies), matching the user+assistant message lines the detail
+	// timeline shows. Ceiling: a subagent-heavy run undercounts, since work
+	// delegated to subagents surfaces in the timeline through the deduplicated
+	// bridge, not as event_msg turns here; the recursive size lives in TOKENS.
+	itemType := record.Payload.Type
+	if itemType == "item_completed" {
+		itemType = record.Payload.Item.Type
+	}
+	if record.Type == "event_msg" && !inReplayPrefix &&
+		(itemType == "user_message" || itemType == "agent_message" || itemType == "UserMessage" || itemType == "AgentMessage") {
+		if a.session.Title == "" && (itemType == "user_message" || itemType == "UserMessage") {
+			itemMessage := codexMessageText(record.Payload.Message)
+			if record.Payload.Type == "item_completed" {
+				itemMessage = joinCodexText(codexTextBlocks(record.Payload.Item.Content))
+			}
+			a.session.Title = titleFromUserMessage(itemMessage)
+		}
+		a.session.Messages++
+	}
+	if record.Type == "event_msg" && !inReplayPrefix && record.Payload.Type == "sub_agent_activity" && record.Payload.Kind == "started" {
+		addSubagent(a.session, a.session.Path, record.Payload.AgentPath, record.Payload.AgentThreadID, a.session.UpdatedAt)
+	}
+	if record.Type == "event_msg" && !inReplayPrefix && record.Payload.Type == "item_completed" && record.Payload.Item.Type == "SubAgentActivity" && record.Payload.Item.Kind == "started" {
+		addSubagent(a.session, a.session.Path, record.Payload.Item.AgentPath, record.Payload.Item.AgentThreadID, a.session.UpdatedAt)
+	}
+	if validTotal {
+		copy := *record.Payload.Info.Total
+		a.lastTotal = &copy
+		a.lastTotalModel = a.currentModel
+	}
+	if isTokenCount && a.replayActive {
+		if inReplayPrefix {
+			if validTotal {
+				a.replayBaseline = *record.Payload.Info.Total
+				a.runningMax = a.replayBaseline
+			}
+			return
+		}
+		if validSecond && second > a.replaySecond {
+			a.replayActive = false
+		}
+	}
+	cumulativeAdvanced := true
+	if validTotal {
+		cumulativeAdvanced = advanceTokenUsageMax(&a.runningMax, record.Payload.Info.Total)
+	}
+	if isTokenCount && record.Payload.Info.Last != nil {
+		if !validTokenUsage(record.Payload.Info.Last) || !cumulativeAdvanced {
+			return
+		}
+		usage := a.usageByModel[a.currentModel]
+		if usage == nil {
+			usage = &tokenUsage{}
+		}
+		modelTotal := *usage
+		allModelsTotal := a.summedLast
+		if !addTokenUsage(&modelTotal, record.Payload.Info.Last) || !addTokenUsage(&allModelsTotal, record.Payload.Info.Last) {
+			return
+		}
+		if a.usageByModel[a.currentModel] == nil {
+			a.usageOrder = append(a.usageOrder, a.currentModel)
+		}
+		a.usageByModel[a.currentModel] = &modelTotal
+		a.summedLast = allModelsTotal
+		a.pricingRecords = append(a.pricingRecords, tokenUsageRecord{model: a.currentModel, usage: *record.Payload.Info.Last, offset: offset})
+		a.hasLast = true
+	}
+}
+
+func (a *summaryAccumulator) finish(ctx context.Context, sourceSize int64) (*model.Session, error) {
+	session := *a.session
+	session.SourceSize = sourceSize
+	session.Usage = nil
+	session.Requests = nil
+
+	var ownTotal *tokenUsage
+	if a.lastTotal != nil {
+		candidate := *a.lastTotal
+		if subtractTokenUsage(&candidate, &a.replayBaseline) {
+			ownTotal = &candidate
+		}
+	}
+	// Per-turn pricing is safe only when Codex's cumulative total confirms that
+	// the Last records form a clean partition; every other path stays lumped.
+	cleanPartition := ownTotal != nil && a.hasLast && a.summedLast == *ownTotal
+	usageByModel := a.usageByModel
+	usageOrder := a.usageOrder
+	if ownTotal != nil && (!a.hasLast || a.summedLast != *ownTotal) {
+		usageByModel = map[string]*tokenUsage{a.lastTotalModel: ownTotal}
+		usageOrder = []string{a.lastTotalModel}
+	}
+	pricingRecords := a.pricingRecords
+	if !cleanPartition {
+		pricingRecords = make([]tokenUsageRecord, 0, len(usageOrder))
+		for _, usageModel := range usageOrder {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			pricingRecords = append(pricingRecords, tokenUsageRecord{model: usageModel, usage: *usageByModel[usageModel], offset: -1})
+		}
+	}
+	for _, usageModel := range usageOrder {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		session.Usage = append(session.Usage, codexUsage(usageModel, *usageByModel[usageModel]))
+	}
+	for _, record := range pricingRecords {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		usage := codexUsage(record.model, record.usage)
+		session.Requests = append(session.Requests, model.RequestUsage{Offset: record.offset, Usage: usage})
+	}
+	a.parser.calculator.ApplySessionCodex(&session, a.parser.defaultPricingModel)
+	if session.AgentPath != "" {
+		session.Title = model.CleanTitle(filepath.Base(session.AgentPath))
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &session, nil
+}
+
 func (p Parser) Parse(path string) (*model.Session, error) {
 	return p.ParseContext(context.Background(), path)
 }
@@ -124,142 +330,9 @@ func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, 
 		replaySecond = replayCandidates[0]
 	}
 
-	session := &model.Session{Agent: model.AgentCodex, Path: path}
-	var currentModel string
-	var lastTotal *tokenUsage
-	var lastTotalModel string
-	var summedLast tokenUsage
-	usageByModel := make(map[string]*tokenUsage)
-	var usageOrder []string
-	var pricingRecords []tokenUsageRecord
-	var replayBaseline tokenUsage
-	var runningMax tokenUsage
-	replayActive := replaySecond != ""
-	hasLast := false
-	seenModels := make(map[string]bool)
-	metaSeen = false
+	accumulator := newSummaryAccumulator(p, path, replaySecond)
 	err = jsonl.ForEachContextWithOffset(ctx, file, func(line []byte, offset, _ int64) {
-		var envelope struct {
-			Timestamp string `json:"timestamp"`
-			Type      string `json:"type"`
-			Payload   struct {
-				Type string `json:"type"`
-			} `json:"payload"`
-		}
-		if jsonl.Unmarshal(line, &envelope) != nil {
-			return
-		}
-		if timestamp, parseErr := time.Parse(time.RFC3339Nano, envelope.Timestamp); parseErr == nil {
-			if session.StartedAt.IsZero() {
-				session.StartedAt = timestamp
-			}
-			if session.UpdatedAt.IsZero() || timestamp.After(session.UpdatedAt) {
-				session.UpdatedAt = timestamp
-			}
-		}
-		if envelope.Type != "session_meta" && envelope.Type != "turn_context" &&
-			!(envelope.Type == "event_msg" && (envelope.Payload.Type == "user_message" || envelope.Payload.Type == "agent_message" || envelope.Payload.Type == "sub_agent_activity" || envelope.Payload.Type == "item_completed" || envelope.Payload.Type == "token_count")) {
-			return
-		}
-		var record logRecord
-		if jsonl.Unmarshal(line, &record) != nil {
-			return
-		}
-		second, validSecond := codexTimestampSecond(record.Timestamp)
-		inReplayPrefix := replayActive && validSecond && second == replaySecond
-		isTokenCount := record.Type == "event_msg" && record.Payload.Type == "token_count"
-		validTotal := isTokenCount && record.Payload.Info.Total != nil && validTokenUsage(record.Payload.Info.Total)
-		// Newer Codex embeds the parent's session_meta after the child's in subagent sidecars.
-		if record.Type == "session_meta" && !metaSeen {
-			metaSeen = true
-			session.ID = record.Payload.ID
-			if session.ID == "" {
-				session.ID = record.Payload.SessionID
-			}
-			session.CWD = record.Payload.CWD
-			session.Project = filepath.Base(record.Payload.CWD)
-			session.GitBranch = record.Payload.Git.Branch
-			session.AgentPath = record.Payload.AgentPath
-			session.ParentID = record.Payload.ParentThreadID
-		}
-		if record.Type == "turn_context" && record.Payload.Model != "" {
-			currentModel = record.Payload.Model
-			if !seenModels[currentModel] {
-				session.Models = append(session.Models, currentModel)
-				seenModels[currentModel] = true
-			}
-		}
-		// Messages counts this session's own conversation turns (user prompts +
-		// agent replies), matching the user+assistant message lines the detail
-		// timeline shows. Ceiling: a subagent-heavy run undercounts, since work
-		// delegated to subagents surfaces in the timeline through the deduplicated
-		// bridge, not as event_msg turns here; the recursive size lives in TOKENS.
-		itemType := record.Payload.Type
-		if itemType == "item_completed" {
-			itemType = record.Payload.Item.Type
-		}
-		if record.Type == "event_msg" && !inReplayPrefix &&
-			(itemType == "user_message" || itemType == "agent_message" || itemType == "UserMessage" || itemType == "AgentMessage") {
-			if session.Title == "" && (itemType == "user_message" || itemType == "UserMessage") {
-				itemMessage := codexMessageText(record.Payload.Message)
-				if record.Payload.Type == "item_completed" {
-					itemMessage = joinCodexText(codexTextBlocks(record.Payload.Item.Content))
-				}
-				session.Title = titleFromUserMessage(itemMessage)
-			}
-			session.Messages++
-		}
-		if record.Type == "event_msg" && !inReplayPrefix && record.Payload.Type == "sub_agent_activity" && record.Payload.Kind == "started" {
-			addSubagent(session, path, record.Payload.AgentPath, record.Payload.AgentThreadID, session.UpdatedAt)
-		}
-		if record.Type == "event_msg" && !inReplayPrefix && record.Payload.Type == "item_completed" && record.Payload.Item.Type == "SubAgentActivity" && record.Payload.Item.Kind == "started" {
-			addSubagent(session, path, record.Payload.Item.AgentPath, record.Payload.Item.AgentThreadID, session.UpdatedAt)
-		}
-		if validTotal {
-			copy := *record.Payload.Info.Total
-			lastTotal = &copy
-			lastTotalModel = currentModel
-		}
-		if isTokenCount && replayActive {
-			if inReplayPrefix {
-				if validTotal {
-					replayBaseline = *record.Payload.Info.Total
-					runningMax = replayBaseline
-				}
-				return
-			}
-			if validSecond && second > replaySecond {
-				replayActive = false
-			}
-		}
-		cumulativeAdvanced := true
-		if validTotal {
-			cumulativeAdvanced = advanceTokenUsageMax(&runningMax, record.Payload.Info.Total)
-		}
-		if isTokenCount && record.Payload.Info.Last != nil {
-			if !validTokenUsage(record.Payload.Info.Last) {
-				return
-			}
-			if !cumulativeAdvanced {
-				return
-			}
-			usage := usageByModel[currentModel]
-			if usage == nil {
-				usage = &tokenUsage{}
-			}
-			modelTotal := *usage
-			allModelsTotal := summedLast
-			if !addTokenUsage(&modelTotal, record.Payload.Info.Last) || !addTokenUsage(&allModelsTotal, record.Payload.Info.Last) {
-				return
-			}
-			if usageByModel[currentModel] == nil {
-				usageOrder = append(usageOrder, currentModel)
-			}
-			usageByModel[currentModel] = &modelTotal
-			summedLast = allModelsTotal
-			pricingRecords = append(pricingRecords, tokenUsageRecord{model: currentModel, usage: *record.Payload.Info.Last, offset: offset})
-			hasLast = true
-		}
+		accumulator.ingest(line, offset)
 	})
 	if err != nil {
 		return nil, err
@@ -268,51 +341,7 @@ func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, 
 	if err != nil {
 		return nil, err
 	}
-	session.SourceSize = sourceSize
-	var ownTotal *tokenUsage
-	if lastTotal != nil {
-		candidate := *lastTotal
-		if subtractTokenUsage(&candidate, &replayBaseline) {
-			ownTotal = &candidate
-		}
-	}
-	// Per-turn pricing is safe only when Codex's cumulative total confirms that
-	// the Last records form a clean partition; every other path stays lumped.
-	cleanPartition := ownTotal != nil && hasLast && summedLast == *ownTotal
-	if ownTotal != nil && (!hasLast || summedLast != *ownTotal) {
-		usageByModel = map[string]*tokenUsage{lastTotalModel: ownTotal}
-		usageOrder = []string{lastTotalModel}
-	}
-	if !cleanPartition {
-		pricingRecords = pricingRecords[:0]
-		for _, usageModel := range usageOrder {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
-			pricingRecords = append(pricingRecords, tokenUsageRecord{model: usageModel, usage: *usageByModel[usageModel], offset: -1})
-		}
-	}
-	for _, usageModel := range usageOrder {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		session.Usage = append(session.Usage, codexUsage(usageModel, *usageByModel[usageModel]))
-	}
-	for _, record := range pricingRecords {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		usage := codexUsage(record.model, record.usage)
-		session.Requests = append(session.Requests, model.RequestUsage{Offset: record.offset, Usage: usage})
-	}
-	p.calculator.ApplySessionCodex(session, p.defaultPricingModel)
-	if session.AgentPath != "" {
-		session.Title = model.CleanTitle(filepath.Base(session.AgentPath))
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	return session, nil
+	return accumulator.finish(ctx, sourceSize)
 }
 
 func codexUsage(usageModel string, selected tokenUsage) model.Usage {

@@ -658,6 +658,49 @@ func TestParseFinalizesCleanRequestLedger(t *testing.T) {
 	}
 }
 
+func TestSummaryAccumulatorFinishRebuildsDerivedSlices(t *testing.T) {
+	lines := []string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30},"last_token_usage":{"input_tokens":20}}}}`,
+	}
+	path := filepath.Join(t.TempDir(), "rollout-repeated-finish.jsonl")
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	accumulator := newSummaryAccumulator(testParser(), path, "")
+	offset := int64(0)
+	for _, line := range lines[:2] {
+		accumulator.ingest([]byte(line), offset)
+		offset += int64(len(line) + 1)
+	}
+	partial, err := accumulator.finish(context.Background(), offset)
+	if err != nil {
+		t.Fatalf("first finish() error = %v", err)
+	}
+	if len(partial.Usage) != 1 || partial.Usage[0].InputTokens != 10 || len(partial.Requests) != 1 {
+		t.Fatalf("first finish() = usage %#v, requests %#v", partial.Usage, partial.Requests)
+	}
+
+	accumulator.ingest([]byte(lines[2]), offset)
+	final, err := accumulator.finish(context.Background(), int64(len(content)))
+	if err != nil {
+		t.Fatalf("second finish() error = %v", err)
+	}
+	full, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !reflect.DeepEqual(final, full) {
+		t.Fatalf("second finish() differs from full parse:\n got %#v\nwant %#v", final, full)
+	}
+	if len(partial.Usage) != 1 || partial.Usage[0].InputTokens != 10 || len(partial.Requests) != 1 {
+		t.Fatalf("second finish() mutated first result = usage %#v, requests %#v", partial.Usage, partial.Requests)
+	}
+}
+
 func TestParseRecordsConsumedSourceSize(t *testing.T) {
 	content := `{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}` + "\n"
 	path := filepath.Join(t.TempDir(), "rollout-snapshot.jsonl")
