@@ -153,6 +153,7 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 				changed = append(changed, sortedPathSet(retryPaths)...)
 				checkpoints.drop(change.RemovedPaths)
 				sessions, refreshFailures := r.refresh(followCtx, changed, checkpoints)
+				updateRetryPaths(retryPaths, sessions, refreshFailures, change.RemovedPaths)
 				needsSnapshot := r.pathsUseAgent(change.RemovedPaths, model.AgentCodex)
 				for _, session := range sessions {
 					needsSnapshot = needsSnapshot || session.Agent == model.AgentCodex
@@ -169,7 +170,6 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 				if sessionIndex != nil {
 					if !initialized {
 						sessionIndex.apply(sessions, change.RemovedPaths)
-						updateRetryPaths(retryPaths, sessions, refreshFailures, change.RemovedPaths)
 					}
 					var snapshotErr error
 					sessions, snapshotErr = sessionIndex.snapshot(followCtx)

@@ -631,6 +631,93 @@ func TestFollowerRetriesFailedInitialIndexPaths(t *testing.T) {
 	}
 }
 
+func TestFollowerRetriesFailedRefreshBeforeInitialIndex(t *testing.T) {
+	codexRoot := t.TempDir()
+	codexPath := filepath.Join(codexRoot, "rollout.jsonl")
+	claudeRoot := t.TempDir()
+	claudePath := filepath.Join(claudeRoot, "session.jsonl")
+	for _, path := range []string{codexPath, claudePath} {
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	codex := &indexedFollowSource{
+		root: codexRoot,
+		sessions: map[string]*model.Session{
+			codexPath: {ID: "rollout", Agent: model.AgentCodex, Path: codexPath},
+		},
+		parses:     make(map[string]int),
+		failParses: map[string]int{codexPath: 1},
+	}
+	claude := &countingSource{path: claudePath}
+	registry := NewRegistry([]Source{codex, claude}, Options{Workers: 1})
+	follower, err := registry.Follow(context.Background(), WatchOptions{Debounce: 10 * time.Millisecond, RescanInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer follower.Close()
+
+	follower.watcher.events <- Change{Paths: []string{codexPath}}
+	follower.watcher.events <- Change{Paths: []string{claudePath}}
+	update := nextFollowerUpdate(t, follower)
+	if !reflect.DeepEqual(update.Paths, []string{claudePath}) {
+		t.Fatalf("first update paths = %v, want unrelated path %v", update.Paths, []string{claudePath})
+	}
+	if sessionWithID(update.Sessions, "rollout") == nil {
+		t.Fatalf("retried snapshot = %#v, want recovered rollout", update.Sessions)
+	}
+	if _, parses := codex.counts(codexPath); parses != 3 {
+		t.Fatalf("rollout parses = %d, want failed refresh, retry, and discovery", parses)
+	}
+}
+
+func TestFollowerInitialDiscoverySupersedesRefreshFailures(t *testing.T) {
+	codexRoot := t.TempDir()
+	failedPath := filepath.Join(codexRoot, "failed.jsonl")
+	changedPath := filepath.Join(codexRoot, "changed.jsonl")
+	claudeRoot := t.TempDir()
+	claudePath := filepath.Join(claudeRoot, "session.jsonl")
+	for _, path := range []string{failedPath, changedPath, claudePath} {
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	codex := &indexedFollowSource{
+		root: codexRoot,
+		sessions: map[string]*model.Session{
+			failedPath:  {ID: "failed", Agent: model.AgentCodex, Path: failedPath},
+			changedPath: {ID: "changed", Agent: model.AgentCodex, Path: changedPath},
+		},
+		parses:     make(map[string]int),
+		failParses: map[string]int{failedPath: 1},
+	}
+	claude := &countingSource{path: claudePath}
+	registry := NewRegistry([]Source{codex, claude}, Options{Workers: 1})
+	follower, err := registry.Follow(context.Background(), WatchOptions{Debounce: 10 * time.Millisecond, RescanInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer follower.Close()
+
+	follower.watcher.events <- Change{Paths: []string{failedPath, changedPath}}
+	first := nextFollowerUpdate(t, follower)
+	if sessionWithID(first.Sessions, "failed") == nil {
+		t.Fatalf("initial snapshot = %#v, want failed refresh recovered by discovery", first.Sessions)
+	}
+	if _, parses := codex.counts(failedPath); parses != 2 {
+		t.Fatalf("initial failed path parses = %d, want failed refresh plus discovery", parses)
+	}
+
+	follower.watcher.events <- Change{Paths: []string{claudePath}}
+	second := nextFollowerUpdate(t, follower)
+	if sessionWithID(second.Sessions, "failed") == nil {
+		t.Fatalf("later snapshot = %#v, want discovered session retained", second.Sessions)
+	}
+	if _, parses := codex.counts(failedPath); parses != 2 {
+		t.Fatalf("later failed path parses = %d, want no retry after successful discovery", parses)
+	}
+}
+
 func appendFollowLog(t *testing.T, path string) {
 	t.Helper()
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
