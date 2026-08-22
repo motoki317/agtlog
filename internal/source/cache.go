@@ -15,8 +15,11 @@ import (
 	"strings"
 	"time"
 
+	jsoniter "github.com/json-iterator/go"
 	"github.com/motoki317/agtlog/internal/model"
 )
+
+var cacheJSON = jsoniter.ConfigCompatibleWithStandardLibrary
 
 type cacheEntry struct {
 	Version     int               `json:"version"`
@@ -108,7 +111,7 @@ func loadCacheEntryContext(ctx context.Context, root *os.Root, path string, adap
 		return nil, nil, false, true
 	}
 	var entry cacheEntry
-	decoder := json.NewDecoder(&contextReader{ctx: ctx, reader: bytes.NewReader(data)})
+	decoder := cacheJSON.NewDecoder(&contextReader{ctx: ctx, reader: bytes.NewReader(data)})
 	if decoder.Decode(&entry) != nil || decoder.Decode(&struct{}{}) != io.EOF || entry.Version != cacheVersion || entry.Agent != adapter.Agent() || entry.Fingerprint != fingerprint || entry.Session == nil {
 		return nil, nil, false, true
 	}

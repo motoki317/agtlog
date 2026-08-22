@@ -536,6 +536,33 @@ func TestRegistryRejectsClaudeParserV15CacheFingerprint(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsCacheEntryTrailingJSON(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
+	registry.storeCached(adapter, path, "fingerprint", &model.Session{ID: "cached-session"}, nil)
+
+	file, err := os.OpenFile(registry.cachePath(adapter, path), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("\n{}"); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, ok := registry.loadCached(adapter, path, "fingerprint"); ok {
+		t.Fatal("loadCached() accepted a second JSON value after the cache entry")
+	}
+}
+
 func TestRegistryRejectsUnsafeCacheNamespace(t *testing.T) {
 	for _, shape := range []string{"symlink", "regular file", "writable directory"} {
 		t.Run(shape, func(t *testing.T) {
