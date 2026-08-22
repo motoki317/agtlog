@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,36 @@ func TestApplicationContextCancelsOnInterrupt(t *testing.T) {
 	case <-ctx.Done():
 	case <-time.After(time.Second):
 		t.Fatal("application context was not cancelled by interrupt")
+	}
+}
+
+func TestCapGOMAXPROCS(t *testing.T) {
+	tests := []struct {
+		name        string
+		environment map[string]string
+		current     int
+		wantCalls   []int
+	}{
+		{name: "caps larger default", current: 24, wantCalls: []int{0, defaultMaxProcs}},
+		{name: "keeps smaller default", current: 4, wantCalls: []int{0}},
+		{name: "keeps explicit value", environment: map[string]string{"GOMAXPROCS": "24"}, current: 24},
+		{name: "keeps explicit empty value", environment: map[string]string{"GOMAXPROCS": ""}, current: 24},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var calls []int
+			capGOMAXPROCS(func(name string) (string, bool) {
+				value, ok := test.environment[name]
+				return value, ok
+			}, func(value int) int {
+				calls = append(calls, value)
+				return test.current
+			})
+			if !reflect.DeepEqual(calls, test.wantCalls) {
+				t.Fatalf("GOMAXPROCS calls = %v, want %v", calls, test.wantCalls)
+			}
+		})
 	}
 }
 
@@ -216,11 +247,11 @@ func (s blockingParseSource) Roots() []string          { return nil }
 func (s blockingParseSource) Discover(context.Context) ([]string, error) {
 	return []string{"session.jsonl"}, nil
 }
-func (s blockingParseSource) Parse(string) (*model.Session, error) {
+func (s blockingParseSource) Parse(path string) (*model.Session, error) {
 	close(s.parseStarted)
 	defer close(s.parseDone)
 	<-s.releaseParse
-	return &model.Session{ID: "session-a", Agent: model.AgentClaude}, nil
+	return &model.Session{ID: "session-a", Agent: model.AgentClaude, Path: path}, nil
 }
 func (s blockingParseSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
 	return s.Parse(path)
@@ -270,7 +301,11 @@ func (s staticSource) Roots() []string {
 func (s staticSource) Discover(context.Context) ([]string, error) {
 	return []string{"session.jsonl"}, nil
 }
-func (s staticSource) Parse(string) (*model.Session, error) { return s.session, nil }
+func (s staticSource) Parse(path string) (*model.Session, error) {
+	session := *s.session
+	session.Path = path
+	return &session, nil
+}
 func (s staticSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
 	return s.Parse(path)
 }

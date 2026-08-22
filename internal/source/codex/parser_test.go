@@ -1,6 +1,7 @@
 package codex
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -9,10 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/motoki317/agtlog/internal/cost"
 	"github.com/motoki317/agtlog/internal/model"
@@ -655,6 +658,371 @@ func TestParseFinalizesCleanRequestLedger(t *testing.T) {
 	}}
 	if !reflect.DeepEqual(session.Requests, want) {
 		t.Fatalf("Parse().Requests = %#v, want finalized ledger %#v", session.Requests, want)
+	}
+}
+
+func TestSummaryAccumulatorFinishRebuildsDerivedSlices(t *testing.T) {
+	lines := []string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30},"last_token_usage":{"input_tokens":20}}}}`,
+	}
+	path := filepath.Join(t.TempDir(), "rollout-repeated-finish.jsonl")
+	content := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	accumulator := newSummaryAccumulator(testParser(), path, "")
+	offset := int64(0)
+	for _, line := range lines[:2] {
+		accumulator.ingest([]byte(line), offset)
+		offset += int64(len(line) + 1)
+	}
+	partial, err := accumulator.finish(context.Background(), offset)
+	if err != nil {
+		t.Fatalf("first finish() error = %v", err)
+	}
+	if len(partial.Usage) != 1 || partial.Usage[0].InputTokens != 10 || len(partial.Requests) != 1 {
+		t.Fatalf("first finish() = usage %#v, requests %#v", partial.Usage, partial.Requests)
+	}
+
+	accumulator.ingest([]byte(lines[2]), offset)
+	final, err := accumulator.finish(context.Background(), int64(len(content)))
+	if err != nil {
+		t.Fatalf("second finish() error = %v", err)
+	}
+	full, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !reflect.DeepEqual(final, full) {
+		t.Fatalf("second finish() differs from full parse:\n got %#v\nwant %#v", final, full)
+	}
+	if len(partial.Usage) != 1 || partial.Usage[0].InputTokens != 10 || len(partial.Requests) != 1 {
+		t.Fatalf("second finish() mutated first result = usage %#v, requests %#v", partial.Usage, partial.Requests)
+	}
+}
+
+func TestResumableParseMatchesFullParseAcrossAppendedChunks(t *testing.T) {
+	type parityCase struct {
+		name    string
+		content []byte
+	}
+	var cases []parityCase
+	err := filepath.Walk("testdata", func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !info.IsDir() && filepath.Ext(path) == ".jsonl" {
+			content, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return readErr
+			}
+			cases = append(cases, parityCase{name: "fixture/" + filepath.ToSlash(path), content: content})
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases = append(cases,
+		parityCase{name: "generated/crlf-unicode", content: []byte(strings.Join([]string{
+			`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-unicode","cwd":"/workspace/nebula"}}`,
+			`{"timestamp":"2026-01-02T03:04:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+			`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"user_message","message":"星雲を調べる 🔭"}}`,
+			`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+		}, "\r\n") + "\r\n")},
+		parityCase{name: "generated/clean-multiple-models-wrapped", content: []byte(strings.Join([]string{
+			`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-root","cwd":"/workspace/nebula"}}`,
+			`{"timestamp":"2026-01-02T03:04:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+			`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"Map the nebula"}]}}}`,
+			`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","content":[{"type":"text","text":"Mapped"}]}}}`,
+			`{"timestamp":"2026-01-02T03:04:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+			`{"timestamp":"2026-01-02T03:04:05Z","type":"turn_context","payload":{"model":"gpt-5.6"}}`,
+			`{"timestamp":"2026-01-02T03:04:06Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30},"last_token_usage":{"input_tokens":20}}}}`,
+		}, "\n") + "\n")},
+		parityCase{name: "generated/unclean-partition", content: []byte(strings.Join([]string{
+			`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-unclean","cwd":"/workspace/nebula"}}`,
+			`{"timestamp":"2026-01-02T03:04:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+			`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+			`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30}}}}`,
+		}, "\n") + "\n")},
+		parityCase{name: "generated/fork-replay-prefix", content: []byte(strings.Join([]string{
+			`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-child","parent_thread_id":"thread-root","thread_source":"subagent","agent_path":"/root/scout","cwd":"/workspace/nebula"}}`,
+			`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+			`{"timestamp":"2026-01-02T03:05:00.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20},"last_token_usage":{"input_tokens":10}}}}`,
+			`{"timestamp":"2026-01-02T03:05:01Z","type":"turn_context","payload":{"model":"gpt-5.6"}}`,
+			`{"timestamp":"2026-01-02T03:05:02Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"Inspect the nebula"}]}}}`,
+			`{"timestamp":"2026-01-02T03:05:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":35},"last_token_usage":{"input_tokens":15}}}}`,
+		}, "\n") + "\n")},
+	)
+	sort.Slice(cases, func(i, j int) bool { return cases[i].name < cases[j].name })
+
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			if err := os.WriteFile(path, test.content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			full, err := testParser().ParseContext(context.Background(), path)
+			if err != nil {
+				t.Fatalf("full ParseContext() error = %v", err)
+			}
+			if err := os.Truncate(path, 0); err != nil {
+				t.Fatal(err)
+			}
+			file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer file.Close()
+
+			var checkpoint *summaryCheckpoint
+			var chunked *model.Session
+			previousEnd := 0
+			for chunk, end := range summaryParityChunkEnds(test.content) {
+				if _, err := file.Write(test.content[previousEnd:end]); err != nil {
+					t.Fatal(err)
+				}
+				chunked, checkpoint, err = testParser().parseResumableContext(context.Background(), path, checkpoint)
+				if err != nil {
+					t.Fatalf("chunk %d ending at %d: ParseResumableContext() error = %v", chunk, end, err)
+				}
+				fresh, err := testParser().ParseContext(context.Background(), path)
+				if err != nil {
+					t.Fatalf("chunk %d ending at %d: full ParseContext() error = %v", chunk, end, err)
+				}
+				if !reflect.DeepEqual(chunked, fresh) {
+					t.Fatalf("chunk %d ending at %d: incremental parse differs from full parse:\n got %#v\nwant %#v", chunk, end, chunked, fresh)
+				}
+				if checkpoint != nil {
+					wantResumeAt := int64(bytes.LastIndexByte(test.content[:end], '\n') + 1)
+					if checkpoint.resumeAt != wantResumeAt {
+						t.Fatalf("chunk %d ending at %d: checkpoint offset = %d, want last complete line at %d", chunk, end, checkpoint.resumeAt, wantResumeAt)
+					}
+				}
+				previousEnd = end
+			}
+			if !reflect.DeepEqual(chunked, full) {
+				t.Fatalf("final incremental parse differs from full parse:\n got %#v\nwant %#v", chunked, full)
+			}
+		})
+	}
+}
+
+func summaryParityChunkEnds(content []byte) []int {
+	ends := map[int]bool{len(content): true}
+	lineStart := 0
+	for index, char := range content {
+		if char >= utf8.RuneSelf {
+			ends[index+1] = true
+		}
+		if char != '\n' {
+			continue
+		}
+		if lineStart < index {
+			ends[lineStart+1] = true
+			ends[lineStart+(index-lineStart)/2] = true
+			ends[index] = true
+		}
+		ends[index+1] = true
+		lineStart = index + 1
+	}
+	step := 17
+	for end := step; end < len(content); end += step {
+		ends[end] = true
+		step = (step*37)%113 + 1
+	}
+	sorted := make([]int, 0, len(ends))
+	for end := range ends {
+		if end > 0 {
+			sorted = append(sorted, end)
+		}
+	}
+	sort.Ints(sorted)
+	return sorted
+}
+
+func TestResumableParseFallsBackWhenFileChangesAfterValidation(t *testing.T) {
+	original := []byte(strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-original","cwd":"/workspace/nebula"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+	}, "\n") + "\n")
+	replacement := []byte(strings.Join([]string{
+		`{"timestamp":"2026-01-02T04:00:00Z","type":"session_meta","payload":{"id":"thread-replacement","cwd":"/workspace/comet"}}`,
+		`{"timestamp":"2026-01-02T04:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"Chart the comet"}}`,
+	}, "\n") + "\n")
+	tests := []struct {
+		name    string
+		rewrite func(string) error
+	}{
+		{name: "in-place truncate", rewrite: func(path string) error {
+			return os.WriteFile(path, replacement, 0o600)
+		}},
+		{name: "atomic replacement", rewrite: func(path string) error {
+			replacementPath := path + ".replacement"
+			if err := os.WriteFile(replacementPath, replacement, 0o600); err != nil {
+				return err
+			}
+			return os.Rename(replacementPath, path)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			if err := os.WriteFile(path, original, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, checkpoint, err := testParser().parseResumableContext(context.Background(), path, nil)
+			if err != nil || checkpoint == nil {
+				t.Fatalf("initial ParseResumableContext() = checkpoint %#v, error %v", checkpoint, err)
+			}
+			callbackCalled := false
+			var rewriteErr error
+			got, next, err := testParser().parseResumableContextAfterValidation(context.Background(), path, checkpoint, func() {
+				callbackCalled = true
+				rewriteErr = test.rewrite(path)
+			})
+			if !callbackCalled {
+				t.Fatal("valid checkpoint did not enter the resume path")
+			}
+			if rewriteErr != nil {
+				t.Fatalf("rewrite after validation: %v", rewriteErr)
+			}
+			if err != nil {
+				t.Fatalf("ParseResumableContext() error = %v", err)
+			}
+			want, err := testParser().ParseContext(context.Background(), path)
+			if err != nil {
+				t.Fatalf("full ParseContext() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("post-validation rewrite did not fall back:\n got %#v\nwant %#v", got, want)
+			}
+			if next == nil || next.accumulator == checkpoint.accumulator {
+				t.Fatalf("post-validation rewrite retained checkpoint state: %#v", next)
+			}
+		})
+	}
+}
+
+func TestResumableParseUsesValidCheckpointForUnchangedPrefix(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	content := []byte(`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-root","cwd":"/workspace/nebula"}}` + "\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, checkpoint, err := testParser().parseResumableContext(context.Background(), path, nil)
+	if err != nil || checkpoint == nil {
+		t.Fatalf("initial ParseResumableContext() = checkpoint %#v, error %v", checkpoint, err)
+	}
+	appended := []byte(`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"user_message","message":"Map the nebula"}}` + "\n")
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(appended); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	callbackCalled := false
+	got, next, err := testParser().parseResumableContextAfterValidation(context.Background(), path, checkpoint, func() {
+		callbackCalled = true
+	})
+	if err != nil || next == nil {
+		t.Fatalf("ParseResumableContext() = checkpoint %#v, error %v", next, err)
+	}
+	if !callbackCalled {
+		t.Fatal("valid checkpoint did not enter the resume path")
+	}
+	want, err := testParser().ParseContext(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resumed parse differs from full parse:\n got %#v\nwant %#v", got, want)
+	}
+}
+
+func TestSummaryCheckpointHashesLargeBoundaryWithoutRetainingIt(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout.jsonl")
+	message := strings.Repeat("x", 1<<20)
+	content := []byte(strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-large","cwd":"/workspace/nebula"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"user_message","message":"` + message + `"}}`,
+	}, "\n") + "\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, checkpoint, err := testParser().parseResumableContext(context.Background(), path, nil)
+	if err != nil || checkpoint == nil {
+		t.Fatalf("ParseResumableContext() = checkpoint %#v, error %v", checkpoint, err)
+	}
+	lastNewline := bytes.LastIndexByte(content[:len(content)-1], '\n')
+	wantBoundaryBytes := int64(len(content) - lastNewline - 1)
+	if checkpoint.lastLineBytes != wantBoundaryBytes || checkpoint.lastLineBytes < 1<<20 {
+		t.Fatalf("checkpoint boundary length = %d, want %d without retained line bytes", checkpoint.lastLineBytes, wantBoundaryBytes)
+	}
+}
+
+func TestResumableParseFallsBackWhenCheckpointIsInvalid(t *testing.T) {
+	meta := `{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-root","cwd":"/workspace/nebula"}}` + "\n"
+	filler := strings.Repeat(" ", summaryCheckpointHeadBytes) + "\n"
+	last := `{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"user_message","message":"Original task"}}` + "\n"
+	base := []byte(meta + filler + last)
+	appendLine := []byte(`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"agent_message","message":"Done"}}` + "\n")
+
+	tests := []struct {
+		name   string
+		mutate func([]byte) []byte
+	}{
+		{name: "size shrank", mutate: func(content []byte) []byte { return append([]byte(nil), content[:len(meta)]...) }},
+		{name: "head changed", mutate: func(content []byte) []byte {
+			return append(bytes.Replace(append([]byte(nil), content...), []byte("thread-root"), []byte("thread-toot"), 1), appendLine...)
+		}},
+		{name: "last consumed line changed", mutate: func(content []byte) []byte {
+			return append(bytes.Replace(append([]byte(nil), content...), []byte("Original task"), []byte("Replaced task"), 1), appendLine...)
+		}},
+		{name: "resume offset lost line boundary", mutate: func(content []byte) []byte {
+			changed := append([]byte(nil), content...)
+			changed[len(changed)-1] = ' '
+			return append(changed, appendLine...)
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout.jsonl")
+			if err := os.WriteFile(path, base, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, checkpoint, err := testParser().parseResumableContext(context.Background(), path, nil)
+			if err != nil || checkpoint == nil {
+				t.Fatalf("initial ParseResumableContext() = checkpoint %#v, error %v", checkpoint, err)
+			}
+			mutated := test.mutate(base)
+			if err := os.WriteFile(path, mutated, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			got, next, err := testParser().parseResumableContext(context.Background(), path, checkpoint)
+			if err != nil {
+				t.Fatalf("ParseResumableContext() error = %v", err)
+			}
+			want, err := testParser().ParseContext(context.Background(), path)
+			if err != nil {
+				t.Fatalf("full ParseContext() error = %v", err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("fallback parse differs from full parse:\n got %#v\nwant %#v", got, want)
+			}
+			if next != nil && next.accumulator == checkpoint.accumulator {
+				t.Fatal("invalid checkpoint reused its accumulator")
+			}
+		})
 	}
 }
 
@@ -1345,6 +1713,24 @@ func TestParseSkipsOversizedRecordAndContinues(t *testing.T) {
 	}
 	if len(session.Usage) != 1 || session.Usage[0].InputTokens != 3 {
 		t.Fatalf("Parse().Usage = %#v, want later cumulative usage", session.Usage)
+	}
+}
+
+func TestSummaryCheckpointAdvancesPastCompletedOversizedLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-oversized-tail.jsonl")
+	meta := `{"timestamp":"2026-01-02T03:00:00Z","type":"session_meta","payload":{"id":"thread-large","cwd":"/workspace/nebula"}}` + "\n"
+	oversized := strings.Repeat("x", 17*1024*1024) + "\n"
+	if err := os.WriteFile(path, []byte(meta+oversized), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, checkpoint, err := testParser().parseResumableContext(context.Background(), path, nil)
+	if err != nil || checkpoint == nil {
+		t.Fatalf("ParseResumableContext() = checkpoint %#v, error %v", checkpoint, err)
+	}
+	wantSize := int64(len(meta) + len(oversized))
+	if checkpoint.resumeAt != wantSize || checkpoint.lastLineBytes != int64(len(oversized)) {
+		t.Fatalf("checkpoint = resume %d, boundary %d; want %d, %d", checkpoint.resumeAt, checkpoint.lastLineBytes, wantSize, len(oversized))
 	}
 }
 

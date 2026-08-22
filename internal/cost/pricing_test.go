@@ -224,13 +224,14 @@ func TestRefreshTableReturnsCancelledFetch(t *testing.T) {
 
 func TestRefreshTableGivesFetchThirtySecondDeadline(t *testing.T) {
 	started := time.Now()
-	var deadline time.Time
+	var deadline, requested time.Time
 
 	_, err := refreshTable(runtimePricingOptions{
 		ctx:      context.Background(),
 		cacheDir: t.TempDir(),
 		fetch: func(ctx context.Context) ([]byte, error) {
 			var ok bool
+			requested = time.Now()
 			deadline, ok = ctx.Deadline()
 			if !ok {
 				return nil, errors.New("fetch context has no deadline")
@@ -241,8 +242,14 @@ func TestRefreshTableGivesFetchThirtySecondDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refreshTable() error = %v", err)
 	}
-	if remaining := deadline.Sub(started); remaining < 29*time.Second || remaining > 31*time.Second {
-		t.Fatalf("fetch deadline after %v, want about 30s", remaining)
+	// started and requested bracket the moment refreshTable creates the fetch
+	// context, so the assertion needs no wall-clock tolerance. A tolerance would
+	// fail whenever the embedded table parse before that moment runs slowly.
+	if deadline.After(requested.Add(30 * time.Second)) {
+		t.Fatalf("fetch deadline %v after the fetch call, want at most 30s", deadline.Sub(requested))
+	}
+	if deadline.Before(started.Add(30 * time.Second)) {
+		t.Fatalf("fetch deadline %v after refreshTable started, want at least 30s", deadline.Sub(started))
 	}
 }
 

@@ -37,6 +37,10 @@ type changingFingerprintSource struct {
 	fingerprints int
 }
 
+type changingResumableFingerprintSource struct {
+	changingFingerprintSource
+}
+
 type emptyCacheFingerprintSource struct {
 	*countingSource
 }
@@ -117,6 +121,11 @@ func (s *changingFingerprintSource) Fingerprint(string) (string, error) {
 		return "before", nil
 	}
 	return "after", nil
+}
+
+func (s *changingResumableFingerprintSource) ParseResumableContext(ctx context.Context, path string, _ any) (*model.Session, any, error) {
+	session, err := s.ParseContext(ctx, path)
+	return session, &struct{}{}, err
 }
 
 func (s emptyCacheFingerprintSource) CacheFingerprint() string { return "" }
@@ -536,6 +545,58 @@ func TestRegistryRejectsClaudeParserV15CacheFingerprint(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsCacheEntryTrailingJSON(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
+	registry.storeCached(adapter, path, "fingerprint", &model.Session{ID: "cached-session"}, nil)
+
+	file, err := os.OpenFile(registry.cachePath(adapter, path), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("\n{}"); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, ok := registry.loadCached(adapter, path, "fingerprint"); ok {
+		t.Fatal("loadCached() accepted a second JSON value after the cache entry")
+	}
+}
+
+func TestRegistryRejectsCacheEntryForDifferentSourcePath(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
+	fingerprint, err := sourceFingerprint(adapter, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.storeCached(adapter, path, fingerprint, &model.Session{
+		ID: "spoofed", Agent: adapter.Agent(), Path: filepath.Join(root, "other.jsonl"),
+	}, nil)
+
+	sessions, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Path != path || adapter.parses != 1 {
+		t.Fatalf("Discover() = %#v after %d parses, want the source path reparsed", sessions, adapter.parses)
+	}
+}
+
 func TestRegistryRejectsUnsafeCacheNamespace(t *testing.T) {
 	for _, shape := range []string{"symlink", "regular file", "writable directory"} {
 		t.Run(shape, func(t *testing.T) {
@@ -771,6 +832,45 @@ func TestRegistryCachesThroughSymlinkOutsideSourceRoots(t *testing.T) {
 	}
 }
 
+func TestRegistryRechecksCacheSafetyBetweenDiscoveryPasses(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheParent := t.TempDir()
+	cacheDir := filepath.Join(cacheParent, "cache")
+	if err := os.Mkdir(cacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: cacheDir})
+
+	if _, err := registry.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(cacheDir, filepath.Join(cacheParent, "old-cache")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(root, cacheDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if adapter.parses != 2 {
+		t.Fatalf("Parse() called %d times, want unsafe moved cache rejected on the next pass", adapter.parses)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		t.Fatalf("source root entries = %v, want only the session log", entries)
+	}
+}
+
 func TestRegistryCreatesMissingCacheDirectoryComponents(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "session.jsonl")
@@ -851,7 +951,7 @@ func TestRegistryLinksSubagentSummariesAndKeepsOnlyTopLevel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sessions) != 1 || sessions[0] != parent || sessions[0].Subagents[0] != child {
+	if len(sessions) != 1 || sessions[0].ID != parent.ID || len(sessions[0].Subagents) != 1 || sessions[0].Subagents[0].ID != child.ID {
 		t.Fatalf("top-level graph = %#v, want linked parent only", sessions)
 	}
 	if got := sessions[0].TotalUsage().InputTokens; got != 30 {
@@ -877,7 +977,7 @@ func TestRegistryKeepsOrphanedCodexChildInspectable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sessions) != 1 || sessions[0] != orphan {
+	if len(sessions) != 1 || sessions[0].ID != orphan.ID || sessions[0].Path != orphan.Path {
 		t.Fatalf("orphan discovery = %#v, want inspectable child", sessions)
 	}
 }
@@ -1038,5 +1138,23 @@ func TestRegistryDoesNotCacheFileChangedDuringParse(t *testing.T) {
 	}
 	if adapter.parses != 2 {
 		t.Fatalf("Parse() called %d times, want changed first result left uncached", adapter.parses)
+	}
+}
+
+func TestRegistryDoesNotCacheFileChangedDuringResumableParse(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &changingResumableFingerprintSource{changingFingerprintSource: changingFingerprintSource{countingSource: countingSource{path: path, agent: model.AgentCodex}}}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
+
+	sessions, failed := registry.refresh(context.Background(), []string{path}, make(followCheckpointIndex))
+	if len(sessions) != 1 || len(failed) != 0 {
+		t.Fatalf("refresh() = sessions %#v, failed %v", sessions, failed)
+	}
+	if _, _, loaded := registry.loadCached(adapter, path, "after"); loaded {
+		t.Fatal("resumable parse cached a result after its fingerprint changed")
 	}
 }

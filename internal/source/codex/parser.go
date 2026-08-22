@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -70,221 +71,230 @@ type logRecord struct {
 	} `json:"payload"`
 }
 
-func (p Parser) Parse(path string) (*model.Session, error) {
-	return p.ParseContext(context.Background(), path)
+type summaryAccumulator struct {
+	parser         Parser
+	session        *model.Session
+	currentModel   string
+	lastTotal      *tokenUsage
+	lastTotalModel string
+	summedLast     tokenUsage
+	usageByModel   map[string]*tokenUsage
+	usageOrder     []string
+	pricingRecords []tokenUsageRecord
+	replaySecond   string
+	replayBaseline tokenUsage
+	runningMax     tokenUsage
+	replayActive   bool
+	hasLast        bool
+	seenModels     map[string]bool
+	metaSeen       bool
 }
 
-func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
+const summaryCheckpointHeadBytes = 4 << 10
 
-	var isForked bool
-	var replayCandidates []string
-	replayCandidateInvalid := false
-	metaSeen := false
-	scanCtx, stopScan := context.WithCancel(ctx)
-	scanComplete := false
-	err = jsonl.ForEachContext(scanCtx, file, func(line []byte) {
-		var record logRecord
-		if jsonl.Unmarshal(line, &record) != nil {
-			return
-		}
-		if record.Type == "session_meta" && !metaSeen {
-			metaSeen = true
-			isForked = record.Payload.ThreadSource == "subagent" || record.Payload.ForkedFromID != ""
-		}
-		second, validSecond := codexTimestampSecond(record.Timestamp)
-		if len(replayCandidates) < 2 && record.Type == "event_msg" && record.Payload.Type == "token_count" &&
-			record.Payload.Info.Last != nil && validTokenUsage(record.Payload.Info.Last) {
-			replayCandidates = append(replayCandidates, strings.Clone(second))
-			replayCandidateInvalid = replayCandidateInvalid || !validSecond
-		}
-		if metaSeen && (!isForked || len(replayCandidates) == 2) {
-			scanComplete = true
-			stopScan()
-		}
-	})
-	stopScan()
-	if err != nil && !(scanComplete && errors.Is(err, context.Canceled)) {
-		return nil, err
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-	var replaySecond string
-	// Ceiling: spaced replay timestamps disable detection; the real-log oracle is
-	// the signal to revisit this without adding cross-file parent reads.
-	if isForked && !replayCandidateInvalid && len(replayCandidates) == 2 && replayCandidates[0] == replayCandidates[1] {
-		replaySecond = replayCandidates[0]
-	}
+type summaryCheckpoint struct {
+	accumulator   *summaryAccumulator
+	size          int64
+	headLength    int64
+	headHash      [sha256.Size]byte
+	resumeAt      int64
+	lastLineBytes int64
+	lastLineHash  [sha256.Size]byte
+}
 
-	session := &model.Session{Agent: model.AgentCodex, Path: path}
-	var currentModel string
-	var lastTotal *tokenUsage
-	var lastTotalModel string
-	var summedLast tokenUsage
-	usageByModel := make(map[string]*tokenUsage)
-	var usageOrder []string
-	var pricingRecords []tokenUsageRecord
-	var replayBaseline tokenUsage
-	var runningMax tokenUsage
-	replayActive := replaySecond != ""
-	hasLast := false
-	seenModels := make(map[string]bool)
-	metaSeen = false
-	err = jsonl.ForEachContextWithOffset(ctx, file, func(line []byte, offset, _ int64) {
-		var envelope struct {
-			Timestamp string `json:"timestamp"`
-			Type      string `json:"type"`
-			Payload   struct {
-				Type string `json:"type"`
-			} `json:"payload"`
-		}
-		if jsonl.Unmarshal(line, &envelope) != nil {
-			return
-		}
-		if timestamp, parseErr := time.Parse(time.RFC3339Nano, envelope.Timestamp); parseErr == nil {
-			if session.StartedAt.IsZero() {
-				session.StartedAt = timestamp
-			}
-			if session.UpdatedAt.IsZero() || timestamp.After(session.UpdatedAt) {
-				session.UpdatedAt = timestamp
-			}
-		}
-		if envelope.Type != "session_meta" && envelope.Type != "turn_context" &&
-			!(envelope.Type == "event_msg" && (envelope.Payload.Type == "user_message" || envelope.Payload.Type == "agent_message" || envelope.Payload.Type == "sub_agent_activity" || envelope.Payload.Type == "item_completed" || envelope.Payload.Type == "token_count")) {
-			return
-		}
-		var record logRecord
-		if jsonl.Unmarshal(line, &record) != nil {
-			return
-		}
-		second, validSecond := codexTimestampSecond(record.Timestamp)
-		inReplayPrefix := replayActive && validSecond && second == replaySecond
-		isTokenCount := record.Type == "event_msg" && record.Payload.Type == "token_count"
-		validTotal := isTokenCount && record.Payload.Info.Total != nil && validTokenUsage(record.Payload.Info.Total)
-		// Newer Codex embeds the parent's session_meta after the child's in subagent sidecars.
-		if record.Type == "session_meta" && !metaSeen {
-			metaSeen = true
-			session.ID = record.Payload.ID
-			if session.ID == "" {
-				session.ID = record.Payload.SessionID
-			}
-			session.CWD = record.Payload.CWD
-			session.Project = filepath.Base(record.Payload.CWD)
-			session.GitBranch = record.Payload.Git.Branch
-			session.AgentPath = record.Payload.AgentPath
-			session.ParentID = record.Payload.ParentThreadID
-		}
-		if record.Type == "turn_context" && record.Payload.Model != "" {
-			currentModel = record.Payload.Model
-			if !seenModels[currentModel] {
-				session.Models = append(session.Models, currentModel)
-				seenModels[currentModel] = true
-			}
-		}
-		// Messages counts this session's own conversation turns (user prompts +
-		// agent replies), matching the user+assistant message lines the detail
-		// timeline shows. Ceiling: a subagent-heavy run undercounts, since work
-		// delegated to subagents surfaces in the timeline through the deduplicated
-		// bridge, not as event_msg turns here; the recursive size lives in TOKENS.
-		itemType := record.Payload.Type
-		if itemType == "item_completed" {
-			itemType = record.Payload.Item.Type
-		}
-		if record.Type == "event_msg" && !inReplayPrefix &&
-			(itemType == "user_message" || itemType == "agent_message" || itemType == "UserMessage" || itemType == "AgentMessage") {
-			if session.Title == "" && (itemType == "user_message" || itemType == "UserMessage") {
-				itemMessage := codexMessageText(record.Payload.Message)
-				if record.Payload.Type == "item_completed" {
-					itemMessage = joinCodexText(codexTextBlocks(record.Payload.Item.Content))
-				}
-				session.Title = titleFromUserMessage(itemMessage)
-			}
-			session.Messages++
-		}
-		if record.Type == "event_msg" && !inReplayPrefix && record.Payload.Type == "sub_agent_activity" && record.Payload.Kind == "started" {
-			addSubagent(session, path, record.Payload.AgentPath, record.Payload.AgentThreadID, session.UpdatedAt)
-		}
-		if record.Type == "event_msg" && !inReplayPrefix && record.Payload.Type == "item_completed" && record.Payload.Item.Type == "SubAgentActivity" && record.Payload.Item.Kind == "started" {
-			addSubagent(session, path, record.Payload.Item.AgentPath, record.Payload.Item.AgentThreadID, session.UpdatedAt)
-		}
-		if validTotal {
-			copy := *record.Payload.Info.Total
-			lastTotal = &copy
-			lastTotalModel = currentModel
-		}
-		if isTokenCount && replayActive {
-			if inReplayPrefix {
-				if validTotal {
-					replayBaseline = *record.Payload.Info.Total
-					runningMax = replayBaseline
-				}
-				return
-			}
-			if validSecond && second > replaySecond {
-				replayActive = false
-			}
-		}
-		cumulativeAdvanced := true
-		if validTotal {
-			cumulativeAdvanced = advanceTokenUsageMax(&runningMax, record.Payload.Info.Total)
-		}
-		if isTokenCount && record.Payload.Info.Last != nil {
-			if !validTokenUsage(record.Payload.Info.Last) {
-				return
-			}
-			if !cumulativeAdvanced {
-				return
-			}
-			usage := usageByModel[currentModel]
-			if usage == nil {
-				usage = &tokenUsage{}
-			}
-			modelTotal := *usage
-			allModelsTotal := summedLast
-			if !addTokenUsage(&modelTotal, record.Payload.Info.Last) || !addTokenUsage(&allModelsTotal, record.Payload.Info.Last) {
-				return
-			}
-			if usageByModel[currentModel] == nil {
-				usageOrder = append(usageOrder, currentModel)
-			}
-			usageByModel[currentModel] = &modelTotal
-			summedLast = allModelsTotal
-			pricingRecords = append(pricingRecords, tokenUsageRecord{model: currentModel, usage: *record.Payload.Info.Last, offset: offset})
-			hasLast = true
-		}
-	})
-	if err != nil {
-		return nil, err
+func newSummaryAccumulator(parser Parser, path, replaySecond string) *summaryAccumulator {
+	return &summaryAccumulator{
+		parser:       parser,
+		session:      &model.Session{Agent: model.AgentCodex, Path: path},
+		usageByModel: make(map[string]*tokenUsage),
+		replaySecond: replaySecond,
+		replayActive: replaySecond != "",
+		seenModels:   make(map[string]bool),
 	}
-	sourceSize, err := file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return nil, err
+}
+
+func (a *summaryAccumulator) clone() *summaryAccumulator {
+	cloned := *a
+	cloned.session = cloneSummarySession(a.session)
+	if a.lastTotal != nil {
+		lastTotal := *a.lastTotal
+		cloned.lastTotal = &lastTotal
 	}
+	cloned.usageByModel = make(map[string]*tokenUsage, len(a.usageByModel))
+	for usageModel, usage := range a.usageByModel {
+		copy := *usage
+		cloned.usageByModel[usageModel] = &copy
+	}
+	cloned.usageOrder = append([]string(nil), a.usageOrder...)
+	cloned.pricingRecords = append([]tokenUsageRecord(nil), a.pricingRecords...)
+	cloned.seenModels = make(map[string]bool, len(a.seenModels))
+	for usageModel, seen := range a.seenModels {
+		cloned.seenModels[usageModel] = seen
+	}
+	return &cloned
+}
+
+func cloneSummarySession(session *model.Session) *model.Session {
+	if session == nil {
+		return nil
+	}
+	cloned := *session
+	cloned.Models = append([]string(nil), session.Models...)
+	if session.Subagents != nil {
+		cloned.Subagents = make([]*model.Session, 0, len(session.Subagents))
+		for _, subagent := range session.Subagents {
+			cloned.Subagents = append(cloned.Subagents, cloneSummarySession(subagent))
+		}
+	}
+	return &cloned
+}
+
+func (a *summaryAccumulator) ingest(line []byte, offset int64) {
+	var envelope struct {
+		Timestamp string `json:"timestamp"`
+		Type      string `json:"type"`
+		Payload   struct {
+			Type string `json:"type"`
+		} `json:"payload"`
+	}
+	if jsonl.Unmarshal(line, &envelope) != nil {
+		return
+	}
+	if timestamp, parseErr := time.Parse(time.RFC3339Nano, envelope.Timestamp); parseErr == nil {
+		if a.session.StartedAt.IsZero() {
+			a.session.StartedAt = timestamp
+		}
+		if a.session.UpdatedAt.IsZero() || timestamp.After(a.session.UpdatedAt) {
+			a.session.UpdatedAt = timestamp
+		}
+	}
+	if envelope.Type != "session_meta" && envelope.Type != "turn_context" &&
+		!(envelope.Type == "event_msg" && (envelope.Payload.Type == "user_message" || envelope.Payload.Type == "agent_message" || envelope.Payload.Type == "sub_agent_activity" || envelope.Payload.Type == "item_completed" || envelope.Payload.Type == "token_count")) {
+		return
+	}
+	var record logRecord
+	if jsonl.Unmarshal(line, &record) != nil {
+		return
+	}
+	second, validSecond := codexTimestampSecond(record.Timestamp)
+	inReplayPrefix := a.replayActive && validSecond && second == a.replaySecond
+	isTokenCount := record.Type == "event_msg" && record.Payload.Type == "token_count"
+	validTotal := isTokenCount && record.Payload.Info.Total != nil && validTokenUsage(record.Payload.Info.Total)
+	// Newer Codex embeds the parent's session_meta after the child's in subagent sidecars.
+	if record.Type == "session_meta" && !a.metaSeen {
+		a.metaSeen = true
+		a.session.ID = record.Payload.ID
+		if a.session.ID == "" {
+			a.session.ID = record.Payload.SessionID
+		}
+		a.session.CWD = record.Payload.CWD
+		a.session.Project = filepath.Base(record.Payload.CWD)
+		a.session.GitBranch = record.Payload.Git.Branch
+		a.session.AgentPath = record.Payload.AgentPath
+		a.session.ParentID = record.Payload.ParentThreadID
+	}
+	if record.Type == "turn_context" && record.Payload.Model != "" {
+		a.currentModel = record.Payload.Model
+		if !a.seenModels[a.currentModel] {
+			a.session.Models = append(a.session.Models, a.currentModel)
+			a.seenModels[a.currentModel] = true
+		}
+	}
+	// Messages counts this session's own conversation turns (user prompts +
+	// agent replies), matching the user+assistant message lines the detail
+	// timeline shows. Ceiling: a subagent-heavy run undercounts, since work
+	// delegated to subagents surfaces in the timeline through the deduplicated
+	// bridge, not as event_msg turns here; the recursive size lives in TOKENS.
+	itemType := record.Payload.Type
+	if itemType == "item_completed" {
+		itemType = record.Payload.Item.Type
+	}
+	if record.Type == "event_msg" && !inReplayPrefix &&
+		(itemType == "user_message" || itemType == "agent_message" || itemType == "UserMessage" || itemType == "AgentMessage") {
+		if a.session.Title == "" && (itemType == "user_message" || itemType == "UserMessage") {
+			itemMessage := codexMessageText(record.Payload.Message)
+			if record.Payload.Type == "item_completed" {
+				itemMessage = joinCodexText(codexTextBlocks(record.Payload.Item.Content))
+			}
+			a.session.Title = titleFromUserMessage(itemMessage)
+		}
+		a.session.Messages++
+	}
+	if record.Type == "event_msg" && !inReplayPrefix && record.Payload.Type == "sub_agent_activity" && record.Payload.Kind == "started" {
+		addSubagent(a.session, a.session.Path, record.Payload.AgentPath, record.Payload.AgentThreadID, a.session.UpdatedAt)
+	}
+	if record.Type == "event_msg" && !inReplayPrefix && record.Payload.Type == "item_completed" && record.Payload.Item.Type == "SubAgentActivity" && record.Payload.Item.Kind == "started" {
+		addSubagent(a.session, a.session.Path, record.Payload.Item.AgentPath, record.Payload.Item.AgentThreadID, a.session.UpdatedAt)
+	}
+	if validTotal {
+		copy := *record.Payload.Info.Total
+		a.lastTotal = &copy
+		a.lastTotalModel = a.currentModel
+	}
+	if isTokenCount && a.replayActive {
+		if inReplayPrefix {
+			if validTotal {
+				a.replayBaseline = *record.Payload.Info.Total
+				a.runningMax = a.replayBaseline
+			}
+			return
+		}
+		if validSecond && second > a.replaySecond {
+			a.replayActive = false
+		}
+	}
+	cumulativeAdvanced := true
+	if validTotal {
+		cumulativeAdvanced = advanceTokenUsageMax(&a.runningMax, record.Payload.Info.Total)
+	}
+	if isTokenCount && record.Payload.Info.Last != nil {
+		if !validTokenUsage(record.Payload.Info.Last) || !cumulativeAdvanced {
+			return
+		}
+		usage := a.usageByModel[a.currentModel]
+		if usage == nil {
+			usage = &tokenUsage{}
+		}
+		modelTotal := *usage
+		allModelsTotal := a.summedLast
+		if !addTokenUsage(&modelTotal, record.Payload.Info.Last) || !addTokenUsage(&allModelsTotal, record.Payload.Info.Last) {
+			return
+		}
+		if a.usageByModel[a.currentModel] == nil {
+			a.usageOrder = append(a.usageOrder, a.currentModel)
+		}
+		a.usageByModel[a.currentModel] = &modelTotal
+		a.summedLast = allModelsTotal
+		a.pricingRecords = append(a.pricingRecords, tokenUsageRecord{model: a.currentModel, usage: *record.Payload.Info.Last, offset: offset})
+		a.hasLast = true
+	}
+}
+
+func (a *summaryAccumulator) finish(ctx context.Context, sourceSize int64) (*model.Session, error) {
+	session := cloneSummarySession(a.session)
 	session.SourceSize = sourceSize
+	session.Usage = nil
+	session.Requests = nil
+
 	var ownTotal *tokenUsage
-	if lastTotal != nil {
-		candidate := *lastTotal
-		if subtractTokenUsage(&candidate, &replayBaseline) {
+	if a.lastTotal != nil {
+		candidate := *a.lastTotal
+		if subtractTokenUsage(&candidate, &a.replayBaseline) {
 			ownTotal = &candidate
 		}
 	}
 	// Per-turn pricing is safe only when Codex's cumulative total confirms that
 	// the Last records form a clean partition; every other path stays lumped.
-	cleanPartition := ownTotal != nil && hasLast && summedLast == *ownTotal
-	if ownTotal != nil && (!hasLast || summedLast != *ownTotal) {
-		usageByModel = map[string]*tokenUsage{lastTotalModel: ownTotal}
-		usageOrder = []string{lastTotalModel}
+	cleanPartition := ownTotal != nil && a.hasLast && a.summedLast == *ownTotal
+	usageByModel := a.usageByModel
+	usageOrder := a.usageOrder
+	if ownTotal != nil && (!a.hasLast || a.summedLast != *ownTotal) {
+		usageByModel = map[string]*tokenUsage{a.lastTotalModel: ownTotal}
+		usageOrder = []string{a.lastTotalModel}
 	}
+	pricingRecords := a.pricingRecords
 	if !cleanPartition {
-		pricingRecords = pricingRecords[:0]
+		pricingRecords = make([]tokenUsageRecord, 0, len(usageOrder))
 		for _, usageModel := range usageOrder {
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -305,7 +315,7 @@ func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, 
 		usage := codexUsage(record.model, record.usage)
 		session.Requests = append(session.Requests, model.RequestUsage{Offset: record.offset, Usage: usage})
 	}
-	p.calculator.ApplySessionCodex(session, p.defaultPricingModel)
+	a.parser.calculator.ApplySessionCodex(session, a.parser.defaultPricingModel)
 	if session.AgentPath != "" {
 		session.Title = model.CleanTitle(filepath.Base(session.AgentPath))
 	}
@@ -313,6 +323,324 @@ func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, 
 		return nil, err
 	}
 	return session, nil
+}
+
+func (p Parser) Parse(path string) (*model.Session, error) {
+	return p.ParseContext(context.Background(), path)
+}
+
+func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, error) {
+	session, _, err := p.parseResumableContext(ctx, path, nil)
+	return session, err
+}
+
+func (p Parser) parseResumableContext(ctx context.Context, path string, checkpoint *summaryCheckpoint) (*model.Session, *summaryCheckpoint, error) {
+	return p.parseResumableContextAfterValidation(ctx, path, checkpoint, nil)
+}
+
+func (p Parser) parseResumableContextAfterValidation(ctx context.Context, path string, checkpoint *summaryCheckpoint, afterValidation func()) (*model.Session, *summaryCheckpoint, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer file.Close()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	var accumulator *summaryAccumulator
+	resumeAt := int64(0)
+	lastLineBytes := int64(0)
+	lastLineHash := [sha256.Size]byte{}
+	prefixReusable := false
+	resumed := false
+	if valid, validationErr := checkpointValid(ctx, file, path, info.Size(), checkpoint); validationErr != nil {
+		return nil, nil, validationErr
+	} else if valid {
+		accumulator = checkpoint.accumulator.clone()
+		resumeAt = checkpoint.resumeAt
+		lastLineBytes = checkpoint.lastLineBytes
+		lastLineHash = checkpoint.lastLineHash
+		prefixReusable = true
+		resumed = true
+		if afterValidation != nil {
+			afterValidation()
+		}
+	}
+
+	if accumulator == nil {
+		replaySecond, reusable, scanErr := scanSummaryPrefix(ctx, file)
+		if scanErr != nil {
+			return nil, nil, scanErr
+		}
+		prefixReusable = reusable
+		accumulator = newSummaryAccumulator(p, path, replaySecond)
+	}
+	var resumedRangeHash [sha256.Size]byte
+	reader := io.Reader(file)
+	if resumed {
+		resumedRangeHash, err = fileRangeHash(ctx, file, resumeAt, info.Size()-resumeAt)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			return p.parseResumableContext(ctx, path, nil)
+		}
+		reader = io.NewSectionReader(file, resumeAt, info.Size()-resumeAt)
+	} else if _, err := file.Seek(resumeAt, io.SeekStart); err != nil {
+		return nil, nil, err
+	}
+
+	lastCompleteOffset := resumeAt
+	lastLineOffset := resumeAt - lastLineBytes
+	lastLineNeedsHash := false
+	var trailingLine []byte
+	var trailingOffset int64
+	err = jsonl.ForEachContextWithMetadata(ctx, reader, func(line []byte, metadata jsonl.LineMetadata) {
+		offset := resumeAt + metadata.Offset
+		if !metadata.Terminated {
+			if !metadata.Oversized && len(line) > 0 {
+				trailingLine = append(trailingLine[:0], line...)
+				trailingOffset = offset
+			}
+			return
+		}
+		if !metadata.Oversized && len(line) > 0 {
+			accumulator.ingest(line, offset)
+		}
+		lastCompleteOffset = resumeAt + metadata.NextOffset
+		lastLineOffset = offset
+		lastLineBytes = metadata.NextOffset - metadata.Offset
+		lastLineNeedsHash = metadata.Oversized
+		if !metadata.Oversized {
+			lastLineBytes, lastLineHash = terminatedLineHash(line, metadata)
+		}
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if lastLineNeedsHash {
+		lastLineHash, err = fileRangeHash(ctx, file, lastLineOffset, lastLineBytes)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if resumed {
+		postScanRangeHash, hashErr := fileRangeHash(ctx, file, resumeAt, info.Size()-resumeAt)
+		if hashErr != nil {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			return p.parseResumableContext(ctx, path, nil)
+		}
+		postScanInfo, statErr := file.Stat()
+		if statErr != nil {
+			return nil, nil, statErr
+		}
+		valid, validationErr := checkpointValid(ctx, file, path, postScanInfo.Size(), checkpoint)
+		if validationErr != nil {
+			return nil, nil, validationErr
+		}
+		pathInfo, pathErr := os.Stat(path)
+		if pathErr != nil || !os.SameFile(info, pathInfo) || resumedRangeHash != postScanRangeHash || !valid {
+			return p.parseResumableContext(ctx, path, nil)
+		}
+	}
+	sourceSize := info.Size()
+	if !resumed {
+		sourceSize, err = file.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	resultAccumulator := accumulator
+	if len(trailingLine) > 0 && validSummaryJSON(trailingLine) {
+		resultAccumulator = accumulator.clone()
+		resultAccumulator.ingest(trailingLine, trailingOffset)
+	}
+	session, err := resultAccumulator.finish(ctx, sourceSize)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !prefixReusable {
+		return session, nil, nil
+	}
+	pathInfo, pathErr := os.Stat(path)
+	if pathErr != nil || !os.SameFile(info, pathInfo) {
+		return session, nil, nil
+	}
+	headLength := min(sourceSize, int64(summaryCheckpointHeadBytes))
+	headHash, err := fileHeadHash(ctx, file, headLength)
+	if err != nil {
+		return nil, nil, err
+	}
+	return session, &summaryCheckpoint{
+		accumulator:   accumulator,
+		size:          sourceSize,
+		headLength:    headLength,
+		headHash:      headHash,
+		resumeAt:      lastCompleteOffset,
+		lastLineBytes: lastLineBytes,
+		lastLineHash:  lastLineHash,
+	}, nil
+}
+
+func scanSummaryPrefix(ctx context.Context, file *os.File) (string, bool, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", false, err
+	}
+	var isForked bool
+	var replayCandidates []string
+	replayCandidateInvalid := false
+	metaSeen := false
+	scanCtx, stopScan := context.WithCancel(ctx)
+	scanComplete := false
+	prefixReusable := false
+	err := jsonl.ForEachContextWithMetadata(scanCtx, file, func(line []byte, metadata jsonl.LineMetadata) {
+		if metadata.Oversized || len(line) == 0 {
+			return
+		}
+		var record logRecord
+		if jsonl.Unmarshal(line, &record) != nil {
+			return
+		}
+		if record.Type == "session_meta" && !metaSeen {
+			metaSeen = true
+			isForked = record.Payload.ThreadSource == "subagent" || record.Payload.ForkedFromID != ""
+		}
+		second, validSecond := codexTimestampSecond(record.Timestamp)
+		if len(replayCandidates) < 2 && record.Type == "event_msg" && record.Payload.Type == "token_count" &&
+			record.Payload.Info.Last != nil && validTokenUsage(record.Payload.Info.Last) {
+			replayCandidates = append(replayCandidates, strings.Clone(second))
+			replayCandidateInvalid = replayCandidateInvalid || !validSecond
+		}
+		if metaSeen && (!isForked || len(replayCandidates) == 2) {
+			scanComplete = true
+			prefixReusable = metadata.Terminated
+			stopScan()
+		}
+	})
+	stopScan()
+	if err != nil && !(scanComplete && errors.Is(err, context.Canceled)) {
+		return "", false, err
+	}
+	var replaySecond string
+	// Ceiling: spaced replay timestamps disable detection; the real-log oracle is
+	// the signal to revisit this without adding cross-file parent reads.
+	if isForked && !replayCandidateInvalid && len(replayCandidates) == 2 && replayCandidates[0] == replayCandidates[1] {
+		replaySecond = replayCandidates[0]
+	}
+	return replaySecond, prefixReusable, nil
+}
+
+func checkpointValid(ctx context.Context, file *os.File, path string, currentSize int64, checkpoint *summaryCheckpoint) (bool, error) {
+	if checkpoint == nil || checkpoint.accumulator == nil || checkpoint.accumulator.session == nil || checkpoint.accumulator.session.Path != path {
+		return false, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if currentSize < checkpoint.size || checkpoint.resumeAt < 0 || checkpoint.resumeAt > currentSize ||
+		checkpoint.headLength < 0 || checkpoint.headLength > summaryCheckpointHeadBytes || checkpoint.headLength > checkpoint.size {
+		return false, nil
+	}
+	headHash, err := fileHeadHash(ctx, file, checkpoint.headLength)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		return false, nil
+	}
+	if headHash != checkpoint.headHash {
+		return false, nil
+	}
+	if checkpoint.resumeAt == 0 {
+		return checkpoint.lastLineBytes == 0, nil
+	}
+	if checkpoint.lastLineBytes <= 0 || checkpoint.lastLineBytes > checkpoint.resumeAt {
+		return false, nil
+	}
+	terminator := []byte{0}
+	if _, err := file.ReadAt(terminator, checkpoint.resumeAt-1); err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		return false, nil
+	}
+	if terminator[0] != '\n' {
+		return false, nil
+	}
+	boundaryHash, err := fileRangeHash(ctx, file, checkpoint.resumeAt-checkpoint.lastLineBytes, checkpoint.lastLineBytes)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		return false, nil
+	}
+	return boundaryHash == checkpoint.lastLineHash, nil
+}
+
+func fileHeadHash(ctx context.Context, file *os.File, length int64) ([sha256.Size]byte, error) {
+	return fileRangeHash(ctx, file, 0, length)
+}
+
+func fileRangeHash(ctx context.Context, file *os.File, offset, length int64) ([sha256.Size]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	hasher := sha256.New()
+	reader := io.NewSectionReader(file, offset, length)
+	buffer := make([]byte, min(length, int64(64<<10)))
+	for reader.Size() > 0 {
+		if err := ctx.Err(); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		read, err := reader.Read(buffer)
+		if read > 0 {
+			_, _ = hasher.Write(buffer[:read])
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return [sha256.Size]byte{}, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hasher.Sum(nil))
+	return digest, nil
+}
+
+func terminatedLineHash(line []byte, metadata jsonl.LineMetadata) (int64, [sha256.Size]byte) {
+	terminatorLength := metadata.NextOffset - metadata.Offset - metadata.Length
+	hasher := sha256.New()
+	_, _ = hasher.Write(line)
+	if terminatorLength == 2 {
+		_, _ = hasher.Write([]byte{'\r'})
+	}
+	_, _ = hasher.Write([]byte{'\n'})
+	var digest [sha256.Size]byte
+	copy(digest[:], hasher.Sum(nil))
+	return metadata.NextOffset - metadata.Offset, digest
+}
+
+func validSummaryJSON(line []byte) bool {
+	var envelope struct {
+		Timestamp string `json:"timestamp"`
+		Type      string `json:"type"`
+		Payload   struct {
+			Type string `json:"type"`
+		} `json:"payload"`
+	}
+	return jsonl.Unmarshal(line, &envelope) == nil
 }
 
 func codexUsage(usageModel string, selected tokenUsage) model.Usage {

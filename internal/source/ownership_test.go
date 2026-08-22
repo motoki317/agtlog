@@ -323,8 +323,10 @@ func TestRegistryDiscoverAttributesTopLevelOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(sessions) != 2 || origin.DuplicatedCount != 0 || replay.DuplicatedCount != 1 {
-		t.Fatalf("discovered attribution = sessions %d, origin %#v, replay %#v", len(sessions), origin, replay)
+	discoveredOrigin := sessionWithID(sessions, origin.ID)
+	discoveredReplay := sessionWithID(sessions, replay.ID)
+	if len(sessions) != 2 || discoveredOrigin == nil || discoveredReplay == nil || discoveredOrigin.DuplicatedCount != 0 || discoveredReplay.DuplicatedCount != 1 {
+		t.Fatalf("discovered attribution = sessions %d, origin %#v, replay %#v", len(sessions), discoveredOrigin, discoveredReplay)
 	}
 }
 
@@ -356,10 +358,13 @@ func TestRegistryDiscoverExcludesLinkedSubagentsFromOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(sessions) != 2 || parent.Subagents[0] != child {
+	discoveredParent := sessionWithID(sessions, parent.ID)
+	discoveredTopLevel := sessionWithID(sessions, topLevel.ID)
+	if len(sessions) != 2 || discoveredParent == nil || discoveredTopLevel == nil || len(discoveredParent.Subagents) != 1 || discoveredParent.Subagents[0].ID != child.ID {
 		t.Fatalf("discovered graph = %#v, want two roots with linked child", sessions)
 	}
-	if child.DuplicatedCount != 0 || topLevel.DuplicatedCount != 0 {
-		t.Fatalf("subagent leaked into top-level ownership: child %#v, top-level %#v", child, topLevel)
+	discoveredChild := discoveredParent.Subagents[0]
+	if discoveredChild.DuplicatedCount != 0 || discoveredTopLevel.DuplicatedCount != 0 {
+		t.Fatalf("subagent leaked into top-level ownership: child %#v, top-level %#v", discoveredChild, discoveredTopLevel)
 	}
 }

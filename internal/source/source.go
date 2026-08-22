@@ -14,3 +14,8 @@ type Source interface {
 	ParseContext(context.Context, string) (*model.Session, error)
 	Reprice(*model.Session)
 }
+
+type resumableContextParser interface {
+	Source
+	ParseResumableContext(context.Context, string, any) (*model.Session, any, error)
+}

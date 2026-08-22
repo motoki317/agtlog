@@ -13,6 +13,14 @@ const (
 	maxLineBytes      = MaxLineBytes
 )
 
+type LineMetadata struct {
+	Offset     int64
+	Length     int64
+	NextOffset int64
+	Terminated bool
+	Oversized  bool
+}
+
 // ForEach bounds memory per record and treats an oversized record like malformed JSON.
 func ForEach(reader io.Reader, visit func([]byte)) error {
 	return ForEachContext(context.Background(), reader, visit)
@@ -25,6 +33,14 @@ func ForEachContext(ctx context.Context, reader io.Reader, visit func([]byte)) e
 }
 
 func ForEachContextWithOffset(ctx context.Context, reader io.Reader, visit func([]byte, int64, int64)) error {
+	return ForEachContextWithMetadata(ctx, reader, func(line []byte, metadata LineMetadata) {
+		if !metadata.Oversized && len(line) > 0 {
+			visit(line, metadata.Offset, metadata.Length)
+		}
+	})
+}
+
+func ForEachContextWithMetadata(ctx context.Context, reader io.Reader, visit func([]byte, LineMetadata)) error {
 	buffered := bufio.NewReaderSize(reader, readerBufferBytes)
 	line := make([]byte, 0, readerBufferBytes)
 	tooLong := false
@@ -49,11 +65,17 @@ func ForEachContextWithOffset(ctx context.Context, reader io.Reader, visit func(
 		if err != nil && !errors.Is(err, io.EOF) {
 			return err
 		}
-		if !tooLong {
-			line = trimLineEnding(line)
-			if len(line) > 0 {
-				visit(line, offset, int64(len(line)))
+		if position > offset {
+			if !tooLong {
+				line = trimLineEnding(line)
 			}
+			visit(line, LineMetadata{
+				Offset:     offset,
+				Length:     int64(len(line)),
+				NextOffset: position,
+				Terminated: err == nil,
+				Oversized:  tooLong,
+			})
 		}
 		line = line[:0]
 		tooLong = false

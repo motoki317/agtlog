@@ -3,6 +3,7 @@ package jsonl
 import (
 	"bytes"
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -58,5 +59,29 @@ func TestForEachVisitsFinalLineWithoutNewline(t *testing.T) {
 	}
 	if got != "final" {
 		t.Fatalf("ForEach() line = %q, want final", got)
+	}
+}
+
+func TestForEachContextWithMetadataReportsPhysicalBoundaries(t *testing.T) {
+	input := []byte("first\r\n\nlast")
+	type visitedLine struct {
+		line string
+		meta LineMetadata
+	}
+	var got []visitedLine
+
+	err := ForEachContextWithMetadata(context.Background(), bytes.NewReader(input), func(line []byte, meta LineMetadata) {
+		got = append(got, visitedLine{line: string(line), meta: meta})
+	})
+	if err != nil {
+		t.Fatalf("ForEachContextWithMetadata() error = %v", err)
+	}
+	want := []visitedLine{
+		{line: "first", meta: LineMetadata{Offset: 0, Length: 5, NextOffset: 7, Terminated: true}},
+		{line: "", meta: LineMetadata{Offset: 7, Length: 0, NextOffset: 8, Terminated: true}},
+		{line: "last", meta: LineMetadata{Offset: 8, Length: 4, NextOffset: 12}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ForEachContextWithMetadata() = %#v, want %#v", got, want)
 	}
 }

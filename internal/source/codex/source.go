@@ -99,6 +99,12 @@ func (s Source) ParseContext(ctx context.Context, path string) (*model.Session, 
 	return s.parser.ParseContext(ctx, path)
 }
 
+func (s Source) ParseResumableContext(ctx context.Context, path string, checkpoint any) (*model.Session, any, error) {
+	previous, _ := checkpoint.(*summaryCheckpoint)
+	session, next, err := s.parser.parseResumableContext(ctx, path, previous)
+	return session, next, err
+}
+
 func (s Source) Reprice(session *model.Session) {
 	s.parser.calculator.ApplySessionCodex(session, s.parser.defaultPricingModel)
 }
