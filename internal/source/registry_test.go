@@ -150,7 +150,7 @@ func TestRegistryDiscoversEveryRegisteredSource(t *testing.T) {
 func TestRegistryReportsPerPathDiagnostics(t *testing.T) {
 	adapter := diagnosticSource{
 		sessions: map[string]*model.Session{
-			"good.jsonl": {ID: "session-good", Agent: model.AgentClaude},
+			"good.jsonl": {ID: "session-good", Agent: model.AgentClaude, Path: "good.jsonl"},
 		},
 		errors: map[string]error{
 			"broken-b.jsonl": errors.New("bad record b"),
@@ -179,6 +179,24 @@ func TestRegistryReportsPerPathDiagnostics(t *testing.T) {
 	legacySessions, err := registry.Discover(context.Background())
 	if err != nil || len(legacySessions) != 1 {
 		t.Fatalf("Discover() = %#v, %v", legacySessions, err)
+	}
+}
+
+func TestRegistryRejectsParsedSessionAtDifferentPath(t *testing.T) {
+	adapter := diagnosticSource{
+		sessions: map[string]*model.Session{
+			"discovered.jsonl": {ID: "session-spoofed", Agent: model.AgentClaude, Path: "other.jsonl"},
+		},
+	}
+	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1})
+
+	sessions, diagnostics, err := registry.DiscoverWithDiagnostics(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 || len(diagnostics) != 1 || diagnostics[0].Path != "discovered.jsonl" ||
+		diagnostics[0].Err.Error() != "parsed session path does not match discovered path" {
+		t.Fatalf("DiscoverWithDiagnostics() = sessions %#v, diagnostics %#v", sessions, diagnostics)
 	}
 }
 

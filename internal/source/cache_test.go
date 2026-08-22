@@ -563,6 +563,31 @@ func TestRegistryRejectsCacheEntryTrailingJSON(t *testing.T) {
 	}
 }
 
+func TestRegistryRejectsCacheEntryForDifferentSourcePath(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
+	fingerprint, err := sourceFingerprint(adapter, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.storeCached(adapter, path, fingerprint, &model.Session{
+		ID: "spoofed", Agent: adapter.Agent(), Path: filepath.Join(root, "other.jsonl"),
+	}, nil)
+
+	sessions, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 || sessions[0].Path != path || adapter.parses != 1 {
+		t.Fatalf("Discover() = %#v after %d parses, want the source path reparsed", sessions, adapter.parses)
+	}
+}
+
 func TestRegistryRejectsUnsafeCacheNamespace(t *testing.T) {
 	for _, shape := range []string{"symlink", "regular file", "writable directory"} {
 		t.Run(shape, func(t *testing.T) {
@@ -917,7 +942,7 @@ func TestRegistryLinksSubagentSummariesAndKeepsOnlyTopLevel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sessions) != 1 || sessions[0] != parent || sessions[0].Subagents[0] != child {
+	if len(sessions) != 1 || sessions[0].ID != parent.ID || len(sessions[0].Subagents) != 1 || sessions[0].Subagents[0].ID != child.ID {
 		t.Fatalf("top-level graph = %#v, want linked parent only", sessions)
 	}
 	if got := sessions[0].TotalUsage().InputTokens; got != 30 {
@@ -943,7 +968,7 @@ func TestRegistryKeepsOrphanedCodexChildInspectable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(sessions) != 1 || sessions[0] != orphan {
+	if len(sessions) != 1 || sessions[0].ID != orphan.ID || sessions[0].Path != orphan.Path {
 		t.Fatalf("orphan discovery = %#v, want inspectable child", sessions)
 	}
 }

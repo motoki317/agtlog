@@ -170,12 +170,19 @@ func (r *Registry) DiscoverWithDiagnostics(ctx context.Context) ([]*model.Sessio
 	return r.discoverWithDiagnostics(ctx)
 }
 
-func (r *Registry) discoverFollowing(ctx context.Context) ([]*model.Session, error) {
-	sessions, _, err := r.discoverWithDiagnostics(ctx)
-	return sessions, err
+func (r *Registry) discoverWithDiagnostics(ctx context.Context) ([]*model.Session, []DiscoveryDiagnostic, error) {
+	allSessions, diagnostics, _, err := r.discoverSessionsWithDiagnostics(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	sessions, err := buildSessionSnapshotContext(ctx, allSessions)
+	if err != nil {
+		return nil, nil, err
+	}
+	return sessions, diagnostics, nil
 }
 
-func (r *Registry) discoverWithDiagnostics(ctx context.Context) ([]*model.Session, []DiscoveryDiagnostic, error) {
+func (r *Registry) discoverSessionsWithDiagnostics(ctx context.Context) ([]*model.Session, []DiscoveryDiagnostic, []string, error) {
 	type job struct {
 		source Source
 		path   string
@@ -183,12 +190,13 @@ func (r *Registry) discoverWithDiagnostics(ctx context.Context) ([]*model.Sessio
 	type result struct {
 		session     *model.Session
 		diagnostics []DiscoveryDiagnostic
+		failedPath  string
 	}
 	var pending []job
 	for _, adapter := range r.sources {
 		paths, err := adapter.Discover(ctx)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		for _, path := range paths {
 			pending = append(pending, job{source: adapter, path: path})
@@ -226,7 +234,7 @@ func (r *Registry) discoverWithDiagnostics(ctx context.Context) ([]*model.Sessio
 				session, diagnostics, err := r.discoverSessionWithCacheContext(ctx, cacheRoot, item.source, item.path)
 				if err != nil {
 					diagnostics = append(diagnostics, DiscoveryDiagnostic{Agent: item.source.Agent(), Path: item.path, Err: err})
-					results <- result{diagnostics: diagnostics}
+					results <- result{diagnostics: diagnostics, failedPath: item.path}
 					continue
 				}
 				results <- result{session: session, diagnostics: diagnostics}
@@ -240,6 +248,7 @@ func (r *Registry) discoverWithDiagnostics(ctx context.Context) ([]*model.Sessio
 
 	allSessions := make([]*model.Session, 0, len(pending))
 	diagnostics := make([]DiscoveryDiagnostic, 0)
+	failedPaths := make([]string, 0)
 	completed := 0
 	for item := range results {
 		completed++
@@ -247,12 +256,15 @@ func (r *Registry) discoverWithDiagnostics(ctx context.Context) ([]*model.Sessio
 			r.options.Progress(completed, len(pending))
 		}
 		diagnostics = append(diagnostics, item.diagnostics...)
+		if item.failedPath != "" {
+			failedPaths = append(failedPaths, item.failedPath)
+		}
 		if item.session != nil {
 			allSessions = append(allSessions, item.session)
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	sort.Slice(diagnostics, func(i, j int) bool {
 		if diagnostics[i].Agent != diagnostics[j].Agent {
@@ -260,14 +272,27 @@ func (r *Registry) discoverWithDiagnostics(ctx context.Context) ([]*model.Sessio
 		}
 		return diagnostics[i].Path < diagnostics[j].Path
 	})
+	sort.Strings(failedPaths)
+	return allSessions, diagnostics, failedPaths, nil
+}
+
+func buildSessionSnapshotContext(ctx context.Context, parsedSessions []*model.Session) ([]*model.Session, error) {
+	allSessions := make([]*model.Session, 0, len(parsedSessions))
+	for _, session := range parsedSessions {
+		copied, err := copySessionTreeContext(ctx, session)
+		if err != nil {
+			return nil, err
+		}
+		allSessions = append(allSessions, copied)
+	}
 	linkedChildren, err := linkSessionGraphsContext(ctx, allSessions)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	sessions := make([]*model.Session, 0, len(allSessions))
 	for _, session := range allSessions {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		if linkedChildren[session] {
 			continue
@@ -284,9 +309,31 @@ func (r *Registry) discoverWithDiagnostics(ctx context.Context) ([]*model.Sessio
 		return sessions[i].ID < sessions[j].ID
 	})
 	if err := attributeOwnershipContext(ctx, sessions); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	return sessions, diagnostics, nil
+	return sessions, nil
+}
+
+func copySessionTreeContext(ctx context.Context, session *model.Session) (*model.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if session == nil {
+		return nil, nil
+	}
+	copy := *session
+	if len(session.Subagents) == 0 {
+		return &copy, nil
+	}
+	copy.Subagents = make([]*model.Session, 0, len(session.Subagents))
+	for _, child := range session.Subagents {
+		copiedChild, err := copySessionTreeContext(ctx, child)
+		if err != nil {
+			return nil, err
+		}
+		copy.Subagents = append(copy.Subagents, copiedChild)
+	}
+	return &copy, nil
 }
 
 func linkSessionGraphs(sessions []*model.Session) map[*model.Session]bool {

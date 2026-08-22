@@ -247,11 +247,11 @@ func (s blockingParseSource) Roots() []string          { return nil }
 func (s blockingParseSource) Discover(context.Context) ([]string, error) {
 	return []string{"session.jsonl"}, nil
 }
-func (s blockingParseSource) Parse(string) (*model.Session, error) {
+func (s blockingParseSource) Parse(path string) (*model.Session, error) {
 	close(s.parseStarted)
 	defer close(s.parseDone)
 	<-s.releaseParse
-	return &model.Session{ID: "session-a", Agent: model.AgentClaude}, nil
+	return &model.Session{ID: "session-a", Agent: model.AgentClaude, Path: path}, nil
 }
 func (s blockingParseSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
 	return s.Parse(path)
@@ -301,7 +301,11 @@ func (s staticSource) Roots() []string {
 func (s staticSource) Discover(context.Context) ([]string, error) {
 	return []string{"session.jsonl"}, nil
 }
-func (s staticSource) Parse(string) (*model.Session, error) { return s.session, nil }
+func (s staticSource) Parse(path string) (*model.Session, error) {
+	session := *s.session
+	session.Path = path
+	return &session, nil
+}
 func (s staticSource) ParseContext(_ context.Context, path string) (*model.Session, error) {
 	return s.Parse(path)
 }

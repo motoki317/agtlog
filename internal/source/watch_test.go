@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,6 +30,73 @@ type cancelableFingerprintSource struct {
 	started     chan struct{}
 	release     chan struct{}
 	startedOnce sync.Once
+}
+
+type indexedFollowSource struct {
+	root                string
+	mu                  sync.Mutex
+	sessions            map[string]*model.Session
+	discoverReplacement *model.Session
+	discovers           int
+	parses              map[string]int
+	failParses          map[string]int
+}
+
+func (s *indexedFollowSource) Agent() model.AgentKind   { return model.AgentCodex }
+func (s *indexedFollowSource) Roots() []string          { return []string{s.root} }
+func (s *indexedFollowSource) CacheFingerprint() string { return "indexed-follow-v1" }
+func (s *indexedFollowSource) Discover(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.discovers++
+	if s.discoverReplacement != nil {
+		s.sessions[s.discoverReplacement.Path] = s.discoverReplacement
+		s.discoverReplacement = nil
+	}
+	paths := make([]string, 0, len(s.sessions))
+	for path := range s.sessions {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+func (s *indexedFollowSource) ParseContext(ctx context.Context, path string) (*model.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.parses[path]++
+	if s.failParses[path] > 0 {
+		s.failParses[path]--
+		return nil, errors.New("transient parse failure")
+	}
+	session := s.sessions[path]
+	if session == nil {
+		return nil, os.ErrNotExist
+	}
+	copy := *session
+	copy.Subagents = append([]*model.Session(nil), session.Subagents...)
+	return &copy, nil
+}
+func (s *indexedFollowSource) Reprice(*model.Session) {}
+func (s *indexedFollowSource) set(session *model.Session) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessions[session.Path] = session
+}
+func (s *indexedFollowSource) remove(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.sessions, path)
+}
+func (s *indexedFollowSource) counts(path string) (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.discovers, s.parses[path]
 }
 
 func (s *cancelableFingerprintSource) Agent() model.AgentKind { return model.AgentClaude }
@@ -284,6 +352,185 @@ func TestFollowerReparsesChangedSession(t *testing.T) {
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("timed out waiting for parsed session update")
 	}
+}
+
+func TestFollowerReusesIndexedSessionsForCodexSnapshots(t *testing.T) {
+	root := t.TempDir()
+	parentPath := filepath.Join(root, "root.jsonl")
+	childPath := filepath.Join(root, "child.jsonl")
+	for _, path := range []string{parentPath, childPath} {
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parentUpdated := time.Date(2026, 8, 22, 9, 0, 0, 0, time.UTC)
+	childUpdated := parentUpdated.Add(time.Minute)
+	adapter := &indexedFollowSource{
+		root: root,
+		sessions: map[string]*model.Session{
+			parentPath: {ID: "root", Agent: model.AgentCodex, Path: parentPath, Title: "root", UpdatedAt: parentUpdated, Cost: model.Cost{USD: 1}},
+			childPath:  {ID: "child", ParentID: "root", Agent: model.AgentCodex, Path: childPath, Title: "child", UpdatedAt: childUpdated, Cost: model.Cost{USD: 2}},
+		},
+		discoverReplacement: &model.Session{
+			ID: "root", Agent: model.AgentCodex, Path: parentPath, Title: "discovered root", UpdatedAt: parentUpdated, Cost: model.Cost{USD: 1},
+		},
+		parses: make(map[string]int),
+	}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 2})
+	follower, err := registry.Follow(context.Background(), WatchOptions{Debounce: 10 * time.Millisecond, RescanInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer follower.Close()
+
+	appendFollowLog(t, parentPath)
+	update := nextFollowerUpdate(t, follower)
+	parent := sessionWithID(update.Sessions, "root")
+	if parent == nil || parent.Title != "discovered root" || len(parent.Subagents) != 1 || parent.Subagents[0].ID != "child" {
+		t.Fatalf("first indexed snapshot = %#v, want child nested under root", update.Sessions)
+	}
+	if !parent.UpdatedAt.Equal(childUpdated) || parent.TotalCost().USD != 3 {
+		t.Fatalf("first root roll-up = updated %v, cost %v", parent.UpdatedAt, parent.TotalCost())
+	}
+
+	adapter.set(&model.Session{
+		ID: "root", Agent: model.AgentCodex, Path: parentPath, Title: "updated root", UpdatedAt: parentUpdated,
+		Cost: model.Cost{USD: 1}, Events: []model.Event{{Kind: model.EventAssistantText, Text: "fresh detail"}},
+	})
+	appendFollowLog(t, parentPath)
+	update = nextFollowerUpdate(t, follower)
+	parent = sessionWithID(update.Sessions, "root")
+	if parent == nil || parent.Title != "updated root" || len(parent.Events) != 1 || len(parent.Subagents) != 1 {
+		t.Fatalf("repeated indexed snapshot = %#v, want refreshed root with one child", update.Sessions)
+	}
+	if !parent.UpdatedAt.Equal(childUpdated) {
+		t.Fatalf("repeated root UpdatedAt = %v, want stable child roll-up %v", parent.UpdatedAt, childUpdated)
+	}
+	if discovers, childParses := adapter.counts(childPath); discovers != 1 || childParses != 1 {
+		t.Fatalf("repeated snapshot calls = %d discoveries, %d child parses, want 1 and 1", discovers, childParses)
+	}
+
+	newPath := filepath.Join(root, "new-root.jsonl")
+	newUpdated := childUpdated.Add(time.Minute)
+	adapter.set(&model.Session{ID: "new-root", Agent: model.AgentCodex, Path: newPath, Title: "new root", UpdatedAt: newUpdated, Cost: model.Cost{USD: 4}})
+	if err := os.WriteFile(newPath, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	update = nextFollowerUpdate(t, follower)
+	if sessionWithID(update.Sessions, "new-root") == nil {
+		t.Fatalf("new session snapshot = %#v, want new root", update.Sessions)
+	}
+	if discovers, newParses := adapter.counts(newPath); discovers != 1 || newParses != 1 {
+		t.Fatalf("new session calls = %d discoveries, %d parses, want 1 and 1", discovers, newParses)
+	}
+
+	adapter.remove(childPath)
+	if err := os.Remove(childPath); err != nil {
+		t.Fatal(err)
+	}
+	update = nextFollowerUpdate(t, follower)
+	parent = sessionWithID(update.Sessions, "root")
+	if parent == nil || len(parent.Subagents) != 0 || !parent.UpdatedAt.Equal(parentUpdated) {
+		t.Fatalf("post-removal root = %#v, want child removed and parser timestamp restored", parent)
+	}
+	if !reflect.DeepEqual(update.RemovedPaths, []string{childPath}) {
+		t.Fatalf("removed paths = %v, want %v", update.RemovedPaths, []string{childPath})
+	}
+	if discovers, _ := adapter.counts(childPath); discovers != 1 {
+		t.Fatalf("post-removal discoveries = %d, want one initial discovery", discovers)
+	}
+
+	adapter.remove(newPath)
+	if err := os.Remove(newPath); err != nil {
+		t.Fatal(err)
+	}
+	update = nextFollowerUpdate(t, follower)
+	if sessionWithID(update.Sessions, "new-root") != nil || !reflect.DeepEqual(update.RemovedPaths, []string{newPath}) {
+		t.Fatalf("removed root update = %#v, want new root absent and its path removed", update)
+	}
+	if discovers, _ := adapter.counts(newPath); discovers != 1 {
+		t.Fatalf("post-root-removal discoveries = %d, want one initial discovery", discovers)
+	}
+}
+
+func TestFollowerRetriesFailedInitialIndexPaths(t *testing.T) {
+	root := t.TempDir()
+	parentPath := filepath.Join(root, "root.jsonl")
+	childPath := filepath.Join(root, "child.jsonl")
+	for _, path := range []string{parentPath, childPath} {
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adapter := &indexedFollowSource{
+		root: root,
+		sessions: map[string]*model.Session{
+			parentPath: {ID: "root", Agent: model.AgentCodex, Path: parentPath},
+			childPath:  {ID: "child", ParentID: "root", Agent: model.AgentCodex, Path: childPath},
+		},
+		parses:     make(map[string]int),
+		failParses: map[string]int{childPath: 1},
+	}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1})
+	follower, err := registry.Follow(context.Background(), WatchOptions{Debounce: 10 * time.Millisecond, RescanInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer follower.Close()
+
+	appendFollowLog(t, parentPath)
+	first := nextFollowerUpdate(t, follower)
+	if parent := sessionWithID(first.Sessions, "root"); parent == nil || len(parent.Subagents) != 0 {
+		t.Fatalf("initial partial snapshot = %#v, want root without failed child", first.Sessions)
+	}
+
+	appendFollowLog(t, parentPath)
+	second := nextFollowerUpdate(t, follower)
+	parent := sessionWithID(second.Sessions, "root")
+	if parent == nil || len(parent.Subagents) != 1 || parent.Subagents[0].ID != "child" {
+		t.Fatalf("retried snapshot = %#v, want recovered child nested under root", second.Sessions)
+	}
+	if discovers, childParses := adapter.counts(childPath); discovers != 1 || childParses != 2 {
+		t.Fatalf("retry calls = %d discoveries, %d child parses, want 1 and 2", discovers, childParses)
+	}
+}
+
+func appendFollowLog(t *testing.T, path string) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString("{}\n"); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func nextFollowerUpdate(t *testing.T, follower *Follower) SessionUpdate {
+	t.Helper()
+	select {
+	case update, ok := <-follower.Updates():
+		if !ok {
+			t.Fatal("follower updates closed")
+		}
+		return update
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for follower update")
+		return SessionUpdate{}
+	}
+}
+
+func sessionWithID(sessions []*model.Session, id string) *model.Session {
+	for _, session := range sessions {
+		if session.ID == id {
+			return session
+		}
+	}
+	return nil
 }
 
 func TestFollowerCloseCancelsRefreshBeforeClosingUpdates(t *testing.T) {

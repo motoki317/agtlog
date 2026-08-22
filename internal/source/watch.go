@@ -34,6 +34,8 @@ type SessionUpdate struct {
 	DiscoveryErr      error
 }
 
+type followSessionIndex map[string]*model.Session
+
 type Follower struct {
 	watcher *Watcher
 	updates chan SessionUpdate
@@ -132,6 +134,8 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 	go func() {
 		defer follower.group.Done()
 		defer close(follower.updates)
+		var sessionIndex followSessionIndex
+		retryPaths := make(map[string]bool)
 		for {
 			select {
 			case <-followCtx.Done():
@@ -144,17 +148,33 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 				}
 				changed := append([]string(nil), change.Paths...)
 				changed = append(changed, r.removedParentPaths(followCtx, change.RemovedPaths)...)
-				sessions := r.refresh(followCtx, changed)
+				changed = append(changed, sortedPathSet(retryPaths)...)
+				sessions, refreshFailures := r.refresh(followCtx, changed)
 				needsSnapshot := r.pathsUseAgent(change.RemovedPaths, model.AgentCodex)
 				for _, session := range sessions {
 					needsSnapshot = needsSnapshot || session.Agent == model.AgentCodex
 				}
-				if needsSnapshot {
-					if snapshot, discoverErr := r.discoverFollowing(followCtx); discoverErr == nil {
-						sessions = snapshot
-					} else {
+				initialized := false
+				if sessionIndex == nil && needsSnapshot {
+					allSessions, _, discoveryFailures, discoverErr := r.discoverSessionsWithDiagnostics(followCtx)
+					if discoverErr == nil {
+						sessionIndex = indexFollowSessions(allSessions)
+						retryPaths = pathSet(discoveryFailures)
+						initialized = true
+					}
+				}
+				if sessionIndex != nil {
+					if !initialized {
+						sessionIndex.apply(sessions, change.RemovedPaths)
+						updateRetryPaths(retryPaths, sessions, refreshFailures, change.RemovedPaths)
+					}
+					var snapshotErr error
+					sessions, snapshotErr = sessionIndex.snapshot(followCtx)
+					if snapshotErr != nil {
 						sessions = nil
 					}
+				} else if needsSnapshot {
+					sessions = nil
 				}
 				removed := r.topLevelRemoved(followCtx, change.RemovedPaths)
 				if len(sessions) == 0 && len(removed) == 0 {
@@ -174,6 +194,74 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 		}
 	}()
 	return follower, nil
+}
+
+func pathSet(paths []string) map[string]bool {
+	set := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		set[path] = true
+	}
+	return set
+}
+
+func sortedPathSet(paths map[string]bool) []string {
+	sorted := make([]string, 0, len(paths))
+	for path := range paths {
+		sorted = append(sorted, path)
+	}
+	sort.Strings(sorted)
+	return sorted
+}
+
+func updateRetryPaths(retryPaths map[string]bool, refreshed []*model.Session, failedPaths, removedPaths []string) {
+	for _, session := range refreshed {
+		if session != nil {
+			delete(retryPaths, session.Path)
+		}
+	}
+	for _, path := range failedPaths {
+		retryPaths[path] = true
+	}
+	for _, path := range removedPaths {
+		delete(retryPaths, path)
+	}
+}
+
+func indexFollowSessions(sessions []*model.Session) followSessionIndex {
+	index := make(followSessionIndex, len(sessions))
+	for _, session := range sessions {
+		if session != nil {
+			index[session.Path] = session
+		}
+	}
+	return index
+}
+
+func (index followSessionIndex) apply(refreshed []*model.Session, removedPaths []string) {
+	for _, path := range removedPaths {
+		delete(index, path)
+	}
+	for _, session := range refreshed {
+		if session != nil {
+			index[session.Path] = session
+		}
+	}
+}
+
+func (index followSessionIndex) snapshot(ctx context.Context) ([]*model.Session, error) {
+	paths := make([]string, 0, len(index))
+	for path := range index {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	sessions := make([]*model.Session, 0, len(paths))
+	for _, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, index[path])
+	}
+	return buildSessionSnapshotContext(ctx, sessions)
 }
 
 func (r *Registry) pathsUseAgent(paths []string, agent model.AgentKind) bool {
@@ -270,7 +358,7 @@ func affectedPath(ctx context.Context, adapter Source, path string) (string, err
 	return path, nil
 }
 
-func (r *Registry) refresh(ctx context.Context, changedPaths []string) []*model.Session {
+func (r *Registry) refresh(ctx context.Context, changedPaths []string) ([]*model.Session, []string) {
 	type target struct {
 		adapter Source
 		path    string
@@ -284,7 +372,7 @@ func (r *Registry) refresh(ctx context.Context, changedPaths []string) []*model.
 			}
 			affectedPath, err := affectedPath(ctx, adapter, changedPath)
 			if err != nil {
-				return nil
+				return nil, nil
 			}
 			key := string(adapter.Agent()) + "\x00" + affectedPath
 			if !seen[key] {
@@ -296,6 +384,7 @@ func (r *Registry) refresh(ctx context.Context, changedPaths []string) []*model.
 	}
 
 	var sessions []*model.Session
+	var failedPaths []string
 	for _, target := range targets {
 		if ctx.Err() != nil {
 			break
@@ -307,6 +396,7 @@ func (r *Registry) refresh(ctx context.Context, changedPaths []string) []*model.
 		}
 		session, _, err := r.parseAndCacheContext(ctx, target.adapter, target.path, before, fingerprintErr == nil)
 		if err != nil {
+			failedPaths = append(failedPaths, target.path)
 			continue
 		}
 		if ctx.Err() != nil {
@@ -314,7 +404,7 @@ func (r *Registry) refresh(ctx context.Context, changedPaths []string) []*model.
 		}
 		sessions = append(sessions, session)
 	}
-	return sessions
+	return sessions, failedPaths
 }
 
 func insideAnyRoot(path string, roots []string) bool {

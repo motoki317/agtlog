@@ -85,7 +85,7 @@ func loadCachedFromRootContext(ctx context.Context, root *os.Root, adapter Sourc
 			return nil, nil, false
 		}
 		defer func() { _ = namespaceRoot.Close() }()
-		session, diagnostics, valid, exists := loadCacheEntryContext(ctx, namespaceRoot, cacheEntryName(adapter, path), adapter, fingerprint)
+		session, diagnostics, valid, exists := loadCacheEntryContext(ctx, namespaceRoot, cacheEntryName(adapter, path), path, adapter, fingerprint)
 		if valid {
 			return session, diagnostics, true
 		}
@@ -98,21 +98,21 @@ func loadCachedFromRootContext(ctx context.Context, root *os.Root, adapter Sourc
 	return nil, nil, false
 }
 
-func loadCacheEntryContext(ctx context.Context, root *os.Root, path string, adapter Source, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool, bool) {
+func loadCacheEntryContext(ctx context.Context, root *os.Root, entryPath, sourcePath string, adapter Source, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool, bool) {
 	if ctx.Err() != nil {
 		return nil, nil, false, false
 	}
-	info, err := root.Lstat(path)
+	info, err := root.Lstat(entryPath)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() > maxSummaryCacheBytes {
 		return nil, nil, false, !os.IsNotExist(err)
 	}
-	data, err := readRootFileContext(ctx, root, path, info.Size())
+	data, err := readRootFileContext(ctx, root, entryPath, info.Size())
 	if err != nil {
 		return nil, nil, false, true
 	}
 	var entry cacheEntry
 	decoder := cacheJSON.NewDecoder(&contextReader{ctx: ctx, reader: bytes.NewReader(data)})
-	if decoder.Decode(&entry) != nil || decoder.Decode(&struct{}{}) != io.EOF || entry.Version != cacheVersion || entry.Agent != adapter.Agent() || entry.Fingerprint != fingerprint || entry.Session == nil {
+	if decoder.Decode(&entry) != nil || decoder.Decode(&struct{}{}) != io.EOF || entry.Version != cacheVersion || entry.Agent != adapter.Agent() || entry.Fingerprint != fingerprint || entry.Session == nil || entry.Session.Path != sourcePath {
 		return nil, nil, false, true
 	}
 	diagnostics := make([]DiscoveryDiagnostic, 0, len(entry.Diagnostics))
@@ -611,7 +611,7 @@ func (r *Registry) discoverSessionContext(ctx context.Context, adapter Source, p
 
 func (r *Registry) discoverSessionWithCacheContext(ctx context.Context, root *os.Root, adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
 	if root == nil {
-		return parseSessionWithDiagnosticsContext(ctx, adapter, path)
+		return parseAndCacheToRootContext(ctx, nil, adapter, path, "", false)
 	}
 	fingerprint, err := sourceFingerprintContext(ctx, adapter, path)
 	if err == nil {
@@ -644,6 +644,9 @@ func parseAndCacheToRootContext(ctx context.Context, root *os.Root, adapter Sour
 	session, diagnostics, err := parseSessionWithDiagnosticsContext(ctx, adapter, path)
 	if err != nil {
 		return nil, diagnostics, err
+	}
+	if session != nil && session.Path != path {
+		return nil, diagnostics, errors.New("parsed session path does not match discovered path")
 	}
 	if cacheable {
 		after, fingerprintErr := sourceFingerprintContext(ctx, adapter, path)

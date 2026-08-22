@@ -1,11 +1,65 @@
 package source
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/motoki317/agtlog/internal/model"
 )
+
+func TestBuildSessionSnapshotCopiesInputsBeforeLinking(t *testing.T) {
+	parentUpdated := time.Date(2026, 8, 22, 9, 0, 0, 0, time.UTC)
+	childUpdated := parentUpdated.Add(time.Minute)
+	parentPath := "/fictional/follow/root.jsonl"
+	announced := &model.Session{ID: "thread-child", Agent: model.AgentCodex, Path: parentPath + "#scout"}
+	missing := &model.Session{
+		ID: "thread-missing", Agent: model.AgentCodex, Path: "/fictional/follow/missing.jsonl", AgentPath: "/root/missing",
+	}
+	parent := &model.Session{
+		ID: "thread-root", Agent: model.AgentCodex, Path: parentPath, UpdatedAt: parentUpdated,
+		Subagents: []*model.Session{announced, missing},
+	}
+	child := &model.Session{
+		ID: "thread-child", ParentID: parent.ID, Agent: model.AgentCodex,
+		Path: "/fictional/follow/child.jsonl", UpdatedAt: childUpdated,
+	}
+
+	var previous *model.Session
+	for range 2 {
+		snapshot, err := buildSessionSnapshotContext(context.Background(), []*model.Session{parent, child})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot) != 1 || snapshot[0] == parent || len(snapshot[0].Subagents) != 2 {
+			t.Fatalf("snapshot graph = %#v, want one copied root with two children", snapshot)
+		}
+		if !snapshot[0].UpdatedAt.Equal(childUpdated) {
+			t.Fatalf("snapshot UpdatedAt = %v, want child roll-up %v", snapshot[0].UpdatedAt, childUpdated)
+		}
+		children := make(map[string]*model.Session, len(snapshot[0].Subagents))
+		for _, snapshotChild := range snapshot[0].Subagents {
+			children[snapshotChild.ID] = snapshotChild
+		}
+		if children[child.ID] == nil || children[child.ID].Path != child.Path {
+			t.Fatalf("linked child = %#v, want parsed sidecar", children[child.ID])
+		}
+		if children[missing.ID] == nil || children[missing.ID].Path != parentPath+"#missing" {
+			t.Fatalf("missing child path = %#v, want a copied placeholder path", children[missing.ID])
+		}
+		if previous != nil && (snapshot[0] == previous || snapshot[0].Subagents[0] == previous.Subagents[0]) {
+			t.Fatal("repeated snapshot reused a graph node from the previous linked copy")
+		}
+		previous = snapshot[0]
+	}
+
+	if !parent.UpdatedAt.Equal(parentUpdated) || len(parent.Subagents) != 2 || parent.Subagents[0] != announced || parent.Subagents[1] != missing {
+		t.Fatalf("linking mutated indexed parent = %#v", parent)
+	}
+	if missing.Path != "/fictional/follow/missing.jsonl" {
+		t.Fatalf("linking mutated indexed placeholder path = %q", missing.Path)
+	}
+}
 
 func TestLinkSessionGraphsChildDrivenLinksInStableOrder(t *testing.T) {
 	parent := &model.Session{ID: "thread-root", Agent: model.AgentCodex, Path: "/fictional/moon/root.jsonl"}

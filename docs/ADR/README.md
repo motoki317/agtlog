@@ -38,3 +38,4 @@ trade-offs and alternatives that led to each choice.
 | 2026-08-05 | [Machine-readable CLI](./20260805-machine-readable-cli.md) | Add versioned list, show, and deterministic search commands with stable refs |
 | 2026-08-15 | [Summary cache repricing](./20260815-summary-cache-repricing.md) | Cache billed usage without prices and apply current pricing on every cache hit |
 | 2026-08-15 | [Codex sidecar linking](./20260815-codex-sidecar-linking.md) | Link Codex sidecars from child parent IDs and decode wrapped message items |
+| 2026-08-22 | [Follow session index](./20260822-follow-session-index.md) | Rebuild live snapshots from copied, path-indexed parser output |
