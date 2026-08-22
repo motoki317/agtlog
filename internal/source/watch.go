@@ -35,6 +35,7 @@ type SessionUpdate struct {
 }
 
 type followSessionIndex map[string]*model.Session
+type followCheckpointIndex map[string]any
 
 type Follower struct {
 	watcher *Watcher
@@ -135,6 +136,7 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 		defer follower.group.Done()
 		defer close(follower.updates)
 		var sessionIndex followSessionIndex
+		checkpoints := make(followCheckpointIndex)
 		retryPaths := make(map[string]bool)
 		for {
 			select {
@@ -149,7 +151,8 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 				changed := append([]string(nil), change.Paths...)
 				changed = append(changed, r.removedParentPaths(followCtx, change.RemovedPaths)...)
 				changed = append(changed, sortedPathSet(retryPaths)...)
-				sessions, refreshFailures := r.refresh(followCtx, changed)
+				checkpoints.drop(change.RemovedPaths)
+				sessions, refreshFailures := r.refresh(followCtx, changed, checkpoints)
 				needsSnapshot := r.pathsUseAgent(change.RemovedPaths, model.AgentCodex)
 				for _, session := range sessions {
 					needsSnapshot = needsSnapshot || session.Agent == model.AgentCodex
@@ -194,6 +197,12 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 		}
 	}()
 	return follower, nil
+}
+
+func (index followCheckpointIndex) drop(paths []string) {
+	for _, path := range paths {
+		delete(index, path)
+	}
 }
 
 func pathSet(paths []string) map[string]bool {
@@ -358,7 +367,7 @@ func affectedPath(ctx context.Context, adapter Source, path string) (string, err
 	return path, nil
 }
 
-func (r *Registry) refresh(ctx context.Context, changedPaths []string) ([]*model.Session, []string) {
+func (r *Registry) refresh(ctx context.Context, changedPaths []string, checkpoints followCheckpointIndex) ([]*model.Session, []string) {
 	type target struct {
 		adapter Source
 		path    string
@@ -389,12 +398,24 @@ func (r *Registry) refresh(ctx context.Context, changedPaths []string) ([]*model
 		if ctx.Err() != nil {
 			break
 		}
-		// Full re-parse per change; add offset-incremental parsing if large-session refresh lags.
 		before, fingerprintErr := sourceFingerprintContext(ctx, target.adapter, target.path)
 		if ctx.Err() != nil {
 			break
 		}
-		session, _, err := r.parseAndCacheContext(ctx, target.adapter, target.path, before, fingerprintErr == nil)
+		var session *model.Session
+		var err error
+		if resumable, ok := target.adapter.(resumableContextParser); ok {
+			var next any
+			session, next, err = r.parseAndCacheResumableContext(ctx, resumable, target.path, before, fingerprintErr == nil, checkpoints[target.path])
+			if err == nil && next != nil {
+				checkpoints[target.path] = next
+			} else {
+				delete(checkpoints, target.path)
+			}
+		} else {
+			session, _, err = r.parseAndCacheContext(ctx, target.adapter, target.path, before, fingerprintErr == nil)
+			delete(checkpoints, target.path)
+		}
 		if err != nil {
 			failedPaths = append(failedPaths, target.path)
 			continue

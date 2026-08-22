@@ -637,6 +637,28 @@ func (r *Registry) parseAndCacheContext(ctx context.Context, adapter Source, pat
 	return parseAndCacheToRootContext(ctx, root, adapter, path, before, cacheable)
 }
 
+func (r *Registry) parseAndCacheResumableContext(ctx context.Context, adapter resumableContextParser, path, before string, cacheable bool, checkpoint any) (*model.Session, any, error) {
+	root, _ := r.openOrCreateCacheRoot()
+	if root != nil {
+		defer func() { _ = root.Close() }()
+	}
+	return parseAndCacheResumableToRootContext(ctx, root, adapter, path, before, cacheable, checkpoint)
+}
+
+func parseAndCacheResumableToRootContext(ctx context.Context, root *os.Root, adapter resumableContextParser, path, before string, cacheable bool, checkpoint any) (*model.Session, any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	session, next, err := adapter.ParseResumableContext(ctx, path, checkpoint)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := finalizeParsedSessionContext(ctx, root, adapter, path, before, cacheable, session, nil); err != nil {
+		return nil, nil, err
+	}
+	return session, next, nil
+}
+
 func parseAndCacheToRootContext(ctx context.Context, root *os.Root, adapter Source, path, before string, cacheable bool) (*model.Session, []DiscoveryDiagnostic, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
@@ -645,8 +667,15 @@ func parseAndCacheToRootContext(ctx context.Context, root *os.Root, adapter Sour
 	if err != nil {
 		return nil, diagnostics, err
 	}
+	if err := finalizeParsedSessionContext(ctx, root, adapter, path, before, cacheable, session, diagnostics); err != nil {
+		return nil, diagnostics, err
+	}
+	return session, diagnostics, nil
+}
+
+func finalizeParsedSessionContext(ctx context.Context, root *os.Root, adapter Source, path, before string, cacheable bool, session *model.Session, diagnostics []DiscoveryDiagnostic) error {
 	if session != nil && session.Path != path {
-		return nil, diagnostics, errors.New("parsed session path does not match discovered path")
+		return errors.New("parsed session path does not match discovered path")
 	}
 	if cacheable {
 		after, fingerprintErr := sourceFingerprintContext(ctx, adapter, path)
@@ -654,7 +683,7 @@ func parseAndCacheToRootContext(ctx context.Context, root *os.Root, adapter Sour
 			storeCachedToRootContext(ctx, root, adapter, path, after, session, diagnostics)
 		}
 	}
-	return session, diagnostics, nil
+	return nil
 }
 
 type diagnosticContextParser interface {

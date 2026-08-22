@@ -42,6 +42,47 @@ type indexedFollowSource struct {
 	failParses          map[string]int
 }
 
+type resumableFollowSource struct {
+	root       string
+	path       string
+	inputs     []any
+	failNext   bool
+	nilNext    bool
+	fullParses int
+}
+
+type resumableFollowCheckpoint struct {
+	generation int
+}
+
+func (s *resumableFollowSource) Agent() model.AgentKind   { return model.AgentCodex }
+func (s *resumableFollowSource) Roots() []string          { return []string{s.root} }
+func (s *resumableFollowSource) CacheFingerprint() string { return "resumable-follow-v1" }
+func (s *resumableFollowSource) Discover(context.Context) ([]string, error) {
+	return []string{s.path}, nil
+}
+func (s *resumableFollowSource) ParseContext(context.Context, string) (*model.Session, error) {
+	s.fullParses++
+	return &model.Session{ID: "full", Agent: model.AgentCodex, Path: s.path}, nil
+}
+func (s *resumableFollowSource) ParseResumableContext(ctx context.Context, path string, checkpoint any) (*model.Session, any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	s.inputs = append(s.inputs, checkpoint)
+	if s.failNext {
+		s.failNext = false
+		return nil, nil, errors.New("transient resumable failure")
+	}
+	if s.nilNext {
+		s.nilNext = false
+		return &model.Session{ID: "resume-without-checkpoint", Agent: model.AgentCodex, Path: path}, nil, nil
+	}
+	next := &resumableFollowCheckpoint{generation: len(s.inputs)}
+	return &model.Session{ID: fmt.Sprintf("resume-%d", next.generation), Agent: model.AgentCodex, Path: path}, next, nil
+}
+func (s *resumableFollowSource) Reprice(*model.Session) {}
+
 func (s *indexedFollowSource) Agent() model.AgentKind   { return model.AgentCodex }
 func (s *indexedFollowSource) Roots() []string          { return []string{s.root} }
 func (s *indexedFollowSource) CacheFingerprint() string { return "indexed-follow-v1" }
@@ -351,6 +392,101 @@ func TestFollowerReparsesChangedSession(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("timed out waiting for parsed session update")
+	}
+}
+
+func TestRefreshMaintainsOpaqueResumableCheckpoints(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &resumableFollowSource{root: root, path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
+	checkpoints := make(followCheckpointIndex)
+
+	sessions, failed := registry.refresh(context.Background(), []string{path}, checkpoints)
+	if len(sessions) != 1 || len(failed) != 0 || len(adapter.inputs) != 1 || adapter.inputs[0] != nil || adapter.fullParses != 0 {
+		t.Fatalf("first refresh = sessions %#v, failed %v, inputs %#v, full parses %d", sessions, failed, adapter.inputs, adapter.fullParses)
+	}
+	first, ok := checkpoints[path].(*resumableFollowCheckpoint)
+	if !ok {
+		t.Fatalf("first checkpoint = %#v", checkpoints[path])
+	}
+	fingerprint, err := sourceFingerprint(adapter, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cached, _, ok := registry.loadCached(adapter, path, fingerprint); !ok || cached.ID != "resume-1" {
+		t.Fatalf("resumable cache write-through = session %#v, hit %t", cached, ok)
+	}
+
+	sessions, failed = registry.refresh(context.Background(), []string{path}, checkpoints)
+	if len(sessions) != 1 || len(failed) != 0 || adapter.inputs[1] != first {
+		t.Fatalf("second refresh = sessions %#v, failed %v, checkpoint input %#v", sessions, failed, adapter.inputs[1])
+	}
+
+	adapter.failNext = true
+	sessions, failed = registry.refresh(context.Background(), []string{path}, checkpoints)
+	if len(sessions) != 0 || !reflect.DeepEqual(failed, []string{path}) {
+		t.Fatalf("failed refresh = sessions %#v, failed %v", sessions, failed)
+	}
+	if _, exists := checkpoints[path]; exists {
+		t.Fatal("failed refresh retained its checkpoint")
+	}
+
+	sessions, failed = registry.refresh(context.Background(), []string{path}, checkpoints)
+	if len(sessions) != 1 || len(failed) != 0 || adapter.inputs[len(adapter.inputs)-1] != nil {
+		t.Fatalf("retry refresh = sessions %#v, failed %v, checkpoint input %#v", sessions, failed, adapter.inputs[len(adapter.inputs)-1])
+	}
+	seeded := checkpoints[path]
+	adapter.nilNext = true
+	sessions, failed = registry.refresh(context.Background(), []string{path}, checkpoints)
+	if len(sessions) != 1 || len(failed) != 0 || adapter.inputs[len(adapter.inputs)-1] != seeded {
+		t.Fatalf("checkpointless success = sessions %#v, failed %v, checkpoint input %#v", sessions, failed, adapter.inputs[len(adapter.inputs)-1])
+	}
+	if _, exists := checkpoints[path]; exists {
+		t.Fatal("checkpointless success retained its previous checkpoint")
+	}
+	checkpoints[path] = seeded
+	checkpoints.drop([]string{path})
+	if _, exists := checkpoints[path]; exists {
+		t.Fatal("removed path retained its checkpoint")
+	}
+}
+
+func TestFollowerDropsResumableCheckpointWhenPathIsRemoved(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &resumableFollowSource{root: root, path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1})
+	follower, err := registry.Follow(context.Background(), WatchOptions{Debounce: 10 * time.Millisecond, RescanInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer follower.Close()
+
+	appendFollowLog(t, path)
+	_ = nextFollowerUpdate(t, follower)
+	if len(adapter.inputs) == 0 || adapter.inputs[len(adapter.inputs)-1] != nil {
+		t.Fatalf("first refresh checkpoint input = %#v, want nil", adapter.inputs)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	removed := nextFollowerUpdate(t, follower)
+	if !reflect.DeepEqual(removed.RemovedPaths, []string{path}) {
+		t.Fatalf("removed paths = %v, want %v", removed.RemovedPaths, []string{path})
+	}
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = nextFollowerUpdate(t, follower)
+	if adapter.inputs[len(adapter.inputs)-1] != nil {
+		t.Fatalf("recreated path received stale checkpoint %#v", adapter.inputs[len(adapter.inputs)-1])
 	}
 }
 

@@ -37,6 +37,10 @@ type changingFingerprintSource struct {
 	fingerprints int
 }
 
+type changingResumableFingerprintSource struct {
+	changingFingerprintSource
+}
+
 type emptyCacheFingerprintSource struct {
 	*countingSource
 }
@@ -117,6 +121,11 @@ func (s *changingFingerprintSource) Fingerprint(string) (string, error) {
 		return "before", nil
 	}
 	return "after", nil
+}
+
+func (s *changingResumableFingerprintSource) ParseResumableContext(ctx context.Context, path string, _ any) (*model.Session, any, error) {
+	session, err := s.ParseContext(ctx, path)
+	return session, &struct{}{}, err
 }
 
 func (s emptyCacheFingerprintSource) CacheFingerprint() string { return "" }
@@ -1129,5 +1138,23 @@ func TestRegistryDoesNotCacheFileChangedDuringParse(t *testing.T) {
 	}
 	if adapter.parses != 2 {
 		t.Fatalf("Parse() called %d times, want changed first result left uncached", adapter.parses)
+	}
+}
+
+func TestRegistryDoesNotCacheFileChangedDuringResumableParse(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &changingResumableFingerprintSource{changingFingerprintSource: changingFingerprintSource{countingSource: countingSource{path: path, agent: model.AgentCodex}}}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
+
+	sessions, failed := registry.refresh(context.Background(), []string{path}, make(followCheckpointIndex))
+	if len(sessions) != 1 || len(failed) != 0 {
+		t.Fatalf("refresh() = sessions %#v, failed %v", sessions, failed)
+	}
+	if _, _, loaded := registry.loadCached(adapter, path, "after"); loaded {
+		t.Fatal("resumable parse cached a result after its fingerprint changed")
 	}
 }

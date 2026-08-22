@@ -2,6 +2,7 @@ package codex
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -89,6 +90,18 @@ type summaryAccumulator struct {
 	metaSeen       bool
 }
 
+const summaryCheckpointHeadBytes = 4 << 10
+
+type summaryCheckpoint struct {
+	accumulator   *summaryAccumulator
+	size          int64
+	headLength    int64
+	headHash      [sha256.Size]byte
+	resumeAt      int64
+	lastLineBytes int64
+	lastLineHash  [sha256.Size]byte
+}
+
 func newSummaryAccumulator(parser Parser, path, replaySecond string) *summaryAccumulator {
 	return &summaryAccumulator{
 		parser:       parser,
@@ -98,6 +111,42 @@ func newSummaryAccumulator(parser Parser, path, replaySecond string) *summaryAcc
 		replayActive: replaySecond != "",
 		seenModels:   make(map[string]bool),
 	}
+}
+
+func (a *summaryAccumulator) clone() *summaryAccumulator {
+	cloned := *a
+	cloned.session = cloneSummarySession(a.session)
+	if a.lastTotal != nil {
+		lastTotal := *a.lastTotal
+		cloned.lastTotal = &lastTotal
+	}
+	cloned.usageByModel = make(map[string]*tokenUsage, len(a.usageByModel))
+	for usageModel, usage := range a.usageByModel {
+		copy := *usage
+		cloned.usageByModel[usageModel] = &copy
+	}
+	cloned.usageOrder = append([]string(nil), a.usageOrder...)
+	cloned.pricingRecords = append([]tokenUsageRecord(nil), a.pricingRecords...)
+	cloned.seenModels = make(map[string]bool, len(a.seenModels))
+	for usageModel, seen := range a.seenModels {
+		cloned.seenModels[usageModel] = seen
+	}
+	return &cloned
+}
+
+func cloneSummarySession(session *model.Session) *model.Session {
+	if session == nil {
+		return nil
+	}
+	cloned := *session
+	cloned.Models = append([]string(nil), session.Models...)
+	if session.Subagents != nil {
+		cloned.Subagents = make([]*model.Session, 0, len(session.Subagents))
+		for _, subagent := range session.Subagents {
+			cloned.Subagents = append(cloned.Subagents, cloneSummarySession(subagent))
+		}
+	}
+	return &cloned
 }
 
 func (a *summaryAccumulator) ingest(line []byte, offset int64) {
@@ -222,7 +271,7 @@ func (a *summaryAccumulator) ingest(line []byte, offset int64) {
 }
 
 func (a *summaryAccumulator) finish(ctx context.Context, sourceSize int64) (*model.Session, error) {
-	session := *a.session
+	session := cloneSummarySession(a.session)
 	session.SourceSize = sourceSize
 	session.Usage = nil
 	session.Requests = nil
@@ -266,14 +315,14 @@ func (a *summaryAccumulator) finish(ctx context.Context, sourceSize int64) (*mod
 		usage := codexUsage(record.model, record.usage)
 		session.Requests = append(session.Requests, model.RequestUsage{Offset: record.offset, Usage: usage})
 	}
-	a.parser.calculator.ApplySessionCodex(&session, a.parser.defaultPricingModel)
+	a.parser.calculator.ApplySessionCodex(session, a.parser.defaultPricingModel)
 	if session.AgentPath != "" {
 		session.Title = model.CleanTitle(filepath.Base(session.AgentPath))
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return &session, nil
+	return session, nil
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
@@ -281,22 +330,181 @@ func (p Parser) Parse(path string) (*model.Session, error) {
 }
 
 func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, error) {
+	session, _, err := p.parseResumableContext(ctx, path, nil)
+	return session, err
+}
+
+func (p Parser) parseResumableContext(ctx context.Context, path string, checkpoint *summaryCheckpoint) (*model.Session, *summaryCheckpoint, error) {
+	return p.parseResumableContextAfterValidation(ctx, path, checkpoint, nil)
+}
+
+func (p Parser) parseResumableContextAfterValidation(ctx context.Context, path string, checkpoint *summaryCheckpoint, afterValidation func()) (*model.Session, *summaryCheckpoint, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer file.Close()
 
+	info, err := file.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	var accumulator *summaryAccumulator
+	resumeAt := int64(0)
+	lastLineBytes := int64(0)
+	lastLineHash := [sha256.Size]byte{}
+	prefixReusable := false
+	resumed := false
+	if valid, validationErr := checkpointValid(ctx, file, path, info.Size(), checkpoint); validationErr != nil {
+		return nil, nil, validationErr
+	} else if valid {
+		accumulator = checkpoint.accumulator.clone()
+		resumeAt = checkpoint.resumeAt
+		lastLineBytes = checkpoint.lastLineBytes
+		lastLineHash = checkpoint.lastLineHash
+		prefixReusable = true
+		resumed = true
+		if afterValidation != nil {
+			afterValidation()
+		}
+	}
+
+	if accumulator == nil {
+		replaySecond, reusable, scanErr := scanSummaryPrefix(ctx, file)
+		if scanErr != nil {
+			return nil, nil, scanErr
+		}
+		prefixReusable = reusable
+		accumulator = newSummaryAccumulator(p, path, replaySecond)
+	}
+	var resumedRangeHash [sha256.Size]byte
+	reader := io.Reader(file)
+	if resumed {
+		resumedRangeHash, err = fileRangeHash(ctx, file, resumeAt, info.Size()-resumeAt)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			return p.parseResumableContext(ctx, path, nil)
+		}
+		reader = io.NewSectionReader(file, resumeAt, info.Size()-resumeAt)
+	} else if _, err := file.Seek(resumeAt, io.SeekStart); err != nil {
+		return nil, nil, err
+	}
+
+	lastCompleteOffset := resumeAt
+	lastLineOffset := resumeAt - lastLineBytes
+	lastLineNeedsHash := false
+	var trailingLine []byte
+	var trailingOffset int64
+	err = jsonl.ForEachContextWithMetadata(ctx, reader, func(line []byte, metadata jsonl.LineMetadata) {
+		offset := resumeAt + metadata.Offset
+		if !metadata.Terminated {
+			if !metadata.Oversized && len(line) > 0 {
+				trailingLine = append(trailingLine[:0], line...)
+				trailingOffset = offset
+			}
+			return
+		}
+		if !metadata.Oversized && len(line) > 0 {
+			accumulator.ingest(line, offset)
+		}
+		lastCompleteOffset = resumeAt + metadata.NextOffset
+		lastLineOffset = offset
+		lastLineBytes = metadata.NextOffset - metadata.Offset
+		lastLineNeedsHash = metadata.Oversized
+		if !metadata.Oversized {
+			lastLineBytes, lastLineHash = terminatedLineHash(line, metadata)
+		}
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if lastLineNeedsHash {
+		lastLineHash, err = fileRangeHash(ctx, file, lastLineOffset, lastLineBytes)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if resumed {
+		postScanRangeHash, hashErr := fileRangeHash(ctx, file, resumeAt, info.Size()-resumeAt)
+		if hashErr != nil {
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			return p.parseResumableContext(ctx, path, nil)
+		}
+		postScanInfo, statErr := file.Stat()
+		if statErr != nil {
+			return nil, nil, statErr
+		}
+		valid, validationErr := checkpointValid(ctx, file, path, postScanInfo.Size(), checkpoint)
+		if validationErr != nil {
+			return nil, nil, validationErr
+		}
+		pathInfo, pathErr := os.Stat(path)
+		if pathErr != nil || !os.SameFile(info, pathInfo) || resumedRangeHash != postScanRangeHash || !valid {
+			return p.parseResumableContext(ctx, path, nil)
+		}
+	}
+	sourceSize := info.Size()
+	if !resumed {
+		sourceSize, err = file.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	resultAccumulator := accumulator
+	if len(trailingLine) > 0 && validSummaryJSON(trailingLine) {
+		resultAccumulator = accumulator.clone()
+		resultAccumulator.ingest(trailingLine, trailingOffset)
+	}
+	session, err := resultAccumulator.finish(ctx, sourceSize)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !prefixReusable {
+		return session, nil, nil
+	}
+	pathInfo, pathErr := os.Stat(path)
+	if pathErr != nil || !os.SameFile(info, pathInfo) {
+		return session, nil, nil
+	}
+	headLength := min(sourceSize, int64(summaryCheckpointHeadBytes))
+	headHash, err := fileHeadHash(ctx, file, headLength)
+	if err != nil {
+		return nil, nil, err
+	}
+	return session, &summaryCheckpoint{
+		accumulator:   accumulator,
+		size:          sourceSize,
+		headLength:    headLength,
+		headHash:      headHash,
+		resumeAt:      lastCompleteOffset,
+		lastLineBytes: lastLineBytes,
+		lastLineHash:  lastLineHash,
+	}, nil
+}
+
+func scanSummaryPrefix(ctx context.Context, file *os.File) (string, bool, error) {
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", false, err
+	}
 	var isForked bool
 	var replayCandidates []string
 	replayCandidateInvalid := false
 	metaSeen := false
 	scanCtx, stopScan := context.WithCancel(ctx)
 	scanComplete := false
-	err = jsonl.ForEachContext(scanCtx, file, func(line []byte) {
+	prefixReusable := false
+	err := jsonl.ForEachContextWithMetadata(scanCtx, file, func(line []byte, metadata jsonl.LineMetadata) {
+		if metadata.Oversized || len(line) == 0 {
+			return
+		}
 		var record logRecord
 		if jsonl.Unmarshal(line, &record) != nil {
 			return
@@ -313,15 +521,13 @@ func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, 
 		}
 		if metaSeen && (!isForked || len(replayCandidates) == 2) {
 			scanComplete = true
+			prefixReusable = metadata.Terminated
 			stopScan()
 		}
 	})
 	stopScan()
 	if err != nil && !(scanComplete && errors.Is(err, context.Canceled)) {
-		return nil, err
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, err
+		return "", false, err
 	}
 	var replaySecond string
 	// Ceiling: spaced replay timestamps disable detection; the real-log oracle is
@@ -329,19 +535,112 @@ func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, 
 	if isForked && !replayCandidateInvalid && len(replayCandidates) == 2 && replayCandidates[0] == replayCandidates[1] {
 		replaySecond = replayCandidates[0]
 	}
+	return replaySecond, prefixReusable, nil
+}
 
-	accumulator := newSummaryAccumulator(p, path, replaySecond)
-	err = jsonl.ForEachContextWithOffset(ctx, file, func(line []byte, offset, _ int64) {
-		accumulator.ingest(line, offset)
-	})
-	if err != nil {
-		return nil, err
+func checkpointValid(ctx context.Context, file *os.File, path string, currentSize int64, checkpoint *summaryCheckpoint) (bool, error) {
+	if checkpoint == nil || checkpoint.accumulator == nil || checkpoint.accumulator.session == nil || checkpoint.accumulator.session.Path != path {
+		return false, nil
 	}
-	sourceSize, err := file.Seek(0, io.SeekCurrent)
-	if err != nil {
-		return nil, err
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
-	return accumulator.finish(ctx, sourceSize)
+	if currentSize < checkpoint.size || checkpoint.resumeAt < 0 || checkpoint.resumeAt > currentSize ||
+		checkpoint.headLength < 0 || checkpoint.headLength > summaryCheckpointHeadBytes || checkpoint.headLength > checkpoint.size {
+		return false, nil
+	}
+	headHash, err := fileHeadHash(ctx, file, checkpoint.headLength)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		return false, nil
+	}
+	if headHash != checkpoint.headHash {
+		return false, nil
+	}
+	if checkpoint.resumeAt == 0 {
+		return checkpoint.lastLineBytes == 0, nil
+	}
+	if checkpoint.lastLineBytes <= 0 || checkpoint.lastLineBytes > checkpoint.resumeAt {
+		return false, nil
+	}
+	terminator := []byte{0}
+	if _, err := file.ReadAt(terminator, checkpoint.resumeAt-1); err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		return false, nil
+	}
+	if terminator[0] != '\n' {
+		return false, nil
+	}
+	boundaryHash, err := fileRangeHash(ctx, file, checkpoint.resumeAt-checkpoint.lastLineBytes, checkpoint.lastLineBytes)
+	if err != nil {
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		return false, nil
+	}
+	return boundaryHash == checkpoint.lastLineHash, nil
+}
+
+func fileHeadHash(ctx context.Context, file *os.File, length int64) ([sha256.Size]byte, error) {
+	return fileRangeHash(ctx, file, 0, length)
+}
+
+func fileRangeHash(ctx context.Context, file *os.File, offset, length int64) ([sha256.Size]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	hasher := sha256.New()
+	reader := io.NewSectionReader(file, offset, length)
+	buffer := make([]byte, min(length, int64(64<<10)))
+	for reader.Size() > 0 {
+		if err := ctx.Err(); err != nil {
+			return [sha256.Size]byte{}, err
+		}
+		read, err := reader.Read(buffer)
+		if read > 0 {
+			_, _ = hasher.Write(buffer[:read])
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return [sha256.Size]byte{}, err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return [sha256.Size]byte{}, err
+	}
+	var digest [sha256.Size]byte
+	copy(digest[:], hasher.Sum(nil))
+	return digest, nil
+}
+
+func terminatedLineHash(line []byte, metadata jsonl.LineMetadata) (int64, [sha256.Size]byte) {
+	terminatorLength := metadata.NextOffset - metadata.Offset - metadata.Length
+	hasher := sha256.New()
+	_, _ = hasher.Write(line)
+	if terminatorLength == 2 {
+		_, _ = hasher.Write([]byte{'\r'})
+	}
+	_, _ = hasher.Write([]byte{'\n'})
+	var digest [sha256.Size]byte
+	copy(digest[:], hasher.Sum(nil))
+	return metadata.NextOffset - metadata.Offset, digest
+}
+
+func validSummaryJSON(line []byte) bool {
+	var envelope struct {
+		Timestamp string `json:"timestamp"`
+		Type      string `json:"type"`
+		Payload   struct {
+			Type string `json:"type"`
+		} `json:"payload"`
+	}
+	return jsonl.Unmarshal(line, &envelope) == nil
 }
 
 func codexUsage(usageModel string, selected tokenUsage) model.Usage {
