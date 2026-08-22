@@ -64,6 +64,13 @@ func (r *Registry) loadCachedContext(ctx context.Context, adapter Source, path, 
 		return nil, nil, false
 	}
 	defer func() { _ = root.Close() }()
+	return loadCachedFromRootContext(ctx, root, adapter, path, fingerprint)
+}
+
+func loadCachedFromRootContext(ctx context.Context, root *os.Root, adapter Source, path, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool) {
+	if ctx.Err() != nil || root == nil {
+		return nil, nil, false
+	}
 	namespace, ok := cacheNamespace(adapter)
 	if !ok {
 		return nil, nil, false
@@ -164,7 +171,16 @@ func (r *Registry) storeCachedContext(ctx context.Context, adapter Source, path,
 	if ctx.Err() != nil {
 		return
 	}
-	if r.options.CacheDir == "" || !r.cacheDirSafe() {
+	root, ok := r.openOrCreateCacheRoot()
+	if !ok {
+		return
+	}
+	defer func() { _ = root.Close() }()
+	storeCachedToRootContext(ctx, root, adapter, path, fingerprint, session, diagnostics)
+}
+
+func storeCachedToRootContext(ctx context.Context, root *os.Root, adapter Source, path, fingerprint string, session *model.Session, diagnostics []DiscoveryDiagnostic) {
+	if ctx.Err() != nil || root == nil {
 		return
 	}
 	namespace, ok := cacheNamespace(adapter)
@@ -185,11 +201,6 @@ func (r *Registry) storeCachedContext(ctx context.Context, adapter Source, path,
 	if ctx.Err() != nil {
 		return
 	}
-	root, ok := r.openOrCreateCacheRoot()
-	if !ok {
-		return
-	}
-	defer func() { _ = root.Close() }()
 	if !ensureCacheDirectory(root, namespace) {
 		return
 	}
@@ -292,7 +303,7 @@ func createCacheTemp(root *os.Root) (*os.File, string, error) {
 }
 
 func (r *Registry) openCacheRoot() (*os.Root, bool) {
-	if r.options.CacheDir == "" || !r.cacheDirSafe() {
+	if r.options.CacheDir == "" {
 		return nil, false
 	}
 	root, err := os.OpenRoot(r.options.CacheDir)
@@ -313,6 +324,9 @@ func (r *Registry) openCacheRoot() (*os.Root, bool) {
 }
 
 func (r *Registry) openOrCreateCacheRoot() (*os.Root, bool) {
+	if root, ok := r.openCacheRoot(); ok {
+		return root, true
+	}
 	if r.options.CacheDir == "" || !r.cacheDirSafe() {
 		return nil, false
 	}
@@ -585,12 +599,20 @@ func (r *Registry) discoverSession(adapter Source, path string) (*model.Session,
 }
 
 func (r *Registry) discoverSessionContext(ctx context.Context, adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
-	if r.options.CacheDir == "" {
+	root, _ := r.openOrCreateCacheRoot()
+	if root != nil {
+		defer func() { _ = root.Close() }()
+	}
+	return r.discoverSessionWithCacheContext(ctx, root, adapter, path)
+}
+
+func (r *Registry) discoverSessionWithCacheContext(ctx context.Context, root *os.Root, adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
+	if root == nil {
 		return parseSessionWithDiagnosticsContext(ctx, adapter, path)
 	}
 	fingerprint, err := sourceFingerprintContext(ctx, adapter, path)
 	if err == nil {
-		if session, diagnostics, ok := r.loadCachedContext(ctx, adapter, path, fingerprint); ok {
+		if session, diagnostics, ok := loadCachedFromRootContext(ctx, root, adapter, path, fingerprint); ok {
 			adapter.Reprice(session)
 			if err := ctx.Err(); err != nil {
 				return nil, nil, err
@@ -601,10 +623,18 @@ func (r *Registry) discoverSessionContext(ctx context.Context, adapter Source, p
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	return r.parseAndCacheContext(ctx, adapter, path, fingerprint, err == nil)
+	return parseAndCacheToRootContext(ctx, root, adapter, path, fingerprint, err == nil)
 }
 
 func (r *Registry) parseAndCacheContext(ctx context.Context, adapter Source, path, before string, cacheable bool) (*model.Session, []DiscoveryDiagnostic, error) {
+	root, _ := r.openOrCreateCacheRoot()
+	if root != nil {
+		defer func() { _ = root.Close() }()
+	}
+	return parseAndCacheToRootContext(ctx, root, adapter, path, before, cacheable)
+}
+
+func parseAndCacheToRootContext(ctx context.Context, root *os.Root, adapter Source, path, before string, cacheable bool) (*model.Session, []DiscoveryDiagnostic, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
@@ -615,7 +645,7 @@ func (r *Registry) parseAndCacheContext(ctx context.Context, adapter Source, pat
 	if cacheable {
 		after, fingerprintErr := sourceFingerprintContext(ctx, adapter, path)
 		if fingerprintErr == nil && before == after {
-			r.storeCachedContext(ctx, adapter, path, after, session, diagnostics)
+			storeCachedToRootContext(ctx, root, adapter, path, after, session, diagnostics)
 		}
 	}
 	return session, diagnostics, nil

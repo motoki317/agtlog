@@ -167,19 +167,15 @@ func (r *Registry) Discover(ctx context.Context) ([]*model.Session, error) {
 }
 
 func (r *Registry) DiscoverWithDiagnostics(ctx context.Context) ([]*model.Session, []DiscoveryDiagnostic, error) {
-	return r.discoverWithDiagnostics(ctx, r.discoverSession)
+	return r.discoverWithDiagnostics(ctx)
 }
 
-type sessionDiscoverer func(Source, string) (*model.Session, []DiscoveryDiagnostic, error)
-
 func (r *Registry) discoverFollowing(ctx context.Context) ([]*model.Session, error) {
-	sessions, _, err := r.discoverWithDiagnostics(ctx, func(adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
-		return r.discoverSessionContext(ctx, adapter, path)
-	})
+	sessions, _, err := r.discoverWithDiagnostics(ctx)
 	return sessions, err
 }
 
-func (r *Registry) discoverWithDiagnostics(ctx context.Context, discover sessionDiscoverer) ([]*model.Session, []DiscoveryDiagnostic, error) {
+func (r *Registry) discoverWithDiagnostics(ctx context.Context) ([]*model.Session, []DiscoveryDiagnostic, error) {
 	type job struct {
 		source Source
 		path   string
@@ -200,6 +196,10 @@ func (r *Registry) discoverWithDiagnostics(ctx context.Context, discover session
 	}
 	if r.options.Progress != nil {
 		r.options.Progress(0, len(pending))
+	}
+	cacheRoot, _ := r.openOrCreateCacheRoot()
+	if cacheRoot != nil {
+		defer func() { _ = cacheRoot.Close() }()
 	}
 
 	workers := r.options.Workers
@@ -223,7 +223,7 @@ func (r *Registry) discoverWithDiagnostics(ctx context.Context, discover session
 				if ctx.Err() != nil {
 					return
 				}
-				session, diagnostics, err := discover(item.source, item.path)
+				session, diagnostics, err := r.discoverSessionWithCacheContext(ctx, cacheRoot, item.source, item.path)
 				if err != nil {
 					diagnostics = append(diagnostics, DiscoveryDiagnostic{Agent: item.source.Agent(), Path: item.path, Err: err})
 					results <- result{diagnostics: diagnostics}

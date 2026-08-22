@@ -771,6 +771,45 @@ func TestRegistryCachesThroughSymlinkOutsideSourceRoots(t *testing.T) {
 	}
 }
 
+func TestRegistryRechecksCacheSafetyBetweenDiscoveryPasses(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheParent := t.TempDir()
+	cacheDir := filepath.Join(cacheParent, "cache")
+	if err := os.Mkdir(cacheDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: cacheDir})
+
+	if _, err := registry.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(cacheDir, filepath.Join(cacheParent, "old-cache")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(root, cacheDir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if adapter.parses != 2 {
+		t.Fatalf("Parse() called %d times, want unsafe moved cache rejected on the next pass", adapter.parses)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		t.Fatalf("source root entries = %v, want only the session log", entries)
+	}
+}
+
 func TestRegistryCreatesMissingCacheDirectoryComponents(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "session.jsonl")
