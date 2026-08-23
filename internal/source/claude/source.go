@@ -24,18 +24,18 @@ func NewSource(parser Parser, roots []string) Source {
 	return Source{parser: parser, roots: normalizeRoots(roots)}
 }
 
-func DefaultRoots(home, configDirs string) []string {
+func Roots(home, configDir string, extra []string) []string {
 	var roots []string
-	for _, dir := range strings.Split(configDirs, ",") {
-		if dir = strings.TrimSpace(dir); dir != "" {
-			roots = append(roots, filepath.Join(dir, "projects"))
-		}
-	}
-	if len(roots) == 0 {
+	if configDir != "" {
+		roots = append(roots, filepath.Join(configDir, "projects"))
+	} else {
 		roots = []string{
 			filepath.Join(home, ".config", "claude", "projects"),
 			filepath.Join(home, ".claude", "projects"),
 		}
+	}
+	for _, dir := range extra {
+		roots = append(roots, filepath.Join(dir, "projects"))
 	}
 	return normalizeRoots(roots)
 }
@@ -96,8 +96,12 @@ func normalizeRoots(roots []string) []string {
 		if canonical, err := filepath.EvalSymlinks(root); err == nil {
 			root = canonical
 		}
-		if !seen[root] {
-			seen[root] = true
+		key := root
+		if absolute, err := filepath.Abs(root); err == nil {
+			key = absolute
+		}
+		if !seen[key] {
+			seen[key] = true
 			normalized = append(normalized, root)
 		}
 	}

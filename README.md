@@ -33,13 +33,20 @@ top-level session, and updates as new activity arrives. Open a row to
 inspect its nested subagents. Common options:
 
 ```text
---agent claude|codex   show only one agent
---theme NAME           color theme: default, nord, or dracula
---no-watch             do not follow new activity
---offline              do not fetch fresh prices
---refresh-prices       fetch fresh prices now, then start
---version              print the version
+--agent claude|codex  show only one agent
+--claude-dir PATH     add a Claude home (repeatable)
+--codex-dir PATH      add a Codex home (repeatable)
+--theme NAME          color theme: default, nord, or dracula
+--no-watch            do not follow new activity
+--offline             do not fetch fresh prices
+--refresh-prices      fetch fresh prices now, then start
+--version             print the version
 ```
+
+The directory flags add homes for agtlog only. agtlog still reads each agent's
+standard home and appends `projects` for Claude or `sessions` for Codex. You can
+also set `AGTLOG_CLAUDE_DIRS` or `AGTLOG_CODEX_DIRS` to a platform-native path
+list. A flag overrides its matching environment variable.
 
 agtlog never writes to your agent logs or config.
 Its only writes are small caches for sessions and prices, kept under your XDG

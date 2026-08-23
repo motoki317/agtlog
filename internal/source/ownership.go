@@ -2,13 +2,23 @@ package source
 
 import (
 	"context"
+	"path/filepath"
 
 	"github.com/motoki317/agtlog/internal/model"
 )
 
 type requestOwnershipKey struct {
-	agent                model.AgentKind
-	messageID, requestID string
+	agent                      model.AgentKind
+	messageID, requestID       string
+	codexSummary               bool
+	offset                     int64
+	model, speed               string
+	input, output              int64
+	cacheCreation5m            int64
+	cacheCreation1h, cacheRead int64
+	inputIncludesCacheRead     bool
+	hasLoggedCost              bool
+	loggedCost                 float64
 }
 
 // AttributeOwnership applies the global-dedup idea from ccusage's adapter/claude/mod.rs
@@ -37,10 +47,10 @@ func attributeOwnershipContext(ctx context.Context, sessions []*model.Session) e
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if request.MessageID == "" {
+			key, ok := ownershipKey(session, request)
+			if !ok {
 				continue
 			}
-			key := requestOwnershipKey{agent: session.Agent, messageID: request.MessageID, requestID: request.RequestID}
 			if owner := owners[key]; owner == nil || sessionStartedEarlier(session, owner) {
 				owners[key] = session
 			}
@@ -59,10 +69,10 @@ func attributeOwnershipContext(ctx context.Context, sessions []*model.Session) e
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			if request.MessageID == "" {
+			key, ok := ownershipKey(session, request)
+			if !ok {
 				continue
 			}
-			key := requestOwnershipKey{agent: session.Agent, messageID: request.MessageID, requestID: request.RequestID}
 			owner := owners[key]
 			if owner == nil || owner == session {
 				continue
@@ -90,9 +100,40 @@ func attributeOwnershipContext(ctx context.Context, sessions []*model.Session) e
 	return nil
 }
 
+func ownershipKey(session *model.Session, request model.RequestUsage) (requestOwnershipKey, bool) {
+	key := requestOwnershipKey{agent: session.Agent, messageID: request.MessageID, requestID: request.RequestID}
+	if request.MessageID != "" {
+		return key, true
+	}
+	// Codex RequestUsage lacks the MessageID that normally gates ownership. Partial
+	// mirrors can differ as files while sharing billed ledger entries, so stable usage fields form the key.
+	if session.Agent != model.AgentCodex || session.ID == "" {
+		return requestOwnershipKey{}, false
+	}
+	key.messageID = session.ID
+	key.codexSummary = true
+	key.offset = request.Offset
+	key.model = request.Usage.Model
+	key.speed = request.Usage.Speed
+	key.input = request.Usage.InputTokens
+	key.output = request.Usage.OutputTokens
+	key.cacheCreation5m = request.Usage.CacheCreation5mTokens
+	key.cacheCreation1h = request.Usage.CacheCreation1hTokens
+	key.cacheRead = request.Usage.CacheReadTokens
+	key.inputIncludesCacheRead = request.Usage.InputIncludesCacheRead
+	if request.Usage.CostUSD != nil {
+		key.hasLoggedCost = true
+		key.loggedCost = *request.Usage.CostUSD
+	}
+	return key, true
+}
+
 func sessionStartedEarlier(candidate, current *model.Session) bool {
 	if !candidate.StartedAt.Equal(current.StartedAt) {
 		return candidate.StartedAt.Before(current.StartedAt)
 	}
-	return candidate.ID < current.ID
+	if candidate.ID != current.ID {
+		return candidate.ID < current.ID
+	}
+	return filepath.Clean(candidate.Path) < filepath.Clean(current.Path)
 }

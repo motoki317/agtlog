@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -31,6 +34,110 @@ func (registry *fakeRegistry) LoadDetail(_ context.Context, session *model.Sessi
 		return registry.load(session)
 	}
 	return nil
+}
+
+func TestDirListAccumulatesValues(t *testing.T) {
+	var dirs DirList
+	if err := dirs.Set("home-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dirs.Set("home-b"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := []string(dirs), []string{"home-a", "home-b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("DirList = %v, want %v", got, want)
+	}
+	if _, ok := any(&dirs).(interface{ IsBoolFlag() bool }); ok {
+		t.Fatal("DirList implements IsBoolFlag")
+	}
+	var value flag.Value = &dirs
+	if value.String() == "" {
+		t.Fatal("DirList.String() is empty after Set")
+	}
+}
+
+func TestParseDirListUsesPlatformSeparator(t *testing.T) {
+	separator := string(os.PathListSeparator)
+	got := ParseDirList(strings.Join([]string{" home-a ", "", "archive,home", "  "}, separator))
+	want := []string{"home-a", "archive,home"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ParseDirList() = %v, want %v", got, want)
+	}
+}
+
+func TestResolveDirsPrefersExplicitValues(t *testing.T) {
+	separator := string(os.PathListSeparator)
+	if got, want := ResolveDirs([]string{"flag-home"}, "env-a"+separator+"env-b"), []string{"flag-home"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveDirs() = %v, want %v", got, want)
+	}
+	if got, want := ResolveDirs(nil, "env-a"+separator+"env-b"), []string{"env-a", "env-b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveDirs() = %v, want %v", got, want)
+	}
+}
+
+func TestValidateAgentDirs(t *testing.T) {
+	home := t.TempDir()
+	regularFile := filepath.Join(home, "agent-home.txt")
+	if err := os.WriteFile(regularFile, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(home, "missing-home")
+
+	tests := []struct {
+		name       string
+		agent      string
+		claudeDirs []string
+		codexDirs  []string
+		want       string
+	}{
+		{name: "missing Claude home", claudeDirs: []string{missing}, want: "claude directory does not exist: " + missing},
+		{name: "Codex home is file", codexDirs: []string{regularFile}, want: "codex directory is not a directory: " + regularFile},
+		{name: "fresh homes", claudeDirs: []string{home}, codexDirs: []string{home}},
+		{name: "Claude filter ignores Codex", agent: "claude", claudeDirs: []string{home}, codexDirs: []string{missing}},
+		{name: "Codex filter ignores Claude", agent: "codex", claudeDirs: []string{missing}, codexDirs: []string{home}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateAgentDirs(test.agent, test.claudeDirs, test.codexDirs)
+			if test.want == "" && err != nil {
+				t.Fatalf("ValidateAgentDirs() error = %v", err)
+			}
+			if test.want != "" && (err == nil || err.Error() != test.want) {
+				t.Fatalf("ValidateAgentDirs() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestCommonAgentDirectoryFlagsReachRegistryOptions(t *testing.T) {
+	claudeHome := t.TempDir()
+	codexHome := t.TempDir()
+	var got Options
+	err := Execute(context.Background(), []string{"list", "--claude-dir", claudeHome, "--claude-dir=" + claudeHome, "--codex-dir", codexHome}, io.Discard, io.Discard, func(_ context.Context, options Options) (Registry, error) {
+		got = options
+		return &fakeRegistry{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{claudeHome, claudeHome}; !reflect.DeepEqual(got.ClaudeDirs, want) {
+		t.Fatalf("ClaudeDirs = %v, want %v", got.ClaudeDirs, want)
+	}
+	if want := []string{codexHome}; !reflect.DeepEqual(got.CodexDirs, want) {
+		t.Fatalf("CodexDirs = %v, want %v", got.CodexDirs, want)
+	}
+}
+
+func TestAgentDirectoryFlagsPreserveShowAndSearchOperands(t *testing.T) {
+	home := t.TempDir()
+	show, ref, err := parseShowOptions([]string{"--claude-dir", home, "session-alpha"}, io.Discard)
+	if err != nil || ref != "session-alpha" || !reflect.DeepEqual([]string(show.common.claudeDirs), []string{home}) {
+		t.Fatalf("parseShowOptions() = %#v, %q, %v", show, ref, err)
+	}
+	search, pattern, err := parseSearchOptions([]string{"lunar", "--codex-dir", home}, io.Discard)
+	if err != nil || pattern != "lunar" || !reflect.DeepEqual([]string(search.common.codexDirs), []string{home}) {
+		t.Fatalf("parseSearchOptions() = %#v, %q, %v", search, pattern, err)
+	}
 }
 
 func TestParseTimeFilterAcceptsSupportedForms(t *testing.T) {
@@ -211,7 +318,7 @@ func TestSubcommandHelpWritesOnlyStdout(t *testing.T) {
 		t.Fatal("factory called for help")
 		return nil, nil
 	})
-	if err != nil || !strings.Contains(stdout.String(), "Usage: agtlog list") || !strings.Contains(stdout.String(), "-limit") || stderr.Len() != 0 {
+	if err != nil || !strings.Contains(stdout.String(), "Usage: agtlog list") || !strings.Contains(stdout.String(), "-limit") || !strings.Contains(stdout.String(), "overrides AGTLOG_CLAUDE_DIRS") || stderr.Len() != 0 {
 		t.Fatalf("error = %v, stdout = %q, stderr = %q", err, stdout.String(), stderr.String())
 	}
 }

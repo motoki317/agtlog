@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -128,8 +129,9 @@ type Options struct {
 }
 
 type Registry struct {
-	sources []Source
-	options Options
+	sources       []Source
+	options       Options
+	followMirrors *mirrorFollowState
 }
 
 type DiscoveryDiagnostic struct {
@@ -139,20 +141,32 @@ type DiscoveryDiagnostic struct {
 }
 
 func NewRegistry(sources []Source, options Options) *Registry {
-	var roots []string
-	for _, adapter := range sources {
-		roots = append(roots, adapter.Roots()...)
-	}
+	registry := &Registry{sources: sources, options: options, followMirrors: &mirrorFollowState{}}
 	if options.CacheDir != "" {
-		if resolved, ok := ResolveCacheDir(options.CacheDir, roots); ok {
+		if resolved, ok := ResolveCacheDir(options.CacheDir, registry.Roots()); ok {
 			options.CacheDir = resolved
 		} else {
 			options.CacheDir = ""
 		}
 	}
-	registry := &Registry{sources: sources, options: options}
+	registry.options = options
 	registry.sweepStaleCacheTemps(time.Now())
 	return registry
+}
+
+func (r *Registry) Roots() []string {
+	var roots []string
+	seen := make(map[string]bool)
+	for _, adapter := range r.sources {
+		for _, root := range adapter.Roots() {
+			root = filepath.Clean(root)
+			if !seen[root] {
+				seen[root] = true
+				roots = append(roots, root)
+			}
+		}
+	}
+	return roots
 }
 
 func (r *Registry) WithDiscoveryProgress(progress func(completed, total int)) *Registry {
@@ -175,9 +189,12 @@ func (r *Registry) discoverWithDiagnostics(ctx context.Context) ([]*model.Sessio
 	if err != nil {
 		return nil, nil, err
 	}
-	sessions, err := buildSessionSnapshotContext(ctx, allSessions)
+	sessions, mirrors, err := buildSessionSnapshotWithCandidatesContext(ctx, allSessions)
 	if err != nil {
 		return nil, nil, err
+	}
+	if r.followMirrors != nil {
+		r.followMirrors.publish(allSessions, sessions, mirrors)
 	}
 	return sessions, diagnostics, nil
 }
@@ -277,22 +294,31 @@ func (r *Registry) discoverSessionsWithDiagnostics(ctx context.Context) ([]*mode
 }
 
 func buildSessionSnapshotContext(ctx context.Context, parsedSessions []*model.Session) ([]*model.Session, error) {
+	sessions, _, err := buildSessionSnapshotWithCandidatesContext(ctx, parsedSessions)
+	return sessions, err
+}
+
+func buildSessionSnapshotWithCandidatesContext(ctx context.Context, parsedSessions []*model.Session) ([]*model.Session, mirrorCandidates, error) {
+	parsedSessions, mirrors, err := collapseMirroredSessionsWithCandidatesContext(ctx, parsedSessions)
+	if err != nil {
+		return nil, mirrorCandidates{}, err
+	}
 	allSessions := make([]*model.Session, 0, len(parsedSessions))
 	for _, session := range parsedSessions {
 		copied, err := copySessionTreeContext(ctx, session)
 		if err != nil {
-			return nil, err
+			return nil, mirrorCandidates{}, err
 		}
 		allSessions = append(allSessions, copied)
 	}
 	linkedChildren, err := linkSessionGraphsContext(ctx, allSessions)
 	if err != nil {
-		return nil, err
+		return nil, mirrorCandidates{}, err
 	}
 	sessions := make([]*model.Session, 0, len(allSessions))
 	for _, session := range allSessions {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, mirrorCandidates{}, err
 		}
 		if linkedChildren[session] {
 			continue
@@ -309,9 +335,9 @@ func buildSessionSnapshotContext(ctx context.Context, parsedSessions []*model.Se
 		return sessions[i].ID < sessions[j].ID
 	})
 	if err := attributeOwnershipContext(ctx, sessions); err != nil {
-		return nil, err
+		return nil, mirrorCandidates{}, err
 	}
-	return sessions, nil
+	return sessions, mirrors, nil
 }
 
 func copySessionTreeContext(ctx context.Context, session *model.Session) (*model.Session, error) {

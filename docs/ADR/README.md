@@ -40,3 +40,4 @@ trade-offs and alternatives that led to each choice.
 | 2026-08-15 | [Codex sidecar linking](./20260815-codex-sidecar-linking.md) | Link Codex sidecars from child parent IDs and decode wrapped message items |
 | 2026-08-22 | [Follow session index](./20260822-follow-session-index.md) | Rebuild live snapshots from copied, path-indexed parser output |
 | 2026-08-22 | [Codex summary checkpoints](./20260822-codex-summary-checkpoints.md) | Resume live Codex summaries after validated complete JSONL lines |
+| 2026-08-23 | [Extra agent home directories](./20260823-extra-agent-home-directories.md) | Add explicit homes without redirecting Claude Code or Codex writes |

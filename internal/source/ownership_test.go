@@ -83,6 +83,47 @@ func TestAttributeOwnershipBreaksEqualStartTieBySessionID(t *testing.T) {
 	}
 }
 
+func TestAttributeOwnershipDeduplicatesSharedCodexLedgerInPartialMirrors(t *testing.T) {
+	started := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)
+	sharedUsage := model.Usage{Model: "gpt-5.6-sol", InputTokens: 10, OutputTokens: 2}
+	uniqueUsage := model.Usage{Model: "gpt-5.6-sol", InputTokens: 3, OutputTokens: 1}
+	shared := model.RequestUsage{Offset: 128, Usage: sharedUsage, USD: 0.25}
+	unique := model.RequestUsage{Offset: 256, Usage: uniqueUsage, USD: 0.125}
+	firstPath := &model.Session{
+		ID: "session-shared", Agent: model.AgentCodex, Path: "/archive/a/session.jsonl", StartedAt: started,
+		Usage: []model.Usage{sharedUsage}, Requests: []model.RequestUsage{shared}, Cost: model.Cost{USD: shared.USD},
+	}
+	secondPath := &model.Session{
+		ID: "session-shared", Agent: model.AgentCodex, Path: "/archive/z/session.jsonl", StartedAt: started, Title: "extended copy",
+		Usage: []model.Usage{sharedUsage, uniqueUsage}, Requests: []model.RequestUsage{shared, unique}, Cost: model.Cost{USD: shared.USD + unique.USD},
+	}
+
+	AttributeOwnership([]*model.Session{secondPath, firstPath})
+
+	if firstPath.DuplicatedCount != 0 || secondPath.DuplicatedCount != 1 ||
+		secondPath.OwnedUsage().TotalTokens() != uniqueUsage.TotalTokens() || secondPath.OwnedCost().USD != unique.USD {
+		t.Fatalf("partial Codex mirror attribution = first %#v, second %#v; want only the shared ledger entry deducted", firstPath, secondPath)
+	}
+}
+
+func TestAttributeOwnershipDoesNotMergeDifferentCodexLedgerEntries(t *testing.T) {
+	started := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)
+	first := &model.Session{
+		ID: "session-shared", Agent: model.AgentCodex, Path: "/archive/a/session.jsonl", StartedAt: started,
+		Requests: []model.RequestUsage{{Offset: 128, Usage: model.Usage{Model: "gpt-5.6-sol", InputTokens: 10}}},
+	}
+	second := &model.Session{
+		ID: "session-shared", Agent: model.AgentCodex, Path: "/archive/b/session.jsonl", StartedAt: started,
+		Requests: []model.RequestUsage{{Offset: 128, Usage: model.Usage{Model: "gpt-5.6-sol", InputTokens: 11}}},
+	}
+
+	AttributeOwnership([]*model.Session{first, second})
+
+	if first.DuplicatedCount != 0 || second.DuplicatedCount != 0 {
+		t.Fatalf("different Codex ledgers duplicated counts = %d/%d, want 0/0", first.DuplicatedCount, second.DuplicatedCount)
+	}
+}
+
 func TestAttributeOwnershipUsesFullCompositeRequestIdentity(t *testing.T) {
 	started := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)
 	tests := []struct {
