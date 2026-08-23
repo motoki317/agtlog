@@ -78,19 +78,39 @@ func TestSourceDiscoverReturnsTopLevelSessions(t *testing.T) {
 	}
 }
 
-func TestDefaultRootsUsesClaudeConfigDirs(t *testing.T) {
-	got := DefaultRoots("unused", "config-a, config-b")
-	want := []string{filepath.Join("config-a", "projects"), filepath.Join("config-b", "projects")}
+func TestRootsTreatsClaudeConfigDirAsOneDirectory(t *testing.T) {
+	got := Roots("unused", "config-a,config-b", nil)
+	want := []string{filepath.Join("config-a,config-b", "projects")}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("DefaultRoots() = %v, want %v", got, want)
+		t.Fatalf("Roots() = %v, want %v", got, want)
 	}
 }
 
-func TestDefaultRootsDeduplicatesClaudeConfigDirs(t *testing.T) {
-	got := DefaultRoots("unused", "config-a, config-a")
-	want := []string{filepath.Join("config-a", "projects")}
+func TestRootsAppendsAndDeduplicatesClaudeHomes(t *testing.T) {
+	got := Roots("unused", "config-a", []string{"config-b", "config-a"})
+	want := []string{filepath.Join("config-a", "projects"), filepath.Join("config-b", "projects")}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("DefaultRoots() = %v, want %v", got, want)
+		t.Fatalf("Roots() = %v, want %v", got, want)
+	}
+}
+
+func TestRootsDeduplicatesAbsoluteAndRelativeClaudeHomes(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "projects"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(workingDirectory, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := Roots("unused", home, []string{relative})
+	want := []string{filepath.Join(home, "projects")}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Roots() = %v, want %v", got, want)
 	}
 }
 
@@ -129,15 +149,29 @@ func TestSourceDiscoverIgnoresSymlinkedSessionFiles(t *testing.T) {
 	}
 }
 
-func TestDefaultRootsIncludesBothClaudeHomes(t *testing.T) {
+func TestRootsIncludesBothDefaultClaudeHomes(t *testing.T) {
 	home := filepath.Join("fictional", "home")
-	got := DefaultRoots(home, "")
+	got := Roots(home, "", nil)
 	want := []string{
 		filepath.Join(home, ".config", "claude", "projects"),
 		filepath.Join(home, ".claude", "projects"),
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("DefaultRoots() = %v, want %v", got, want)
+		t.Fatalf("Roots() = %v, want %v", got, want)
+	}
+}
+
+func TestRootsAppendsExtraAfterDefaultClaudeHomes(t *testing.T) {
+	home := filepath.Join("fictional", "home")
+	extra := filepath.Join("fictional", "archive")
+	got := Roots(home, "", []string{extra})
+	want := []string{
+		filepath.Join(home, ".config", "claude", "projects"),
+		filepath.Join(home, ".claude", "projects"),
+		filepath.Join(extra, "projects"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Roots() = %v, want %v", got, want)
 	}
 }
 

@@ -23,11 +23,17 @@ func NewSource(parser Parser, roots []string) Source {
 	return Source{parser: parser, roots: normalizeRoots(roots)}
 }
 
-func DefaultRoots(home, codexHome string) []string {
+func Roots(home, codexHome string, extra []string) []string {
+	var roots []string
 	if codexHome != "" {
-		return []string{filepath.Join(codexHome, "sessions")}
+		roots = append(roots, filepath.Join(codexHome, "sessions"))
+	} else {
+		roots = append(roots, filepath.Join(home, ".codex", "sessions"))
 	}
-	return []string{filepath.Join(home, ".codex", "sessions")}
+	for _, dir := range extra {
+		roots = append(roots, filepath.Join(dir, "sessions"))
+	}
+	return normalizeRoots(roots)
 }
 
 func (s Source) Agent() model.AgentKind {
@@ -83,8 +89,12 @@ func normalizeRoots(roots []string) []string {
 		if canonical, err := filepath.EvalSymlinks(root); err == nil {
 			root = canonical
 		}
-		if !seen[root] {
-			seen[root] = true
+		key := root
+		if absolute, err := filepath.Abs(root); err == nil {
+			key = absolute
+		}
+		if !seen[key] {
+			seen[key] = true
 			normalized = append(normalized, root)
 		}
 	}

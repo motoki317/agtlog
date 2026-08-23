@@ -147,6 +147,22 @@ func TestRegistryDiscoversEveryRegisteredSource(t *testing.T) {
 	}
 }
 
+func TestRegistryRootsReturnsDeduplicatedUnion(t *testing.T) {
+	calculator := cost.NewCalculator(nil)
+	claudeRoot := filepath.Join("fictional", "claude", "projects")
+	sharedRoot := filepath.Join("fictional", "shared")
+	codexRoot := filepath.Join("fictional", "codex", "sessions")
+	registry := source.NewRegistry([]source.Source{
+		claude.NewSource(claude.NewParser(calculator), []string{claudeRoot, sharedRoot}),
+		codex.NewSource(codex.NewParser(calculator, "gpt-5"), []string{sharedRoot, codexRoot}),
+	}, source.Options{})
+
+	want := []string{claudeRoot, sharedRoot, codexRoot}
+	if got := registry.Roots(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Roots() = %v, want %v", got, want)
+	}
+}
+
 func TestRegistryReportsPerPathDiagnostics(t *testing.T) {
 	adapter := diagnosticSource{
 		sessions: map[string]*model.Session{
@@ -319,9 +335,7 @@ func (s diagnosticSource) ParseContext(_ context.Context, path string) (*model.S
 func (s diagnosticSource) Reprice(*model.Session) {}
 
 func TestRegistryLinksCodexSubagentSidecarUsage(t *testing.T) {
-	root := t.TempDir()
-	parentPath := filepath.Join(root, "rollout-thread-root.jsonl")
-	childPath := filepath.Join(root, "rollout-thread-review.jsonl")
+	roots := []string{t.TempDir(), t.TempDir()}
 	parent := strings.Join([]string{
 		`{"timestamp":"2026-01-02T03:00:00Z","type":"session_meta","payload":{"id":"thread-root","session_id":"thread-root","cwd":"/workspace/lunar-lab"}}`,
 		`{"timestamp":"2026-01-02T03:00:01Z","type":"event_msg","payload":{"type":"sub_agent_activity","agent_thread_id":"thread-review","agent_path":"/root/review_x","kind":"started"}}`,
@@ -333,14 +347,16 @@ func TestRegistryLinksCodexSubagentSidecarUsage(t *testing.T) {
 		`{"timestamp":"2026-01-02T03:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"Review the lunar telemetry."}}`,
 		`{"timestamp":"2026-01-02T03:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"output_tokens":8,"total_tokens":128}}}}`,
 	}, "\n") + "\n"
-	if err := os.WriteFile(parentPath, []byte(parent), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(childPath, []byte(child), 0o600); err != nil {
-		t.Fatal(err)
+	for _, root := range roots {
+		if err := os.WriteFile(filepath.Join(root, "rollout-thread-root.jsonl"), []byte(parent), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, "rollout-thread-review.jsonl"), []byte(child), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	calculator := cost.NewCalculator(cost.Table{"gpt-5.6": {Input: 1, Output: 1}})
-	adapter := codex.NewSource(codex.NewParser(calculator, "gpt-5.6"), []string{root})
+	adapter := codex.NewSource(codex.NewParser(calculator, "gpt-5.6"), roots)
 	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1, CacheDir: t.TempDir()})
 
 	sessions, err := registry.Discover(context.Background())

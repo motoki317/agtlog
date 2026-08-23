@@ -354,6 +354,57 @@ func TestAddressableRootsRejectMissingAndDuplicateIdentities(t *testing.T) {
 	}
 }
 
+func TestAddressableRootsRejectsPartialMirror(t *testing.T) {
+	directory := t.TempDir()
+	firstPath := filepath.Join(directory, "first.jsonl")
+	secondPath := filepath.Join(directory, "second.jsonl")
+	for _, path := range []string{firstPath, secondPath} {
+		if err := os.WriteFile(path, []byte("shared transcript\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	shared := model.RequestUsage{MessageID: "message-shared", RequestID: "request-shared"}
+	first := &model.Session{
+		ID: "duplicate", Agent: model.AgentClaude, Path: firstPath, SourceSize: 18,
+		Requests:  []model.RequestUsage{shared},
+		Subagents: []*model.Session{{ID: "reviewer", Agent: model.AgentClaude, Title: "Shared", Path: firstPath + "#reviewer"}},
+	}
+	second := &model.Session{
+		ID: "duplicate", Agent: model.AgentClaude, Path: secondPath, SourceSize: 18,
+		Requests:  []model.RequestUsage{shared, {RequestID: "unique-without-message"}},
+		Subagents: []*model.Session{{ID: "reviewer", Agent: model.AgentClaude, Title: "Unique", Path: secondPath + "#reviewer"}},
+	}
+
+	roots, diagnostics := addressableRoots([]*model.Session{first, second}, nil)
+	if len(roots) != 0 || len(diagnostics) == 0 {
+		t.Fatalf("partial mirror roots = %#v, diagnostics = %#v; want ambiguous duplicate rejection", roots, diagnostics)
+	}
+}
+
+func TestAddressableRootsRejectsEqualSummaryWithDifferentSource(t *testing.T) {
+	directory := t.TempDir()
+	firstPath := filepath.Join(directory, "first.jsonl")
+	secondPath := filepath.Join(directory, "second.jsonl")
+	if err := os.WriteFile(firstPath, []byte("assistant text alpha\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secondPath, []byte("assistant text bravo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := func(path string) *model.Session {
+		return &model.Session{
+			ID: "duplicate", Agent: model.AgentClaude, Path: path, SourceSize: 21,
+			Title: "Same summary", Messages: 1,
+			Requests: []model.RequestUsage{{MessageID: "message-shared", RequestID: "request-shared"}},
+		}
+	}
+
+	roots, diagnostics := addressableRoots([]*model.Session{session(firstPath), session(secondPath)}, nil)
+	if len(roots) != 0 || len(diagnostics) != 2 {
+		t.Fatalf("different-source roots = %#v, diagnostics = %#v; want duplicate-ref rejection", roots, diagnostics)
+	}
+}
+
 func TestShowPathReportsUnaddressableSessionAccurately(t *testing.T) {
 	path := "/logs/session-without-id.jsonl"
 	registry := &fakeRegistry{sessions: []*model.Session{{Agent: model.AgentClaude, Path: path}}}

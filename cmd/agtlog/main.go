@@ -66,8 +66,10 @@ func defaultRegistry(ctx context.Context, options cliOptions) (*source.Registry,
 		return nil, err
 	}
 	cacheDir := defaultCacheDir(home, os.Getenv("XDG_CACHE_HOME"))
-	claudeRoots := claude.DefaultRoots(home, os.Getenv("CLAUDE_CONFIG_DIR"))
-	codexRoots := codex.DefaultRoots(home, os.Getenv("CODEX_HOME"))
+	claudeDirs := machinecli.ResolveDirs(options.claudeDirs, os.Getenv("AGTLOG_CLAUDE_DIRS"))
+	codexDirs := machinecli.ResolveDirs(options.codexDirs, os.Getenv("AGTLOG_CODEX_DIRS"))
+	claudeRoots := claude.Roots(home, os.Getenv("CLAUDE_CONFIG_DIR"), claudeDirs)
+	codexRoots := codex.Roots(home, os.Getenv("CODEX_HOME"), codexDirs)
 	logRoots := append(append([]string(nil), claudeRoots...), codexRoots...)
 	cacheRoots := make([]string, 0, 2*len(logRoots))
 	for _, root := range logRoots {
@@ -114,24 +116,6 @@ func defaultCacheDir(home, xdg string) string {
 	return filepath.Join(home, ".cache", "agtlog")
 }
 
-func configuredWatchRootCount(home, claudeConfig, codexHome, agent string) int {
-	var roots []string
-	if agent == "" || agent == string(model.AgentClaude) {
-		roots = append(roots, claude.DefaultRoots(home, claudeConfig)...)
-	}
-	if agent == "" || agent == string(model.AgentCodex) {
-		roots = append(roots, codex.DefaultRoots(home, codexHome)...)
-	}
-	existing := make(map[string]bool, len(roots))
-	for _, root := range roots {
-		info, err := os.Stat(root)
-		if err == nil && info.IsDir() {
-			existing[filepath.Clean(root)] = true
-		}
-	}
-	return len(existing)
-}
-
 func run(ctx context.Context, args []string, output io.Writer, registry *source.Registry) error {
 	return execute(ctx, args, output, func(context.Context, cliOptions) (*source.Registry, error) { return registry, nil })
 }
@@ -144,6 +128,8 @@ type cliOptions struct {
 	noWatch       bool
 	agent         string
 	theme         string
+	claudeDirs    []string
+	codexDirs     []string
 }
 
 type discoveryProgress struct {
@@ -186,12 +172,11 @@ func executeTUI(ctx context.Context, options cliOptions, input io.Reader, output
 	discoveryRegistry := registry.WithDiscoveryProgress(progress.update)
 	watchingRoots := 0
 	if !options.noWatch {
-		home, homeErr := os.UserHomeDir()
-		if homeErr != nil {
-			cancel()
-			return homeErr
+		for _, root := range registry.Roots() {
+			if info, statErr := os.Stat(root); statErr == nil && info.IsDir() {
+				watchingRoots++
+			}
 		}
-		watchingRoots = configuredWatchRootCount(home, os.Getenv("CLAUDE_CONFIG_DIR"), os.Getenv("CODEX_HOME"), options.agent)
 	}
 	initial := tui.NewModelWithContextAndTheme(runCtx, nil, registry, theme).
 		WithWatchingRoots(watchingRoots).
@@ -332,12 +317,18 @@ func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 	noWatch := flags.Bool("no-watch", false, "disable live session following")
 	agent := flags.String("agent", "", "limit sessions to claude or codex")
 	theme := flags.String("theme", "", "color theme: default, nord, or dracula")
+	var claudeDirs, codexDirs machinecli.DirList
+	flags.Var(&claudeDirs, "claude-dir", "additional Claude home directory (repeatable)")
+	flags.Var(&codexDirs, "codex-dir", "additional Codex home directory (repeatable)")
 	flags.Usage = func() {
-		_, _ = fmt.Fprintln(output, "Usage: agtlog [--offline] [--refresh-prices] [--no-watch] [--agent claude|codex] [--theme default|nord|dracula] [--version]")
+		_, _ = fmt.Fprintln(output, "Usage: agtlog [--offline] [--refresh-prices] [--no-watch] [--agent claude|codex] [--claude-dir PATH] [--codex-dir PATH] [--theme default|nord|dracula] [--version]")
 		_, _ = fmt.Fprintln(output, "       agtlog list [flags]")
 		_, _ = fmt.Fprintln(output, "       agtlog show <ref> [flags]")
 		_, _ = fmt.Fprintln(output, "       agtlog search <pattern> [flags]")
 		_, _ = fmt.Fprintln(output, "  --agent           limit sessions to claude or codex")
+		_, _ = fmt.Fprintln(output, "  --claude-dir      additional Claude home (repeatable, overrides AGTLOG_CLAUDE_DIRS)")
+		_, _ = fmt.Fprintln(output, "  --codex-dir       additional Codex home (repeatable, overrides AGTLOG_CODEX_DIRS)")
+		_, _ = fmt.Fprintln(output, "                    AGTLOG_*_DIRS values use the same list separator as PATH")
 		_, _ = fmt.Fprintln(output, "  --no-watch        disable live session following")
 		_, _ = fmt.Fprintln(output, "  --offline         skip pricing refresh")
 		_, _ = fmt.Fprintln(output, "  --refresh-prices  refresh cached prices before starting")
@@ -363,7 +354,17 @@ func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 		flags.Usage()
 		return cliOptions{}, fmt.Errorf("invalid agent %q", *agent)
 	}
-	return cliOptions{showVersion: *showVersion, offline: *offline, refreshPrices: *refreshPrices, noWatch: *noWatch, agent: *agent, theme: *theme}, nil
+	resolvedClaudeDirs := machinecli.ResolveDirs(claudeDirs, os.Getenv("AGTLOG_CLAUDE_DIRS"))
+	resolvedCodexDirs := machinecli.ResolveDirs(codexDirs, os.Getenv("AGTLOG_CODEX_DIRS"))
+	if err := machinecli.ValidateAgentDirs(*agent, resolvedClaudeDirs, resolvedCodexDirs); err != nil {
+		flags.Usage()
+		return cliOptions{}, err
+	}
+	return cliOptions{
+		showVersion: *showVersion, offline: *offline, refreshPrices: *refreshPrices,
+		noWatch: *noWatch, agent: *agent, theme: *theme,
+		claudeDirs: append([]string(nil), claudeDirs...), codexDirs: append([]string(nil), codexDirs...),
+	}, nil
 }
 
 func execute(ctx context.Context, args []string, output io.Writer, registryFactory registryFactory) error {
@@ -377,7 +378,10 @@ func executeWithDiagnostics(ctx context.Context, args []string, output, diagnost
 func executeApplication(ctx context.Context, args []string, input io.Reader, output, diagnostics io.Writer, factory registryFactory, runner tuiRunner) error {
 	if len(args) > 0 && machinecli.IsCommand(args[0]) {
 		return machinecli.Execute(ctx, args, output, diagnostics, func(ctx context.Context, options machinecli.Options) (machinecli.Registry, error) {
-			return factory(ctx, cliOptions{offline: options.Offline, refreshPrices: options.RefreshPrices, agent: options.Agent})
+			return factory(ctx, cliOptions{
+				offline: options.Offline, refreshPrices: options.RefreshPrices, agent: options.Agent,
+				claudeDirs: options.ClaudeDirs, codexDirs: options.CodexDirs,
+			})
 		})
 	}
 	var parsedOutput bytes.Buffer

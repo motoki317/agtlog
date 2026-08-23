@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	machinecli "github.com/motoki317/agtlog/internal/cli"
 	"github.com/motoki317/agtlog/internal/model"
 	"github.com/motoki317/agtlog/internal/source"
 	"github.com/motoki317/agtlog/internal/tui"
@@ -97,26 +100,355 @@ func TestDefaultCacheDirUsesXDGThenHome(t *testing.T) {
 	}
 }
 
-func TestConfiguredWatchRootCountUsesSelectedAgent(t *testing.T) {
-	home := t.TempDir()
-	claudeA := filepath.Join(home, "claude-a")
-	claudeB := filepath.Join(home, "claude-b")
-	missing := filepath.Join(home, "missing")
-	codexHome := filepath.Join(home, "codex")
-	for _, root := range []string{filepath.Join(claudeA, "projects"), filepath.Join(claudeB, "projects"), filepath.Join(codexHome, "sessions")} {
-		if err := os.MkdirAll(root, 0o700); err != nil {
+func writeCodexSession(t *testing.T, home, sessionID string) string {
+	t.Helper()
+	root := filepath.Join(home, "sessions", "2026", "08", "23")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "rollout-"+sessionID+".jsonl")
+	content := fmt.Sprintf("{\"timestamp\":\"2026-08-23T01:02:03Z\",\"type\":\"session_meta\",\"payload\":{\"session_id\":%q,\"cwd\":\"/workspace/observatory\",\"originator\":\"codex_exec\"}}\n", sessionID) +
+		"{\"timestamp\":\"2026-08-23T01:02:04Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Map a lunar crater\"}}\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeCodexSidecarRun(t *testing.T, home string) {
+	t.Helper()
+	root := filepath.Join(home, "sessions", "2026", "08", "23")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parent := strings.Join([]string{
+		`{"timestamp":"2037-08-23T01:02:03Z","type":"session_meta","payload":{"id":"aaaaaaaa-1111-2222-3333-444444444555","session_id":"aaaaaaaa-1111-2222-3333-444444444555","cwd":"/workspace/observatory","originator":"codex_exec"}}`,
+		`{"timestamp":"2037-08-23T01:02:04Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}`,
+		`{"timestamp":"2037-08-23T01:02:05Z","type":"event_msg","payload":{"type":"user_message","message":"Orbit survey"}}`,
+		`{"timestamp":"2037-08-23T01:02:06Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":6000,"total_tokens":6000},"last_token_usage":{"input_tokens":6000,"total_tokens":6000}}}}`,
+		`{"timestamp":"2037-08-23T01:02:07Z","type":"event_msg","payload":{"type":"sub_agent_activity","agent_thread_id":"bbbbbbbb-1111-2222-3333-444444444666","agent_path":"/root/scout","kind":"started"}}`,
+	}, "\n") + "\n"
+	child := strings.Join([]string{
+		`{"timestamp":"2037-08-23T01:02:07Z","type":"session_meta","payload":{"id":"bbbbbbbb-1111-2222-3333-444444444666","session_id":"aaaaaaaa-1111-2222-3333-444444444555","parent_thread_id":"aaaaaaaa-1111-2222-3333-444444444555","cwd":"/workspace/observatory","thread_source":"subagent","agent_path":"/root/scout"}}`,
+		`{"timestamp":"2037-08-23T01:02:08Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}`,
+		`{"timestamp":"2037-08-23T01:02:09Z","type":"event_msg","payload":{"type":"user_message","message":"Scout mirror"}}`,
+		`{"timestamp":"2037-08-23T01:02:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2000,"total_tokens":2000},"last_token_usage":{"input_tokens":2000,"total_tokens":2000}}}}`,
+	}, "\n") + "\n"
+	files := map[string]string{
+		"rollout-aaaaaaaa-1111-2222-3333-444444444555.jsonl": parent,
+		"rollout-bbbbbbbb-1111-2222-3333-444444444666.jsonl": child,
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	claudeConfig := strings.Join([]string{claudeA, missing, claudeB}, ",")
-	if got := configuredWatchRootCount(home, claudeConfig, codexHome, ""); got != 3 {
-		t.Fatalf("all-agent root count = %d, want 3", got)
+}
+
+func writeClaudeReplay(t *testing.T, home, project, sessionID, timestamp string) string {
+	t.Helper()
+	root := filepath.Join(home, "projects", project)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if got := configuredWatchRootCount(home, claudeConfig, codexHome, "codex"); got != 1 {
-		t.Fatalf("Codex root count = %d, want 1", got)
+	path := filepath.Join(root, sessionID+".jsonl")
+	content := fmt.Sprintf("{\"type\":\"user\",\"uuid\":\"user-%s\",\"timestamp\":%q,\"sessionId\":%q,\"cwd\":\"/workspace/observatory\",\"message\":{\"role\":\"user\",\"content\":\"Map a lunar crater\"}}\n", sessionID, timestamp, sessionID) +
+		fmt.Sprintf("{\"type\":\"assistant\",\"uuid\":\"assistant-%s\",\"timestamp\":%q,\"sessionId\":%q,\"cwd\":\"/workspace/observatory\",\"requestId\":\"request-shared\",\"message\":{\"id\":\"message-shared\",\"model\":\"claude-opus-4-8\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2}}}\n", sessionID, timestamp, sessionID)
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if got := configuredWatchRootCount(home, missing, missing, ""); got != 0 {
-		t.Fatalf("missing root count = %d, want 0", got)
+	return path
+}
+
+func setRegistryEnvironment(t *testing.T, home string) {
+	t.Helper()
+	t.Setenv("HOME", home)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(home, "claude-base"))
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("AGTLOG_CLAUDE_DIRS", "")
+	t.Setenv("AGTLOG_CODEX_DIRS", "")
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+}
+
+func snapshotTree(t *testing.T, root string) []string {
+	t.Helper()
+	var snapshot []string
+	if err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			snapshot = append(snapshot, relative+string(filepath.Separator))
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		snapshot = append(snapshot, relative+"\x00"+string(content))
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func TestDefaultRegistryDiscoversDefaultAndExtraCodexHomes(t *testing.T) {
+	home := t.TempDir()
+	setRegistryEnvironment(t, home)
+	writeCodexSession(t, filepath.Join(home, ".codex"), "session-default")
+	extraHome := filepath.Join(home, "codex-archive")
+	writeCodexSession(t, extraHome, "session-archive")
+	extraBefore := snapshotTree(t, extraHome)
+
+	registry, err := defaultRegistry(context.Background(), cliOptions{agent: "codex", offline: true, codexDirs: []string{extraHome}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make(map[string]bool)
+	for _, session := range sessions {
+		ids[session.ID] = true
+	}
+	if len(sessions) != 2 || !ids["session-default"] || !ids["session-archive"] {
+		t.Fatalf("sessions = %#v, want default and archive", sessions)
+	}
+
+	var output bytes.Buffer
+	if err := executeApplication(
+		context.Background(), []string{"list", "--agent", "codex", "--codex-dir", extraHome},
+		strings.NewReader(""), &output, io.Discard, defaultRegistry,
+		func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error {
+			t.Fatal("TUI runner called for list command")
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "session-default") || !strings.Contains(output.String(), "session-archive") {
+		t.Fatalf("list output = %q, want default and archive sessions", output.String())
+	}
+	if extraAfter := snapshotTree(t, extraHome); !reflect.DeepEqual(extraAfter, extraBefore) {
+		t.Fatalf("configured Codex home changed from %q to %q", extraBefore, extraAfter)
+	}
+}
+
+func TestDefaultRegistryResolvesFlagsBeforeEnvironmentPerAgent(t *testing.T) {
+	home := t.TempDir()
+	setRegistryEnvironment(t, home)
+	claudeBase := filepath.Join(home, "claude-base")
+	codexBase := filepath.Join(home, "codex-base")
+	claudeFlag := filepath.Join(home, "claude-flag")
+	claudeEnv := filepath.Join(home, "claude-env")
+	codexEnv := filepath.Join(home, "codex-env")
+	for _, dir := range []string{claudeBase, codexBase, claudeFlag, claudeEnv, codexEnv} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeBase)
+	t.Setenv("CODEX_HOME", codexBase)
+	t.Setenv("AGTLOG_CLAUDE_DIRS", claudeEnv)
+	t.Setenv("AGTLOG_CODEX_DIRS", codexEnv)
+
+	registry, err := defaultRegistry(context.Background(), cliOptions{offline: true, claudeDirs: []string{claudeFlag}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		filepath.Join(claudeBase, "projects"),
+		filepath.Join(claudeFlag, "projects"),
+		filepath.Join(codexBase, "sessions"),
+		filepath.Join(codexEnv, "sessions"),
+	}
+	if got := registry.Roots(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("registry roots = %v, want %v", got, want)
+	}
+}
+
+func TestDefaultRegistryReadsPlatformSeparatedEnvironmentHomes(t *testing.T) {
+	home := t.TempDir()
+	setRegistryEnvironment(t, home)
+	first := filepath.Join(home, "codex,archive")
+	second := filepath.Join(home, "codex-second")
+	for _, dir := range []string{first, second} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("AGTLOG_CODEX_DIRS", strings.Join([]string{" " + first + " ", "", second}, string(os.PathListSeparator)))
+
+	registry, err := defaultRegistry(context.Background(), cliOptions{agent: "codex", offline: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		filepath.Join(home, ".codex", "sessions"),
+		filepath.Join(first, "sessions"),
+		filepath.Join(second, "sessions"),
+	}
+	if got := registry.Roots(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("registry roots = %v, want %v", got, want)
+	}
+}
+
+func TestDefaultRegistryCollapsesMirroredClaudeHomes(t *testing.T) {
+	home := t.TempDir()
+	setRegistryEnvironment(t, home)
+	first := filepath.Join(home, "claude-archive-a")
+	second := filepath.Join(home, "claude-archive-b")
+	original := writeClaudeReplay(t, first, "observatory", "session-mirror", "2026-08-23T01:02:03Z")
+	mirrorRoot := filepath.Join(second, "projects", "observatory")
+	if err := os.MkdirAll(mirrorRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mirrorRoot, "session-mirror.jsonl"), content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	registry, err := defaultRegistry(context.Background(), cliOptions{agent: "claude", offline: true, claudeDirs: []string{first, second}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputTokens := int64(0)
+	for _, session := range sessions {
+		inputTokens += session.OwnedUsage().InputTokens
+	}
+	if len(sessions) != 1 || inputTokens != 10 {
+		t.Fatalf("sessions = %d, input tokens = %d, want one session and 10 tokens", len(sessions), inputTokens)
+	}
+
+	var output bytes.Buffer
+	if err := executeApplication(
+		context.Background(),
+		[]string{"list", "--offline", "--agent", "claude", "--claude-dir", first, "--claude-dir", second, "--all"},
+		strings.NewReader(""), &output, io.Discard, defaultRegistry,
+		func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error {
+			t.Fatal("TUI runner called for list command")
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	var response machinecli.ListResponse
+	if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Sessions) != 1 || response.Sessions[0].Tokens.UncachedInput != 10 || len(response.Warnings) != 0 {
+		t.Fatalf("list response = %#v, want one owned mirrored session without warnings", response)
+	}
+}
+
+func TestMirroredCodexSidecarsStayOneGraphAcrossFrontends(t *testing.T) {
+	home := t.TempDir()
+	setRegistryEnvironment(t, home)
+	first := filepath.Join(home, "codex-archive-a")
+	second := filepath.Join(home, "codex-archive-z")
+	writeCodexSidecarRun(t, first)
+	writeCodexSidecarRun(t, second)
+
+	discover := func(dirs []string) ([]*model.Session, string) {
+		t.Helper()
+		registry, err := defaultRegistry(context.Background(), cliOptions{agent: "codex", offline: true, codexDirs: dirs})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sessions []*model.Session
+		var view string
+		runner := func(_ context.Context, _ io.Reader, _ io.Writer, initial tui.Model, updates <-chan source.SessionUpdate) error {
+			select {
+			case update := <-updates:
+				if update.DiscoveryErr != nil || !update.DiscoveryComplete {
+					t.Fatalf("TUI discovery update = %#v", update)
+				}
+				sessions = update.Sessions
+				updated, _ := initial.Update(update)
+				view = updated.(tui.Model).View()
+			case <-time.After(time.Second):
+				t.Fatal("timed out waiting for TUI discovery")
+			}
+			return nil
+		}
+		if err := executeTUI(context.Background(), cliOptions{noWatch: true}, strings.NewReader(""), io.Discard, registry, runner); err != nil {
+			t.Fatal(err)
+		}
+		return sessions, view
+	}
+	list := func(dirs []string) machinecli.ListResponse {
+		t.Helper()
+		args := []string{"list", "--format", "json", "--offline", "--agent", "codex", "--all"}
+		for _, dir := range dirs {
+			args = append(args, "--codex-dir", dir)
+		}
+		var output bytes.Buffer
+		if err := executeApplication(
+			context.Background(), args, strings.NewReader(""), &output, io.Discard, defaultRegistry,
+			func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error {
+				t.Fatal("TUI runner called for list command")
+				return nil
+			},
+		); err != nil {
+			t.Fatal(err)
+		}
+		var response machinecli.ListResponse
+		if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		return response
+	}
+	assertGraph := func(label string, sessions []*model.Session) {
+		t.Helper()
+		if len(sessions) != 1 || sessions[0].ID != "aaaaaaaa-1111-2222-3333-444444444555" ||
+			len(sessions[0].Subagents) != 1 || sessions[0].Subagents[0].ID != "bbbbbbbb-1111-2222-3333-444444444666" {
+			t.Fatalf("%s sessions = %#v, want one parent with one linked sidecar", label, sessions)
+		}
+		if got := sessions[0].OwnedUsage().TotalTokens(); got != 8000 {
+			t.Fatalf("%s total tokens = %d, want 8000", label, got)
+		}
+		if got := sessions[0].OwnedCost().USD; got <= 0 {
+			t.Fatalf("%s total cost = %f, want a priced parent and child", label, got)
+		}
+	}
+
+	oneTUISessions, oneTUIView := discover([]string{first})
+	mirroredTUISessions, mirroredTUIView := discover([]string{first, second})
+	assertGraph("one-home TUI", oneTUISessions)
+	assertGraph("mirrored TUI", mirroredTUISessions)
+	if oneTUISessions[0].OwnedCost().USD != mirroredTUISessions[0].OwnedCost().USD {
+		t.Fatalf("mirrored TUI cost = %f, want one-home cost %f", mirroredTUISessions[0].OwnedCost().USD, oneTUISessions[0].OwnedCost().USD)
+	}
+	for label, view := range map[string]string{"one-home TUI": oneTUIView, "mirrored TUI": mirroredTUIView} {
+		if !strings.Contains(view, "1 sessions") || !strings.Contains(view, "Orbit survey") || strings.Contains(view, "Scout mirror") {
+			t.Fatalf("%s view does not show one parent-only row:\n%s", label, view)
+		}
+	}
+	if mirroredTUIView != oneTUIView {
+		t.Fatalf("mirrored TUI view differs from one-home baseline:\n%s\n--- baseline ---\n%s", mirroredTUIView, oneTUIView)
+	}
+
+	oneList := list([]string{first})
+	mirroredList := list([]string{first, second})
+	if !reflect.DeepEqual(mirroredList, oneList) {
+		t.Fatalf("mirrored list = %#v, want one-home response %#v", mirroredList, oneList)
+	}
+	if len(mirroredList.Sessions) != 1 || mirroredList.Page.Total != 1 || mirroredList.Sessions[0].Subagents != 1 ||
+		mirroredList.Sessions[0].Tokens.Total != 8000 || mirroredList.Sessions[0].Cost.USD <= 0 || len(mirroredList.Warnings) != 0 {
+		t.Fatalf("mirrored list response = %#v, want one complete parent graph", mirroredList)
 	}
 }
 
@@ -208,6 +540,25 @@ func TestDefaultRegistryRefreshRejectsCacheInsideConfigRoot(t *testing.T) {
 	}
 }
 
+func TestDefaultRegistryConfiguredRootKeepsCacheSafety(t *testing.T) {
+	home := t.TempDir()
+	setRegistryEnvironment(t, home)
+	xdgRoot := filepath.Join(home, "cache-parent")
+	configuredHome := filepath.Join(xdgRoot, "agtlog")
+	if err := os.MkdirAll(configuredHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_CACHE_HOME", xdgRoot)
+
+	_, err := defaultRegistry(context.Background(), cliOptions{refreshPrices: true, codexDirs: []string{configuredHome}})
+	if err == nil || !strings.Contains(err.Error(), "safely resolved outside agent") {
+		t.Fatalf("defaultRegistry() error = %v, want unsafe configured-root cache error", err)
+	}
+	if entries, readErr := os.ReadDir(configuredHome); readErr != nil || len(entries) != 0 {
+		t.Fatalf("configured home entries = %v, error = %v, want no writes", entries, readErr)
+	}
+}
+
 func TestResolveVersionUsesLinkerThenModuleMetadata(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -232,6 +583,7 @@ func TestResolveVersionUsesLinkerThenModuleMetadata(t *testing.T) {
 
 type staticSource struct {
 	session    *model.Session
+	roots      []string
 	rootsCalls *int
 }
 
@@ -296,7 +648,7 @@ func (s staticSource) Roots() []string {
 	if s.rootsCalls != nil {
 		*s.rootsCalls++
 	}
-	return nil
+	return append([]string(nil), s.roots...)
 }
 func (s staticSource) Discover(context.Context) ([]string, error) {
 	return []string{"session.jsonl"}, nil
@@ -363,6 +715,9 @@ func TestRunHelpPrintsUsageAndSucceeds(t *testing.T) {
 	if !strings.Contains(output.String(), "Usage: agtlog") || !strings.Contains(output.String(), "--refresh-prices") || !strings.Contains(output.String(), "--version") || !strings.Contains(output.String(), "--theme default|nord|dracula") {
 		t.Fatalf("run() help = %q, want usage and flags", output.String())
 	}
+	if !strings.Contains(output.String(), "overrides AGTLOG_CLAUDE_DIRS") || !strings.Contains(output.String(), "same list separator as PATH") {
+		t.Fatalf("run() help does not explain directory environment precedence: %q", output.String())
+	}
 	if !strings.Contains(output.String(), "--theme > AGTLOG_THEME > default; NO_COLOR forces mono") {
 		t.Fatalf("run() help does not explain theme precedence: %q", output.String())
 	}
@@ -404,10 +759,124 @@ func TestParseOptionsReadsOfflineRefreshWatchAndAgentSelection(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseOptions() error = %v", err)
 			}
-			if options != test.want {
+			if !reflect.DeepEqual(options, test.want) {
 				t.Fatalf("parseOptions() = %#v, want %#v", options, test.want)
 			}
 		})
+	}
+}
+
+func TestParseOptionsAccumulatesAgentDirectories(t *testing.T) {
+	t.Setenv("AGTLOG_CLAUDE_DIRS", "")
+	t.Setenv("AGTLOG_CODEX_DIRS", "")
+	claudeA := t.TempDir()
+	claudeB := t.TempDir()
+	codexHome := t.TempDir()
+	options, err := parseOptions([]string{
+		"--claude-dir", claudeA,
+		"--claude-dir=" + claudeB,
+		"--codex-dir", codexHome,
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(options.claudeDirs, []string{claudeA, claudeB}) || !reflect.DeepEqual(options.codexDirs, []string{codexHome}) {
+		t.Fatalf("parseOptions() directories = %v, %v", options.claudeDirs, options.codexDirs)
+	}
+}
+
+func TestParseOptionsFlagsBeatInvalidDirectoryEnvironment(t *testing.T) {
+	home := t.TempDir()
+	missing := filepath.Join(home, "missing")
+	t.Setenv("AGTLOG_CLAUDE_DIRS", missing)
+	t.Setenv("AGTLOG_CODEX_DIRS", missing)
+	if _, err := parseOptions([]string{"--claude-dir", home, "--codex-dir", home}, io.Discard); err != nil {
+		t.Fatalf("parseOptions() error = %v, want flags to override environment", err)
+	}
+}
+
+func TestExecuteApplicationReportsMissingMachineDirectoryAsUsage(t *testing.T) {
+	home := t.TempDir()
+	missing := filepath.Join(home, "missing-claude")
+	t.Setenv("AGTLOG_CLAUDE_DIRS", "")
+	t.Setenv("AGTLOG_CODEX_DIRS", "")
+	var output, diagnostics bytes.Buffer
+	called := false
+	err := executeApplication(
+		context.Background(), []string{"list", "--claude-dir", missing}, strings.NewReader(""),
+		&output, &diagnostics,
+		func(context.Context, cliOptions) (*source.Registry, error) {
+			called = true
+			return nil, nil
+		},
+		func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error { return nil },
+	)
+	status, ok := machinecli.ExitStatus(err)
+	if !ok || status != 2 || called || output.Len() != 0 || !strings.Contains(diagnostics.String(), `"code": "usage"`) || !strings.Contains(diagnostics.String(), "claude directory does not exist: "+missing) || strings.Contains(diagnostics.String(), `"code": "internal"`) {
+		t.Fatalf("error = %v, status = %d, called = %v, stdout = %q, stderr = %q", err, status, called, output.String(), diagnostics.String())
+	}
+}
+
+func TestExecuteApplicationValidatesDirectoryEnvironmentAsUsage(t *testing.T) {
+	home := t.TempDir()
+	missing := filepath.Join(home, "missing-codex")
+	t.Setenv("AGTLOG_CLAUDE_DIRS", "")
+	t.Setenv("AGTLOG_CODEX_DIRS", missing)
+	var diagnostics bytes.Buffer
+	err := executeApplication(
+		context.Background(), []string{"list", "--agent", "codex"}, strings.NewReader(""), io.Discard, &diagnostics,
+		func(context.Context, cliOptions) (*source.Registry, error) {
+			t.Fatal("registry factory called")
+			return nil, nil
+		},
+		func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error { return nil },
+	)
+	status, ok := machinecli.ExitStatus(err)
+	if !ok || status != 2 || !strings.Contains(diagnostics.String(), "codex directory does not exist: "+missing) {
+		t.Fatalf("error = %v, status = %d, stderr = %q", err, status, diagnostics.String())
+	}
+}
+
+func TestExecuteApplicationRejectsMissingTUIDirectoryBeforeFactory(t *testing.T) {
+	home := t.TempDir()
+	missing := filepath.Join(home, "missing-claude")
+	t.Setenv("AGTLOG_CLAUDE_DIRS", "")
+	t.Setenv("AGTLOG_CODEX_DIRS", "")
+	var diagnostics bytes.Buffer
+	called := false
+	err := executeApplication(
+		context.Background(), []string{"--claude-dir", missing}, strings.NewReader(""), io.Discard, &diagnostics,
+		func(context.Context, cliOptions) (*source.Registry, error) {
+			called = true
+			return nil, nil
+		},
+		func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error { return nil },
+	)
+	if err == nil || err.Error() != "claude directory does not exist: "+missing || called || !strings.Contains(diagnostics.String(), "Usage: agtlog") {
+		t.Fatalf("error = %v, called = %v, diagnostics = %q", err, called, diagnostics.String())
+	}
+}
+
+func TestExecuteApplicationRejectsMissingTUIEnvironmentDirectoryBeforeFactory(t *testing.T) {
+	home := t.TempDir()
+	missing := filepath.Join(home, "missing-codex")
+	t.Setenv("AGTLOG_CLAUDE_DIRS", "")
+	t.Setenv("AGTLOG_CODEX_DIRS", missing)
+	var diagnostics bytes.Buffer
+	called := false
+	err := executeApplication(
+		context.Background(), nil, strings.NewReader(""), io.Discard, &diagnostics,
+		func(context.Context, cliOptions) (*source.Registry, error) {
+			called = true
+			return nil, nil
+		},
+		func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error {
+			called = true
+			return nil
+		},
+	)
+	if err == nil || err.Error() != "codex directory does not exist: "+missing || called || !strings.Contains(diagnostics.String(), "Usage: agtlog") {
+		t.Fatalf("error = %v, called = %v, diagnostics = %q", err, called, diagnostics.String())
 	}
 }
 
@@ -479,13 +948,20 @@ func TestExecuteApplicationPassesOptionsToRegistryFactory(t *testing.T) {
 		runnerCalled = true
 		return nil
 	}
+	claudeHome := t.TempDir()
+	codexHome := t.TempDir()
+	t.Setenv("AGTLOG_CLAUDE_DIRS", "")
+	t.Setenv("AGTLOG_CODEX_DIRS", "")
 
-	err := executeApplication(appCtx, []string{"--refresh-prices", "--no-watch", "--agent", "codex"}, strings.NewReader(""), io.Discard, io.Discard, factory, runner)
+	err := executeApplication(appCtx, []string{
+		"--refresh-prices", "--no-watch", "--agent", "codex",
+		"--claude-dir", claudeHome, "--codex-dir", codexHome,
+	}, strings.NewReader(""), io.Discard, io.Discard, factory, runner)
 	if err != nil {
 		t.Fatalf("executeApplication() error = %v", err)
 	}
-	wantOptions := cliOptions{refreshPrices: true, noWatch: true, agent: "codex"}
-	if receivedCtx != appCtx || receivedOptions != wantOptions || !runnerCalled {
+	wantOptions := cliOptions{refreshPrices: true, noWatch: true, agent: "codex", claudeDirs: []string{claudeHome}, codexDirs: []string{codexHome}}
+	if receivedCtx != appCtx || !reflect.DeepEqual(receivedOptions, wantOptions) || !runnerCalled {
 		t.Fatalf("factory context matches = %v, options = %#v, want %#v, runner called = %v", receivedCtx == appCtx, receivedOptions, wantOptions, runnerCalled)
 	}
 }
@@ -579,6 +1055,51 @@ func TestExecuteTUIDiscoversAfterStartingWithoutWatch(t *testing.T) {
 	}
 	if rootsCalls != 0 {
 		t.Fatalf("--no-watch called source Roots %d times after registry construction", rootsCalls)
+	}
+}
+
+func TestExecuteTUIWatchedRootCountUsesFilteredRegistryRoots(t *testing.T) {
+	claudeRoot := filepath.Join(t.TempDir(), "claude-projects")
+	codexRoot := filepath.Join(t.TempDir(), "codex-sessions")
+	for _, root := range []string{claudeRoot, codexRoot} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name    string
+		sources []source.Source
+		want    string
+	}{
+		{
+			name: "all configured roots",
+			sources: []source.Source{
+				staticSource{session: &model.Session{ID: "claude-session", Agent: model.AgentClaude}, roots: []string{claudeRoot}},
+				staticSource{session: &model.Session{ID: "codex-session", Agent: model.AgentCodex}, roots: []string{codexRoot}},
+			},
+			want: "watching 2 roots",
+		},
+		{
+			name: "Claude filter excludes Codex root",
+			sources: []source.Source{
+				staticSource{session: &model.Session{ID: "claude-session", Agent: model.AgentClaude}, roots: []string{claudeRoot}},
+			},
+			want: "watching 1 root",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			registry := source.NewRegistry(test.sources, source.Options{Workers: 1})
+			runner := func(_ context.Context, _ io.Reader, _ io.Writer, initial tui.Model, _ <-chan source.SessionUpdate) error {
+				if view := initial.View(); !strings.Contains(view, test.want) {
+					t.Fatalf("initial view = %q, want %q", view, test.want)
+				}
+				return nil
+			}
+			if err := executeTUI(context.Background(), cliOptions{}, strings.NewReader(""), io.Discard, registry, runner); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

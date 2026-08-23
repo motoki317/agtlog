@@ -45,9 +45,22 @@ Every subcommand accepts these flags:
 | Flag | Meaning |
 | --- | --- |
 | `--agent claude\|codex` | Keep one agent. |
+| `--claude-dir PATH` | Add a Claude home. Repeat the flag to add more homes. |
+| `--codex-dir PATH` | Add a Codex home. Repeat the flag to add more homes. |
 | `--format json\|text` | Select JSON or plain text. The default is `json`. |
 | `--offline` | Explicitly retain the default cached and embedded pricing behavior. |
 | `--refresh-prices` | Refresh the price cache before the command. |
+
+Each directory flag names an agent home. agtlog appends `projects` for Claude
+and `sessions` for Codex. Configured homes are added to the home selected by
+`CLAUDE_CONFIG_DIR` or `CODEX_HOME`, or to agtlog's built-in defaults when that
+variable is unset.
+
+If a directory flag is absent, `AGTLOG_CLAUDE_DIRS` or `AGTLOG_CODEX_DIRS` can
+supply a list with the platform path-list separator, the same separator as
+`PATH`. A directory flag overrides its matching environment variable. agtlog
+rejects a configured home that is missing or is not a directory. An `--agent`
+filter skips validation and discovery for the other agent.
 
 Subcommands do not start a background price refresh. `--offline` and
 `--refresh-prices` are mutually exclusive. `--theme` and `--no-watch` belong to

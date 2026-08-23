@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -60,6 +61,66 @@ type Options struct {
 	Offline       bool
 	RefreshPrices bool
 	Agent         string
+	ClaudeDirs    []string
+	CodexDirs     []string
+}
+
+type DirList []string
+
+func (d *DirList) String() string {
+	return strings.Join(*d, string(os.PathListSeparator))
+}
+
+func (d *DirList) Set(value string) error {
+	*d = append(*d, value)
+	return nil
+}
+
+func ParseDirList(value string) []string {
+	var dirs []string
+	for _, dir := range filepath.SplitList(value) {
+		if dir = strings.TrimSpace(dir); dir != "" {
+			dirs = append(dirs, dir)
+		}
+	}
+	return dirs
+}
+
+func ResolveDirs(explicit []string, environment string) []string {
+	if len(explicit) > 0 {
+		return append([]string(nil), explicit...)
+	}
+	return ParseDirList(environment)
+}
+
+func ValidateAgentDirs(agent string, claudeDirs, codexDirs []string) error {
+	if agent == "" || agent == string(model.AgentClaude) {
+		if err := validateDirs("claude", claudeDirs); err != nil {
+			return err
+		}
+	}
+	if agent == "" || agent == string(model.AgentCodex) {
+		if err := validateDirs("codex", codexDirs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateDirs(agent string, dirs []string) error {
+	for _, dir := range dirs {
+		info, err := os.Stat(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%s directory does not exist: %s", agent, dir)
+		}
+		if err != nil {
+			return fmt.Errorf("inspect %s directory %s: %w", agent, dir, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("%s directory is not a directory: %s", agent, dir)
+		}
+	}
+	return nil
 }
 
 type RegistryFactory func(context.Context, Options) (Registry, error)
@@ -86,6 +147,8 @@ type commonOptions struct {
 	refreshPrices bool
 	agent         string
 	format        string
+	claudeDirs    DirList
+	codexDirs     DirList
 }
 
 func IsCommand(value string) bool {
@@ -131,6 +194,8 @@ func addCommonFlags(flags *flag.FlagSet, options *commonOptions) {
 	flags.BoolVar(&options.refreshPrices, "refresh-prices", false, "refresh cached prices before running")
 	flags.StringVar(&options.agent, "agent", "", "limit sessions to claude or codex")
 	flags.StringVar(&options.format, "format", "json", "output format: json or text")
+	flags.Var(&options.claudeDirs, "claude-dir", "additional Claude home (repeatable, overrides AGTLOG_CLAUDE_DIRS path list)")
+	flags.Var(&options.codexDirs, "codex-dir", "additional Codex home (repeatable, overrides AGTLOG_CODEX_DIRS path list)")
 }
 
 func (options commonOptions) validate() error {
@@ -139,6 +204,11 @@ func (options commonOptions) validate() error {
 	}
 	if options.agent != "" && options.agent != string(model.AgentClaude) && options.agent != string(model.AgentCodex) {
 		return usageError(fmt.Sprintf("invalid agent %q", options.agent))
+	}
+	claudeDirs := ResolveDirs(options.claudeDirs, os.Getenv("AGTLOG_CLAUDE_DIRS"))
+	codexDirs := ResolveDirs(options.codexDirs, os.Getenv("AGTLOG_CODEX_DIRS"))
+	if err := ValidateAgentDirs(options.agent, claudeDirs, codexDirs); err != nil {
+		return usageError(err.Error())
 	}
 	if options.format != "json" && options.format != "text" {
 		return usageError(fmt.Sprintf("invalid format %q", options.format))
@@ -151,6 +221,8 @@ func (options commonOptions) registryOptions() Options {
 		Offline:       !options.refreshPrices,
 		RefreshPrices: options.refreshPrices,
 		Agent:         options.agent,
+		ClaudeDirs:    append([]string(nil), options.claudeDirs...),
+		CodexDirs:     append([]string(nil), options.codexDirs...),
 	}
 }
 

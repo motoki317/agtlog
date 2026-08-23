@@ -115,12 +115,8 @@ func (w *Watcher) Close() error {
 }
 
 func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower, error) {
-	var roots []string
-	for _, adapter := range r.sources {
-		roots = append(roots, adapter.Roots()...)
-	}
 	followCtx, cancel := context.WithCancel(ctx)
-	watcher, err := newWatcher(followCtx, roots, options)
+	watcher, err := newWatcher(followCtx, r.Roots(), options)
 	if err != nil {
 		cancel()
 		return nil, err

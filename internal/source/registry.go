@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -139,20 +140,32 @@ type DiscoveryDiagnostic struct {
 }
 
 func NewRegistry(sources []Source, options Options) *Registry {
-	var roots []string
-	for _, adapter := range sources {
-		roots = append(roots, adapter.Roots()...)
-	}
+	registry := &Registry{sources: sources, options: options}
 	if options.CacheDir != "" {
-		if resolved, ok := ResolveCacheDir(options.CacheDir, roots); ok {
+		if resolved, ok := ResolveCacheDir(options.CacheDir, registry.Roots()); ok {
 			options.CacheDir = resolved
 		} else {
 			options.CacheDir = ""
 		}
 	}
-	registry := &Registry{sources: sources, options: options}
+	registry.options = options
 	registry.sweepStaleCacheTemps(time.Now())
 	return registry
+}
+
+func (r *Registry) Roots() []string {
+	var roots []string
+	seen := make(map[string]bool)
+	for _, adapter := range r.sources {
+		for _, root := range adapter.Roots() {
+			root = filepath.Clean(root)
+			if !seen[root] {
+				seen[root] = true
+				roots = append(roots, root)
+			}
+		}
+	}
+	return roots
 }
 
 func (r *Registry) WithDiscoveryProgress(progress func(completed, total int)) *Registry {
@@ -277,6 +290,10 @@ func (r *Registry) discoverSessionsWithDiagnostics(ctx context.Context) ([]*mode
 }
 
 func buildSessionSnapshotContext(ctx context.Context, parsedSessions []*model.Session) ([]*model.Session, error) {
+	parsedSessions, err := collapseMirroredSessionsContext(ctx, parsedSessions)
+	if err != nil {
+		return nil, err
+	}
 	allSessions := make([]*model.Session, 0, len(parsedSessions))
 	for _, session := range parsedSessions {
 		copied, err := copySessionTreeContext(ctx, session)

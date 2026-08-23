@@ -78,20 +78,53 @@ func TestSourceDiscoverReturnsRolloutFiles(t *testing.T) {
 	}
 }
 
-func TestDefaultRootsUsesCodexHome(t *testing.T) {
-	got := DefaultRoots("unused", "codex-home")
-	want := []string{filepath.Join("codex-home", "sessions")}
+func TestRootsAppendsAndDeduplicatesCodexHomes(t *testing.T) {
+	got := Roots("unused", "codex-home", []string{"archive-home", "codex-home"})
+	want := []string{filepath.Join("codex-home", "sessions"), filepath.Join("archive-home", "sessions")}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("DefaultRoots() = %v, want %v", got, want)
+		t.Fatalf("Roots() = %v, want %v", got, want)
 	}
 }
 
-func TestDefaultRootsUsesUserCodexDirectory(t *testing.T) {
+func TestRootsDeduplicatesAbsoluteAndRelativeCodexHomes(t *testing.T) {
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relative, err := filepath.Rel(workingDirectory, home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := Roots("unused", home, []string{relative})
+	want := []string{filepath.Join(home, "sessions")}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Roots() = %v, want %v", got, want)
+	}
+}
+
+func TestRootsUsesDefaultCodexHome(t *testing.T) {
 	home := filepath.Join("fictional", "home")
-	got := DefaultRoots(home, "")
+	got := Roots(home, "", nil)
 	want := []string{filepath.Join(home, ".codex", "sessions")}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("DefaultRoots() = %v, want %v", got, want)
+		t.Fatalf("Roots() = %v, want %v", got, want)
+	}
+}
+
+func TestRootsAppendsExtraAfterDefaultCodexHome(t *testing.T) {
+	home := filepath.Join("fictional", "home")
+	extra := filepath.Join("fictional", "archive")
+	got := Roots(home, "", []string{extra})
+	want := []string{
+		filepath.Join(home, ".codex", "sessions"),
+		filepath.Join(extra, "sessions"),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Roots() = %v, want %v", got, want)
 	}
 }
 
