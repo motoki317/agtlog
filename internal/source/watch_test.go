@@ -42,6 +42,15 @@ type indexedFollowSource struct {
 	failParses          map[string]int
 }
 
+type mirroredFollowSource struct {
+	agent     model.AgentKind
+	roots     []string
+	mu        sync.Mutex
+	sessions  map[string]*model.Session
+	discovers int
+	parses    map[string]int
+}
+
 type resumableFollowSource struct {
 	root       string
 	path       string
@@ -135,6 +144,57 @@ func (s *indexedFollowSource) remove(path string) {
 	delete(s.sessions, path)
 }
 func (s *indexedFollowSource) counts(path string) (int, int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.discovers, s.parses[path]
+}
+
+func (s *mirroredFollowSource) Agent() model.AgentKind   { return s.agent }
+func (s *mirroredFollowSource) Roots() []string          { return append([]string(nil), s.roots...) }
+func (s *mirroredFollowSource) CacheFingerprint() string { return "mirrored-follow-v1" }
+func (s *mirroredFollowSource) Discover(ctx context.Context) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.discovers++
+	paths := make([]string, 0, len(s.sessions))
+	for path := range s.sessions {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+func (s *mirroredFollowSource) ParseContext(ctx context.Context, path string) (*model.Session, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.parses[path]++
+	session := s.sessions[path]
+	if session == nil {
+		return nil, os.ErrNotExist
+	}
+	copy := *session
+	copy.Subagents = append([]*model.Session(nil), session.Subagents...)
+	return &copy, nil
+}
+func (s *mirroredFollowSource) Reprice(*model.Session) {}
+func (s *mirroredFollowSource) set(session *model.Session) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessions[session.Path] = session
+}
+func (s *mirroredFollowSource) remove(paths ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, path := range paths {
+		delete(s.sessions, path)
+	}
+}
+func (s *mirroredFollowSource) counts(path string) (int, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.discovers, s.parses[path]
@@ -392,6 +452,329 @@ func TestFollowerReparsesChangedSession(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("timed out waiting for parsed session update")
+	}
+}
+
+func TestFollowerReconcilesChangedClaudeMirror(t *testing.T) {
+	firstRoot := filepath.Join(t.TempDir(), "a-home")
+	secondRoot := filepath.Join(t.TempDir(), "z-home")
+	for _, root := range []string{firstRoot, secondRoot} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstPath := filepath.Join(firstRoot, "session.jsonl")
+	secondPath := filepath.Join(secondRoot, "session.jsonl")
+	contents := []byte("identical claude transcript\n")
+	for _, path := range []string{firstPath, secondPath} {
+		if err := os.WriteFile(path, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adapter := &mirroredFollowSource{
+		agent: model.AgentClaude,
+		roots: []string{firstRoot, secondRoot},
+		sessions: map[string]*model.Session{
+			firstPath:  {ID: "session-mirror", Agent: model.AgentClaude, Path: firstPath, SourceSize: int64(len(contents)), Cost: model.Cost{USD: 3}},
+			secondPath: {ID: "session-mirror", Agent: model.AgentClaude, Path: secondPath, SourceSize: int64(len(contents)), Cost: model.Cost{USD: 3}},
+		},
+		parses: make(map[string]int),
+	}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1})
+	initialDiscoveryDone := make(chan struct{})
+	follower, err := registry.Follow(context.Background(), WatchOptions{
+		Debounce: time.Hour, RescanInterval: time.Hour, InitialDiscoveryDone: initialDiscoveryDone,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = follower.Close() }()
+	follower.watcher.events <- Change{Paths: []string{secondPath}}
+	initial, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(initialDiscoveryDone)
+	if len(initial) != 1 || initial[0].Path != firstPath {
+		t.Fatalf("initial sessions = %#v, want lexical mirror winner %s", initial, firstPath)
+	}
+
+	update := nextFollowerUpdate(t, follower)
+	if len(update.Sessions) != 1 || update.Sessions[0].Path != firstPath || update.Sessions[0].TotalCost().USD != 3 {
+		t.Fatalf("mirror refresh = %#v, want one lexical winner with full cost", update.Sessions)
+	}
+	if discovers, firstParses := adapter.counts(firstPath); discovers != 1 || firstParses != 1 {
+		t.Fatalf("mirror refresh calls = %d discoveries, %d winner parses; want 1 and 1", discovers, firstParses)
+	}
+	if _, secondParses := adapter.counts(secondPath); secondParses != 2 {
+		t.Fatalf("changed mirror parses = %d, want initial plus refresh", secondParses)
+	}
+}
+
+func TestFollowerReconcilesClaudeMirrorAfterDivergenceCycle(t *testing.T) {
+	firstRoot := filepath.Join(t.TempDir(), "a-home")
+	secondRoot := filepath.Join(t.TempDir(), "z-home")
+	for _, root := range []string{firstRoot, secondRoot} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstPath := filepath.Join(firstRoot, "session.jsonl")
+	secondPath := filepath.Join(secondRoot, "session.jsonl")
+	initialContents := []byte("identical claude transcript\n")
+	for _, path := range []string{firstPath, secondPath} {
+		if err := os.WriteFile(path, initialContents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	newLine := []byte("new mirrored event\n")
+	adapter := &mirroredFollowSource{
+		agent: model.AgentClaude,
+		roots: []string{firstRoot, secondRoot},
+		sessions: map[string]*model.Session{
+			firstPath:  {ID: "session-mirror", Agent: model.AgentClaude, Path: firstPath, SourceSize: int64(len(initialContents)), Cost: model.Cost{USD: 3}},
+			secondPath: {ID: "session-mirror", Agent: model.AgentClaude, Path: secondPath, SourceSize: int64(len(initialContents)), Cost: model.Cost{USD: 3}},
+		},
+		parses: make(map[string]int),
+	}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1})
+	initial, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(initial) != 1 || initial[0].Path != firstPath || initial[0].TotalCost().USD != 3 {
+		t.Fatalf("initial sessions = %#v, want one lexical winner costing $3", initial)
+	}
+	follower, err := registry.Follow(context.Background(), WatchOptions{Debounce: time.Hour, RescanInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = follower.Close() }()
+	visible := map[string]*model.Session{initial[0].Path: initial[0]}
+
+	appendFollowBytes(t, secondPath, newLine)
+	adapter.set(&model.Session{
+		ID: "session-mirror", Agent: model.AgentClaude, Path: secondPath,
+		SourceSize: int64(len(initialContents) + len(newLine)), Cost: model.Cost{USD: 5},
+	})
+	follower.watcher.events <- Change{Paths: []string{secondPath}}
+	diverged := nextFollowerUpdate(t, follower)
+	applyFollowUpdate(visible, diverged)
+	if len(visible) != 2 || visible[secondPath] == nil || followCost(visible) != 8 {
+		t.Fatalf("diverged visible sessions = %#v costing $%v, want both paths costing $8", visible, followCost(visible))
+	}
+
+	appendFollowBytes(t, firstPath, newLine)
+	adapter.set(&model.Session{
+		ID: "session-mirror", Agent: model.AgentClaude, Path: firstPath,
+		SourceSize: int64(len(initialContents) + len(newLine)), Cost: model.Cost{USD: 5},
+	})
+	follower.watcher.events <- Change{Paths: []string{firstPath}}
+	reconciled := nextFollowerUpdate(t, follower)
+	firstBytes, err := os.ReadFile(firstPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondBytes, err := os.ReadFile(secondPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(firstBytes) != string(secondBytes) {
+		t.Fatalf("reconciled files differ: %q != %q", firstBytes, secondBytes)
+	}
+	applyFollowUpdate(visible, reconciled)
+	if !reflect.DeepEqual(reconciled.RemovedPaths, []string{secondPath}) {
+		t.Fatalf("reconciled removed paths = %v, want collapsed loser %v", reconciled.RemovedPaths, []string{secondPath})
+	}
+	if len(visible) != 1 || visible[firstPath] == nil || followCost(visible) != 5 {
+		t.Fatalf("reconciled visible sessions = %#v costing $%v, want one winner costing $5", visible, followCost(visible))
+	}
+
+	secondNewLine := []byte("another distinct event\n")
+	appendFollowBytes(t, secondPath, secondNewLine)
+	adapter.set(&model.Session{
+		ID: "session-mirror", Agent: model.AgentClaude, Path: secondPath,
+		SourceSize: int64(len(initialContents) + len(newLine) + len(secondNewLine)), Cost: model.Cost{USD: 7},
+	})
+	follower.watcher.events <- Change{Paths: []string{secondPath}}
+	rediverged := nextFollowerUpdate(t, follower)
+	applyFollowUpdate(visible, rediverged)
+	if len(visible) != 2 || visible[secondPath] == nil || followCost(visible) != 12 {
+		t.Fatalf("re-diverged visible sessions = %#v costing $%v, want collapsed path restored and total $12", visible, followCost(visible))
+	}
+}
+
+func TestFollowerPromotesSurvivingClaudeMirrorAfterWinnerRemoval(t *testing.T) {
+	firstRoot := filepath.Join(t.TempDir(), "a-home")
+	secondRoot := filepath.Join(t.TempDir(), "z-home")
+	for _, root := range []string{firstRoot, secondRoot} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstPath := filepath.Join(firstRoot, "session.jsonl")
+	secondPath := filepath.Join(secondRoot, "session.jsonl")
+	contents := []byte("identical claude transcript\n")
+	for _, path := range []string{firstPath, secondPath} {
+		if err := os.WriteFile(path, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adapter := &mirroredFollowSource{
+		agent: model.AgentClaude,
+		roots: []string{firstRoot, secondRoot},
+		sessions: map[string]*model.Session{
+			firstPath:  {ID: "session-mirror", Agent: model.AgentClaude, Path: firstPath, SourceSize: int64(len(contents)), Cost: model.Cost{USD: 3}},
+			secondPath: {ID: "session-mirror", Agent: model.AgentClaude, Path: secondPath, SourceSize: int64(len(contents)), Cost: model.Cost{USD: 3}},
+		},
+		parses: make(map[string]int),
+	}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1})
+	initialDiscoveryDone := make(chan struct{})
+	follower, err := registry.Follow(context.Background(), WatchOptions{
+		Debounce: time.Hour, RescanInterval: time.Hour, InitialDiscoveryDone: initialDiscoveryDone,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = follower.Close() }()
+	if _, err := registry.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	adapter.remove(firstPath)
+	if err := os.Remove(firstPath); err != nil {
+		t.Fatal(err)
+	}
+	follower.watcher.events <- Change{RemovedPaths: []string{firstPath}}
+	close(initialDiscoveryDone)
+	update := nextFollowerUpdate(t, follower)
+	if !reflect.DeepEqual(update.RemovedPaths, []string{firstPath}) {
+		t.Fatalf("removed paths = %v, want %v", update.RemovedPaths, []string{firstPath})
+	}
+	if len(update.Sessions) != 1 || update.Sessions[0].Path != secondPath || update.Sessions[0].TotalCost().USD != 3 {
+		t.Fatalf("post-removal sessions = %#v, want promoted survivor with full cost", update.Sessions)
+	}
+	if discovers, survivorParses := adapter.counts(secondPath); discovers != 1 || survivorParses != 1 {
+		t.Fatalf("promotion calls = %d discoveries, %d survivor parses; want 1 and 1", discovers, survivorParses)
+	}
+}
+
+func TestFollowerPromotesMirroredCodexSidecarGraphAfterWinnerRemoval(t *testing.T) {
+	firstRoot := filepath.Join(t.TempDir(), "a-home")
+	secondRoot := filepath.Join(t.TempDir(), "z-home")
+	for _, root := range []string{firstRoot, secondRoot} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstParent := filepath.Join(firstRoot, "parent.jsonl")
+	firstChild := filepath.Join(firstRoot, "child.jsonl")
+	secondParent := filepath.Join(secondRoot, "parent.jsonl")
+	secondChild := filepath.Join(secondRoot, "child.jsonl")
+	parentContents := []byte("identical codex parent\n")
+	childContents := []byte("identical codex child\n")
+	for _, item := range []struct {
+		path     string
+		contents []byte
+	}{
+		{firstParent, parentContents}, {secondParent, parentContents},
+		{firstChild, childContents}, {secondChild, childContents},
+	} {
+		if err := os.WriteFile(item.path, item.contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	parent := func(path string) *model.Session {
+		return &model.Session{ID: "parent", Agent: model.AgentCodex, Path: path, SourceSize: int64(len(parentContents)), Cost: model.Cost{USD: 4}}
+	}
+	child := func(path string) *model.Session {
+		return &model.Session{ID: "child", ParentID: "parent", Agent: model.AgentCodex, Path: path, SourceSize: int64(len(childContents)), Cost: model.Cost{USD: 2}}
+	}
+	adapter := &mirroredFollowSource{
+		agent: model.AgentCodex,
+		roots: []string{firstRoot, secondRoot},
+		sessions: map[string]*model.Session{
+			firstParent: parent(firstParent), firstChild: child(firstChild),
+			secondParent: parent(secondParent), secondChild: child(secondChild),
+		},
+		parses: make(map[string]int),
+	}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1})
+	initialDiscoveryDone := make(chan struct{})
+	follower, err := registry.Follow(context.Background(), WatchOptions{
+		Debounce: time.Hour, RescanInterval: time.Hour, InitialDiscoveryDone: initialDiscoveryDone,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = follower.Close() }()
+	initial, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(initial) != 1 || initial[0].Path != firstParent || len(initial[0].Subagents) != 1 || initial[0].TotalCost().USD != 6 {
+		t.Fatalf("initial Codex graph = %#v, want one complete lexical winner", initial)
+	}
+	adapter.remove(firstParent, firstChild)
+	for _, path := range []string{firstParent, firstChild} {
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	follower.watcher.events <- Change{RemovedPaths: []string{firstChild, firstParent}}
+	close(initialDiscoveryDone)
+	update := nextFollowerUpdate(t, follower)
+	root := sessionWithID(update.Sessions, "parent")
+	if len(update.Sessions) != 1 || root == nil || root.Path != secondParent || len(root.Subagents) != 1 || root.Subagents[0].Path != secondChild || root.TotalCost().USD != 6 {
+		t.Fatalf("promoted Codex graph = %#v, want one complete surviving graph", update.Sessions)
+	}
+}
+
+func TestFollowerKeepsNonMirroredClaudeRefreshIncremental(t *testing.T) {
+	firstRoot := filepath.Join(t.TempDir(), "a-home")
+	secondRoot := filepath.Join(t.TempDir(), "z-home")
+	for _, root := range []string{firstRoot, secondRoot} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	changedPath := filepath.Join(firstRoot, "changed.jsonl")
+	unrelatedPath := filepath.Join(secondRoot, "unrelated.jsonl")
+	for _, path := range []string{changedPath, unrelatedPath} {
+		if err := os.WriteFile(path, []byte("unique transcript\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	adapter := &mirroredFollowSource{
+		agent: model.AgentClaude,
+		roots: []string{firstRoot, secondRoot},
+		sessions: map[string]*model.Session{
+			changedPath:   {ID: "changed", Agent: model.AgentClaude, Path: changedPath},
+			unrelatedPath: {ID: "unrelated", Agent: model.AgentClaude, Path: unrelatedPath},
+		},
+		parses: make(map[string]int),
+	}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1})
+	if _, err := registry.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	follower, err := registry.Follow(context.Background(), WatchOptions{Debounce: time.Hour, RescanInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = follower.Close() }()
+
+	follower.watcher.events <- Change{Paths: []string{changedPath}}
+	update := nextFollowerUpdate(t, follower)
+	if len(update.Sessions) != 1 || update.Sessions[0].Path != changedPath {
+		t.Fatalf("incremental update = %#v, want changed session only", update.Sessions)
+	}
+	if discovers, changedParses := adapter.counts(changedPath); discovers != 1 || changedParses != 2 {
+		t.Fatalf("incremental calls = %d discoveries, %d changed parses; want 1 and 2", discovers, changedParses)
+	}
+	if _, unrelatedParses := adapter.counts(unrelatedPath); unrelatedParses != 1 {
+		t.Fatalf("unrelated parses = %d, want initial parse only", unrelatedParses)
 	}
 }
 
@@ -720,17 +1103,39 @@ func TestFollowerInitialDiscoverySupersedesRefreshFailures(t *testing.T) {
 
 func appendFollowLog(t *testing.T, path string) {
 	t.Helper()
+	appendFollowBytes(t, path, []byte("{}\n"))
+}
+
+func appendFollowBytes(t *testing.T, path string, contents []byte) {
+	t.Helper()
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := file.WriteString("{}\n"); err != nil {
+	if _, err := file.Write(contents); err != nil {
 		_ = file.Close()
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func applyFollowUpdate(sessions map[string]*model.Session, update SessionUpdate) {
+	for _, path := range update.RemovedPaths {
+		delete(sessions, path)
+	}
+	for _, session := range update.Sessions {
+		sessions[session.Path] = session
+	}
+}
+
+func followCost(sessions map[string]*model.Session) float64 {
+	var usd float64
+	for _, session := range sessions {
+		usd += session.TotalCost().USD
+	}
+	return usd
 }
 
 func nextFollowerUpdate(t *testing.T, follower *Follower) SessionUpdate {

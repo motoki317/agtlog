@@ -43,12 +43,36 @@ the parsed tree. It retains the copy with the lexicographically smallest cleaned
 path. This rule applies to both agent types, and the Codex sidecar case requires
 the pre-link order.
 
+When startup discovery proves that copies are mirrored, retain their unlinked
+parser output by physical path and record the mirrored agent/session IDs and
+paths. A follow change or removal that touches those IDs or paths updates the
+retained entries and runs the same snapshot builder before emitting a
+`SessionUpdate`. Deleting the lexical winner therefore emits its path in
+`RemovedPaths` and the next surviving copy in `Sessions`. If copies later fail
+parsed-state or digest equality, emit the non-equivalent copies separately;
+suppressing one would discard data.
+
+Treat each rebuilt snapshot as authoritative for its top-level `Session.Path`
+values. Retain the paths returned by initial discovery and each rebuild. On the
+next rebuild, add any previously returned path that is now absent to
+`RemovedPaths`, even when its file still exists. The rebuilt `Sessions` set
+supplies upserts for paths that reappear after the copies diverge. This makes
+deletion, promotion, divergence, and re-convergence reversible for front ends
+that retain rows by physical path.
+
+The watcher is installed before startup discovery to avoid an observation gap.
+The follower's first `SessionUpdate` waits for that discovery to finish, so an
+event cannot reach the TUI before discovery has registered mirrored copies. The
+follower reuses the one startup discovery; it does not start another walk or
+parse pass.
+
 An ID, file size, or parsed summary cannot prove equality. A digest mismatch or
-read error retains both copies. Graph linking preserves ambiguous child
-identities, and the machine CLI rejects duplicate canonical refs. A field added
-to `Session` also participates in `reflect.DeepEqual`, so a difference retains
-both copies. Discovery returns one logical copy to every caller, so the machine
-CLI performs no additional mirror reconciliation.
+read error retains both copies. Graph linking leaves unproven duplicates
+separate, and the machine CLI rejects the command when duplicate canonical refs
+remain. A field added to `Session` participates in `reflect.DeepEqual` after
+physical-path references and recalculated ownership fields are cleared, so a
+difference retains both copies. Discovery returns one logical copy to every
+caller, so the machine CLI performs no additional mirror reconciliation.
 
 `AttributeOwnership` remains for partial mirrors. Their files differ, but their
 billed ledger entries can overlap. Codex `RequestUsage` entries lack a
@@ -75,8 +99,11 @@ explicit price refresh.
 
 Source hashing runs only after an agent-and-session-ID collision passes the file
 size and parsed-state checks. Digests are memoized by source path for one
-snapshot. A setup without identity collisions pays no hashing cost. The machine
-CLI and TUI consume the same reconciled snapshot.
+snapshot. A setup without proven mirrors retains no physical-session follow
+index and does not rebuild snapshots for Claude changes: it keeps the existing
+affected-file refresh, with no rediscovery or unrelated parsing. Codex keeps its
+existing indexed snapshot path because separate rollout files can change graph
+links.
 
 # Alternatives
 

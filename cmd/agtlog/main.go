@@ -200,10 +200,13 @@ func executeTUI(ctx context.Context, options cliOptions, input io.Reader, output
 
 func discoverAndFollow(ctx context.Context, registry, discoveryRegistry *source.Registry, watch bool, updates chan<- source.SessionUpdate) error {
 	defer close(updates)
-	startDiscovery := func() <-chan discoveryResult {
+	startDiscovery := func(done chan struct{}) <-chan discoveryResult {
 		results := make(chan discoveryResult, 1)
 		go func() {
 			sessions, discoverErr := discoveryRegistry.Discover(ctx)
+			if done != nil {
+				close(done)
+			}
 			results <- discoveryResult{sessions: sessions, err: discoverErr}
 		}()
 		return results
@@ -212,7 +215,7 @@ func discoverAndFollow(ctx context.Context, registry, discoveryRegistry *source.
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case result := <-startDiscovery():
+		case result := <-startDiscovery(nil):
 			if !sendSessionUpdate(ctx, updates, source.SessionUpdate{Sessions: result.sessions, DiscoveryComplete: true, DiscoveryErr: result.err}) {
 				return ctx.Err()
 			}
@@ -220,13 +223,14 @@ func discoverAndFollow(ctx context.Context, registry, discoveryRegistry *source.
 		}
 	}
 
-	follower, err := registry.Follow(ctx, source.WatchOptions{})
+	initialDiscoveryDone := make(chan struct{})
+	follower, err := registry.Follow(ctx, source.WatchOptions{InitialDiscoveryDone: initialDiscoveryDone})
 	if err != nil {
 		_ = sendSessionUpdate(ctx, updates, source.SessionUpdate{DiscoveryComplete: true, DiscoveryErr: err})
 		return err
 	}
 	closeFollower := func() { _ = follower.Close() }
-	results := startDiscovery()
+	results := startDiscovery(initialDiscoveryDone)
 
 	followerUpdates := follower.Updates()
 	for {

@@ -19,6 +19,8 @@ import (
 type WatchOptions struct {
 	Debounce       time.Duration
 	RescanInterval time.Duration
+	// InitialDiscoveryDone prevents startup changes from outrunning mirror state built by the concurrent discovery.
+	InitialDiscoveryDone <-chan struct{}
 }
 
 type Change struct {
@@ -132,6 +134,12 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 		defer follower.group.Done()
 		defer close(follower.updates)
 		var sessionIndex followSessionIndex
+		var mirrorSnapshot *mirrorFollowSnapshot
+		var mirrorCandidates mirrorCandidates
+		var visibleSnapshotPaths map[string]bool
+		mirrorState := r.followMirrors
+		codexIndexed := false
+		initialDiscoveryDone := options.InitialDiscoveryDone
 		checkpoints := make(followCheckpointIndex)
 		retryPaths := make(map[string]bool)
 		for {
@@ -144,16 +152,42 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 				if !ok {
 					return
 				}
+				if initialDiscoveryDone != nil {
+					select {
+					case <-initialDiscoveryDone:
+						initialDiscoveryDone = nil
+					case <-followCtx.Done():
+						return
+					case <-follower.done:
+						return
+					}
+				}
 				changed := append([]string(nil), change.Paths...)
 				changed = append(changed, r.removedParentPaths(followCtx, change.RemovedPaths)...)
 				changed = append(changed, sortedPathSet(retryPaths)...)
 				checkpoints.drop(change.RemovedPaths)
 				sessions, refreshFailures := r.refresh(followCtx, changed, checkpoints)
 				updateRetryPaths(retryPaths, sessions, refreshFailures, change.RemovedPaths)
-				needsSnapshot := r.pathsUseAgent(change.RemovedPaths, model.AgentCodex)
-				for _, session := range sessions {
-					needsSnapshot = needsSnapshot || session.Agent == model.AgentCodex
+				if mirrorState != nil {
+					current := mirrorState.current.Load()
+					if current != nil && current != mirrorSnapshot {
+						mirrorSnapshot = current
+						mirrorCandidates = current.candidates
+						visibleSnapshotPaths = current.visiblePaths
+						if mirrored := current.cloneSessions(); mirrored != nil {
+							sessionIndex = mirrored
+						} else if !codexIndexed {
+							sessionIndex = nil
+							mirrorState = nil
+						}
+					}
 				}
+				needsCodexSnapshot := r.pathsUseAgent(change.RemovedPaths, model.AgentCodex)
+				for _, session := range sessions {
+					needsCodexSnapshot = needsCodexSnapshot || session.Agent == model.AgentCodex
+				}
+				needsMirrorSnapshot := mirrorCandidates.affects(sessions, change.RemovedPaths)
+				needsSnapshot := needsCodexSnapshot || needsMirrorSnapshot
 				initialized := false
 				if sessionIndex == nil && needsSnapshot {
 					allSessions, _, discoveryFailures, discoverErr := r.discoverSessionsWithDiagnostics(followCtx)
@@ -163,19 +197,30 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 						initialized = true
 					}
 				}
+				codexIndexed = codexIndexed || needsCodexSnapshot
+				reconciledSnapshot := false
 				if sessionIndex != nil {
 					if !initialized {
 						sessionIndex.apply(sessions, change.RemovedPaths)
 					}
-					var snapshotErr error
-					sessions, snapshotErr = sessionIndex.snapshot(followCtx)
-					if snapshotErr != nil {
-						sessions = nil
+					if codexIndexed || needsMirrorSnapshot {
+						var snapshotErr error
+						sessions, snapshotErr = sessionIndex.snapshot(followCtx)
+						if snapshotErr != nil {
+							sessions = nil
+						} else {
+							reconciledSnapshot = true
+						}
 					}
 				} else if needsSnapshot {
 					sessions = nil
 				}
 				removed := r.topLevelRemoved(followCtx, change.RemovedPaths)
+				if reconciledSnapshot {
+					currentPaths := sessionPathSet(sessions)
+					removed = mergePathRemovals(removed, droppedSessionPaths(visibleSnapshotPaths, currentPaths))
+					visibleSnapshotPaths = currentPaths
+				}
 				if len(sessions) == 0 && len(removed) == 0 {
 					continue
 				}
@@ -207,6 +252,37 @@ func pathSet(paths []string) map[string]bool {
 		set[path] = true
 	}
 	return set
+}
+
+func sessionPathSet(sessions []*model.Session) map[string]bool {
+	paths := make(map[string]bool, len(sessions))
+	for _, session := range sessions {
+		if session != nil {
+			paths[session.Path] = true
+		}
+	}
+	return paths
+}
+
+func droppedSessionPaths(previous, current map[string]bool) []string {
+	dropped := make([]string, 0)
+	for path := range previous {
+		if !current[path] {
+			dropped = append(dropped, path)
+		}
+	}
+	sort.Strings(dropped)
+	return dropped
+}
+
+func mergePathRemovals(groups ...[]string) []string {
+	paths := make(map[string]bool)
+	for _, group := range groups {
+		for _, path := range group {
+			paths[path] = true
+		}
+	}
+	return sortedPathSet(paths)
 }
 
 func sortedPathSet(paths map[string]bool) []string {

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 
 	"github.com/motoki317/agtlog/internal/model"
 )
@@ -22,17 +23,33 @@ type sourceDigest struct {
 	ok  bool
 }
 
-// collapseMirroredSessionsContext runs before graph linking because duplicate sidecar identities make child lookup
-// ambiguous. IDs and file sizes cannot prove equality, so full-source digests prevent a distinct transcript from being
-// discarded. If a future Session field differs, reflect.DeepEqual fails closed by retaining both copies for the existing
-// ambiguity handling.
-func collapseMirroredSessionsContext(ctx context.Context, sessions []*model.Session) ([]*model.Session, error) {
+type mirrorCandidates struct {
+	identities map[mirrorIdentity]bool
+	paths      map[string]bool
+}
+
+type mirrorFollowSnapshot struct {
+	sessions     followSessionIndex
+	visiblePaths map[string]bool
+	candidates   mirrorCandidates
+}
+
+type mirrorFollowState struct {
+	current atomic.Pointer[mirrorFollowSnapshot]
+}
+
+// Mirror collapse runs before graph linking because duplicate sidecar identities make child lookup ambiguous. IDs and
+// file sizes cannot prove equality, so full-source digests prevent a distinct transcript from being discarded. If a
+// future Session field differs, reflect.DeepEqual fails closed by retaining both copies for the existing ambiguity
+// handling.
+func collapseMirroredSessionsWithCandidatesContext(ctx context.Context, sessions []*model.Session) ([]*model.Session, mirrorCandidates, error) {
 	collapsed := make([]*model.Session, 0, len(sessions))
 	byIdentity := make(map[mirrorIdentity][]int)
 	digests := make(map[string]sourceDigest)
+	mirroredIdentities := make(map[mirrorIdentity]bool)
 	for _, session := range sessions {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, mirrorCandidates{}, err
 		}
 		if session == nil || session.ID == "" {
 			collapsed = append(collapsed, session)
@@ -43,7 +60,7 @@ func collapseMirroredSessionsContext(ctx context.Context, sessions []*model.Sess
 		for _, index := range byIdentity[identity] {
 			equal, err := mirroredSessionsEqualContext(ctx, collapsed[index], session, digests)
 			if err != nil {
-				return nil, err
+				return nil, mirrorCandidates{}, err
 			}
 			if !equal {
 				continue
@@ -51,6 +68,7 @@ func collapseMirroredSessionsContext(ctx context.Context, sessions []*model.Sess
 			if filepath.Clean(session.Path) < filepath.Clean(collapsed[index].Path) {
 				collapsed[index] = session
 			}
+			mirroredIdentities[identity] = true
 			matched = true
 			break
 		}
@@ -60,7 +78,69 @@ func collapseMirroredSessionsContext(ctx context.Context, sessions []*model.Sess
 		byIdentity[identity] = append(byIdentity[identity], len(collapsed))
 		collapsed = append(collapsed, session)
 	}
-	return collapsed, nil
+	candidates := mirrorCandidates{identities: mirroredIdentities}
+	if len(mirroredIdentities) > 0 {
+		candidates.paths = make(map[string]bool)
+		for _, session := range sessions {
+			if session == nil || !mirroredIdentities[mirrorIdentity{agent: session.Agent, id: session.ID}] {
+				continue
+			}
+			collectMirrorSourcePaths(session, candidates.paths)
+		}
+	}
+	return collapsed, candidates, nil
+}
+
+func collectMirrorSourcePaths(session *model.Session, paths map[string]bool) {
+	if session == nil {
+		return
+	}
+	path := session.Path
+	if separator := strings.IndexByte(path, '#'); separator >= 0 {
+		path = path[:separator]
+	}
+	if path != "" {
+		paths[filepath.Clean(path)] = true
+	}
+	for _, child := range session.Subagents {
+		collectMirrorSourcePaths(child, paths)
+	}
+}
+
+func (candidates mirrorCandidates) affects(sessions []*model.Session, removedPaths []string) bool {
+	for _, path := range removedPaths {
+		if candidates.paths[filepath.Clean(path)] {
+			return true
+		}
+	}
+	for _, session := range sessions {
+		if session != nil && candidates.identities[mirrorIdentity{agent: session.Agent, id: session.ID}] {
+			return true
+		}
+	}
+	return false
+}
+
+func (state *mirrorFollowState) publish(parsedSessions, visibleSessions []*model.Session, candidates mirrorCandidates) {
+	snapshot := &mirrorFollowSnapshot{
+		visiblePaths: sessionPathSet(visibleSessions),
+		candidates:   candidates,
+	}
+	if len(candidates.identities) > 0 {
+		snapshot.sessions = indexFollowSessions(parsedSessions)
+	}
+	state.current.Store(snapshot)
+}
+
+func (snapshot *mirrorFollowSnapshot) cloneSessions() followSessionIndex {
+	if snapshot == nil || snapshot.sessions == nil {
+		return nil
+	}
+	cloned := make(followSessionIndex, len(snapshot.sessions))
+	for path, session := range snapshot.sessions {
+		cloned[path] = session
+	}
+	return cloned
 }
 
 func mirroredSessionsEqualContext(ctx context.Context, left, right *model.Session, digests map[string]sourceDigest) (bool, error) {
