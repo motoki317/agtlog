@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -2306,24 +2305,6 @@ func TestTurnSummaryOmitsTokensWithoutUsage(t *testing.T) {
 	}
 }
 
-func TestNextRequestContextSkipsAggregateUsage(t *testing.T) {
-	usage := model.Usage{InputTokens: 30}
-	var aggregate model.Event
-	if err := json.Unmarshal([]byte(`{"Kind":"usage","UsageAggregate":true}`), &aggregate); err != nil {
-		t.Fatal(err)
-	}
-	aggregate.Usage = &usage
-	events := []model.Event{
-		{Kind: model.EventUser, Text: "Chart the route"},
-		{Kind: model.EventAssistantText, Text: "Route ready"},
-		aggregate,
-	}
-
-	if got := nextRequestContext(events, 0); got != 0 {
-		t.Fatalf("nextRequestContext() = %d, want no context from session aggregate", got)
-	}
-}
-
 func TestSystemAndCompactRowsUseTheSystemPromptTint(t *testing.T) {
 	profile := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
@@ -2365,15 +2346,6 @@ func TestUsageRowShowsStandardMetricsWithSystemPromptRole(t *testing.T) {
 		!strings.Contains(lines[0].metrics, "ctx 120") ||
 		!strings.Contains(lines[0].metrics, "~$0.01") {
 		t.Fatalf("usage row = %#v, want system row with request metrics", lines)
-	}
-}
-
-func TestAggregateUsageRowOmitsRequestContext(t *testing.T) {
-	usage := model.Usage{InputTokens: 30}
-	event := model.Event{Kind: model.EventUsage, Usage: &usage, UsageAggregate: true}
-
-	if metrics := metricsText(eventMetricParts(event)); strings.Contains(metrics, "ctx ") {
-		t.Fatalf("aggregate usage metrics = %q, want no per-request context", metrics)
 	}
 }
 
@@ -5436,21 +5408,6 @@ func TestItemRequestSectionShowsUnavailablePriceAndRequiresUsage(t *testing.T) {
 	}
 }
 
-func TestAggregateUsageItemExplainsScopeAndOmitsContext(t *testing.T) {
-	usage := model.Usage{Model: "model-a", InputTokens: 30}
-	item := newItemView(model.Event{
-		Kind: model.EventUsage, Model: "model-a", Usage: &usage, UsageAggregate: true,
-	}, model.AgentCodex, nil, 80, 14, newStyles())
-
-	text := itemLinesText(item.lines)
-	if !strings.Contains(text, "scope  session-level fallback usage, not one request") {
-		t.Fatalf("aggregate usage did not explain its scope:\n%s", text)
-	}
-	if strings.Contains(text, "ctx ") {
-		t.Fatalf("aggregate usage rendered per-request context:\n%s", text)
-	}
-}
-
 func TestItemRequestNamesSubstitutionOnlyWhenApplied(t *testing.T) {
 	usage := model.Usage{Model: "agents-a1", InputTokens: 10}
 	breakdown := model.CostBreakdown{Input: model.CostBuckets{{RatePerToken: 0.000005, Tokens: 10}}}
@@ -5605,12 +5562,12 @@ func TestItemViewShowsBothTimesAndLoadsRawRecordAsynchronously(t *testing.T) {
 
 func TestItemWithoutReadableRecordOmitsRawSection(t *testing.T) {
 	for name, ref := range map[string]model.RecordRef{
-		"aggregate":        {},
-		"unmatched offset": {Path: "/fictional/session.jsonl", Offset: 42},
+		"missing reference": {},
+		"unmatched offset":  {Path: "/fictional/session.jsonl", Offset: 42},
 	} {
 		t.Run(name, func(t *testing.T) {
 			item := newItemView(model.Event{
-				Kind: model.EventUsage, Text: "session usage", RecordRef: ref,
+				Kind: model.EventUsage, Text: "unattributed usage", RecordRef: ref,
 			}, model.AgentCodex, nil, 80, 12, newStyles())
 
 			if content := itemLinesText(item.lines); strings.Contains(content, "\nRaw\n") {

@@ -245,9 +245,6 @@ type Event struct {
 	// produces so a turn can sum FlowTokens and read the last PromptTokens without
 	// double counting. Nil for events without their own request.
 	Usage *Usage
-	// UsageAggregate marks session-level fallback usage that must not be borrowed
-	// as the context of a preceding user request.
-	UsageAggregate bool
 	// Cost is the priced breakdown of that same request, kept beside Usage so the
 	// timeline can split input-side from output-side cost. Empty when Priced is
 	// false. CostEstimated marks a substituted rate; PricingModel names the

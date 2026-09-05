@@ -224,7 +224,6 @@ An event can also contain these fields:
 | `harness` | optional boolean | Present as `true` on a harness-injected user turn. |
 | `subagent_ref` | optional string | Canonical ref for an event-linked child. |
 | `compact` | optional object | Compaction metadata defined below. |
-| `usage_aggregate` | optional boolean | Present as `true` on session-level fallback usage. |
 
 The nested event objects have these required fields when present:
 

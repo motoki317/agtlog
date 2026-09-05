@@ -341,14 +341,6 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				RecordRef: model.RecordRef{Path: path, Offset: request.Offset},
 				Model:     request.Usage.Model,
 			}, request.Usage)
-		} else {
-			p.appendCodexUsageEvent(session, model.Event{
-				Timestamp:      session.UpdatedAt,
-				Kind:           model.EventUsage,
-				Text:           "session usage",
-				Model:          request.Usage.Model,
-				UsageAggregate: true,
-			}, request.Usage)
 		}
 	}
 	if recursive {

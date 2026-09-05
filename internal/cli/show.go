@@ -273,14 +273,13 @@ func eventDTO(index int, event model.Event, nodes []graphNode, maxText int) Even
 	kind, _ := wireEventKind(event.Kind)
 	projection := projectEventText(event)
 	result := Event{
-		Index:          index,
-		Timestamp:      timestamp(event.Timestamp),
-		Kind:           kind,
-		Text:           projection.text,
-		Model:          event.Model,
-		Truncated:      []string{},
-		Harness:        event.Harness,
-		UsageAggregate: event.UsageAggregate,
+		Index:     index,
+		Timestamp: timestamp(event.Timestamp),
+		Kind:      kind,
+		Text:      projection.text,
+		Model:     event.Model,
+		Truncated: []string{},
+		Harness:   event.Harness,
 	}
 	result.Text = boundedField(result.Text, maxText, fieldText, &result.Truncated)
 	if event.ToolName != "" || event.CallID != "" || event.Detail != nil || event.ResultSummary != "" {

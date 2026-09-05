@@ -1410,9 +1410,6 @@ func nextRequestContext(events []model.Event, userIndex int) int64 {
 		if event.Kind == model.EventUser {
 			return 0
 		}
-		if event.UsageAggregate {
-			continue
-		}
 		if event.Usage != nil {
 			return event.Usage.PromptTokens()
 		}
@@ -1450,10 +1447,8 @@ func eventMetricParts(event model.Event) []string {
 	if part, ok := costPart(event.Cost.Total(), event.Priced, event.CostEstimated); ok {
 		parts = append(parts, part)
 	}
-	if !event.UsageAggregate {
-		if part, ok := contextPart(usage.TotalTokens()); ok {
-			parts = append(parts, part)
-		}
+	if part, ok := contextPart(usage.TotalTokens()); ok {
+		parts = append(parts, part)
 	}
 	return parts
 }

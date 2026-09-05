@@ -149,20 +149,19 @@ type Compact struct {
 }
 
 type Event struct {
-	Index          int          `json:"index"`
-	Timestamp      string       `json:"timestamp"`
-	Kind           string       `json:"kind"`
-	Text           string       `json:"text"`
-	Model          string       `json:"model"`
-	Tool           *EventTool   `json:"tool,omitempty"`
-	Usage          *EventUsage  `json:"usage,omitempty"`
-	Cost           *EventCost   `json:"cost,omitempty"`
-	Truncated      []string     `json:"truncated"`
-	Record         *EventRecord `json:"record,omitempty"`
-	Harness        bool         `json:"harness,omitempty"`
-	SubagentRef    string       `json:"subagent_ref,omitempty"`
-	Compact        *Compact     `json:"compact,omitempty"`
-	UsageAggregate bool         `json:"usage_aggregate,omitempty"`
+	Index       int          `json:"index"`
+	Timestamp   string       `json:"timestamp"`
+	Kind        string       `json:"kind"`
+	Text        string       `json:"text"`
+	Model       string       `json:"model"`
+	Tool        *EventTool   `json:"tool,omitempty"`
+	Usage       *EventUsage  `json:"usage,omitempty"`
+	Cost        *EventCost   `json:"cost,omitempty"`
+	Truncated   []string     `json:"truncated"`
+	Record      *EventRecord `json:"record,omitempty"`
+	Harness     bool         `json:"harness,omitempty"`
+	SubagentRef string       `json:"subagent_ref,omitempty"`
+	Compact     *Compact     `json:"compact,omitempty"`
 }
 
 type ShowPage struct {

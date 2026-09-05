@@ -514,7 +514,7 @@ func TestLoadEventsRollsBackBridgePrefixWithoutDroppingUsage(t *testing.T) {
 	}
 }
 
-func TestLoadEventsRendersUncleanPartitionAsAggregateUsage(t *testing.T) {
+func TestLoadEventsLeavesUncleanPartitionUnpriced(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout-unclean-usage.jsonl")
 	content := strings.Join([]string{
 		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
@@ -533,10 +533,11 @@ func TestLoadEventsRendersUncleanPartitionAsAggregateUsage(t *testing.T) {
 	if err := testParser().LoadEvents(context.Background(), session); err != nil {
 		t.Fatalf("LoadEvents() error = %v", err)
 	}
-	if len(session.Events) != 3 || session.Events[0].Usage != nil || session.Events[1].Usage != nil ||
-		session.Events[2].Kind != model.EventUsage || session.Events[2].Usage == nil ||
-		session.Events[2].Usage.InputTokens != 30 || session.Events[2].Cost.Total() != session.Cost.USD {
-		t.Fatalf("LoadEvents().Events = %#v, want unpriced requests and one aggregate usage row", session.Events)
+	if len(session.Requests) != 1 || session.Requests[0].Offset != -1 || session.Requests[0].Usage.InputTokens != 30 {
+		t.Fatalf("Requests = %#v, want one aggregate ledger entry", session.Requests)
+	}
+	if len(session.Events) != 2 || session.Events[0].Usage != nil || session.Events[1].Usage != nil {
+		t.Fatalf("LoadEvents().Events = %#v, want unpriced requests without an aggregate row", session.Events)
 	}
 }
 
@@ -2939,6 +2940,51 @@ func TestParseCounterSegments(t *testing.T) {
 				if request.Usage.InputTokens != test.requests[i] || (request.Offset < 0) != aggregate {
 					t.Fatalf("request %d = %#v", i, request)
 				}
+			}
+		})
+	}
+}
+
+func TestLoadEventsAcrossCounterSegments(t *testing.T) {
+	for _, unclean := range []bool{false, true} {
+		t.Run(strconv.FormatBool(unclean), func(t *testing.T) {
+			tokens := func(n int64) *tokenUsage { return &tokenUsage{InputTokens: n, TotalTokens: n} }
+			last := tokens(10)
+			if unclean {
+				last = nil
+			}
+			session := parseTieredSession(t,
+				`{"timestamp":"2026-01-02T03:04:06Z","type":"event_msg","payload":{"type":"agent_message","message":"First route"}}`,
+				segmentTokenLine("04:07", tokens(100), tokens(100)),
+				`{"timestamp":"2026-01-02T03:04:08Z","type":"event_msg","payload":{"type":"agent_message","message":"Second route"}}`,
+				segmentTokenLine("04:09", tokens(20), tokens(20)),
+				`{"timestamp":"2026-01-02T03:04:10Z","type":"event_msg","payload":{"type":"agent_message","message":"Final route"}}`,
+				segmentTokenLine("04:11", tokens(30), last),
+			)
+			if err := tieredTestParser().LoadEvents(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			if len(session.Events) != 3 {
+				t.Fatalf("events = %#v, want only three physical replies", session.Events)
+			}
+			var rowUSD float64
+			for i, event := range session.Events {
+				if event.Kind != model.EventAssistantText {
+					t.Fatalf("event %d = %#v, want reply", i, event)
+				}
+				if wantPriced := i == 0 || !unclean; event.Priced != wantPriced || (event.Usage != nil) != wantPriced {
+					t.Fatalf("event %d = %#v, priced want %v", i, event, wantPriced)
+				}
+				rowUSD += event.Cost.Total()
+			}
+			var aggregateUSD float64
+			for _, request := range session.Requests {
+				if request.Offset < 0 {
+					aggregateUSD += request.USD
+				}
+			}
+			if math.Abs(rowUSD+aggregateUSD-session.Cost.USD) > 1e-12 {
+				t.Fatalf("row USD %g + aggregate USD %g != session USD %g", rowUSD, aggregateUSD, session.Cost.USD)
 			}
 		})
 	}
