@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -6453,5 +6454,48 @@ func TestCloneSessionRebindsSubagentEvents(t *testing.T) {
 	breakdown.Input[0].Tokens = 9
 	if parent.ModelCostBreakdowns["model-a"].Input[0].Tokens != 2 {
 		t.Fatal("cloned cost buckets retained original backing slice")
+	}
+}
+
+func TestSessionInfoUnattributedUsage(t *testing.T) {
+	session := &model.Session{Agent: model.AgentCodex, Cost: model.Cost{
+		Estimated:            true,
+		EstimatedRates:       []model.EstimatedRate{{Model: "gpt-5.6-sol", PricingModel: "gpt-5.6"}},
+		MissingPricingModels: []string{"gpt-5.3"},
+	}, Requests: []model.RequestUsage{
+		{Offset: 10, Usage: model.Usage{Model: "gpt-5.6-sol", InputTokens: 9000}, USD: 9},
+		{Offset: -1, Usage: model.Usage{Model: "gpt-5.6-sol", InputTokens: 100, CacheReadTokens: 40, OutputTokens: 20, InputIncludesCacheRead: true}, USD: 0.10},
+		{Offset: -1, Usage: model.Usage{Model: "gpt-5.4", InputTokens: 300, OutputTokens: 50, InputIncludesCacheRead: true}, USD: 0.30},
+		{Offset: -1, Usage: model.Usage{Model: "gpt-5.6-sol", InputTokens: 200, CacheReadTokens: 60, OutputTokens: 30, InputIncludesCacheRead: true}, USD: 0.20},
+		{Offset: -1, Usage: model.Usage{Model: "gpt-5.3", InputTokens: 500, InputIncludesCacheRead: true}},
+	}}
+	// Each model carries its own pricing outcome: substituted rate, exact rate, missing pricing.
+	want := []string{
+		"unattributed: gpt-5.6-sol · ↑100/0/200 ↓50 · ~$0.30",
+		"unattributed: gpt-5.4 · ↑0/0/300 ↓50 · $0.30",
+		"unattributed: gpt-5.3 · ↑0/0/500 ↓0 · ~$0.00!",
+	}
+	lines := sessionInfoLines(session)
+	var got []string
+	var explanation bool
+	for i, line := range lines {
+		if strings.HasPrefix(line.text, "unattributed:") {
+			got = append(got, line.text)
+			if line.role != detailRow || i < 3 || !strings.HasPrefix(lines[2].text, "tokens:") {
+				t.Fatalf("unattributed line outside Cost tokens section: %#v", lines)
+			}
+		}
+		if strings.Contains(line.text, "did not reconcile") {
+			explanation = line.role == detailSecondary && strings.Contains(line.text, "turn rows carry no cost")
+		}
+	}
+	if !reflect.DeepEqual(got, want) || !explanation {
+		t.Fatalf("unattributed = %q, want %q; explanation = %v", got, want, explanation)
+	}
+	session.Requests = session.Requests[:1]
+	for _, line := range sessionInfoLines(session) {
+		if strings.Contains(line.text, "unattributed") || strings.Contains(line.text, "did not reconcile") {
+			t.Fatalf("clean session displays divergence: %q", line.text)
+		}
 	}
 }

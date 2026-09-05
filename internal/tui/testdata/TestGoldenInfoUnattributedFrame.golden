@@ -1,0 +1,38 @@
+╭─ Session · starship ─────────────────────────────────────────────────────────────────────────────────────────────────╮
+│Plan route                                                                                                            │
+│codex │ starship (/workspace/starship) │ gpt-5.6                                                                      │
+│Jan 02 05:44→Jan 02 06:04 │ total ~$0.84 │ own ~$0.84 │ subagents $0.00                                               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ Timeline  Subagents  [Info] ────────────────────────────────────────────────────────────────────────────────────────╮
+│  Cost                                                                                                                │
+│  total: ~$0.84                                                                                                       │
+│  tokens: ↑80k/0/40k ↓8000                                                                                            │
+│  unattributed: gpt-5.6 · ↑80k/0/40k ↓8000 · ~$0.84                                                                   │
+│  Codex's cumulative total did not reconcile with per-request usage for that span, so its turn rows carry no cost.    │
+│                                                                                                                      │
+│  Own model costs · ~$0.84                                                                                            │
+│  gpt-5.6 (est. · priced as gpt-5)                                                                                    │
+│    cache read    80k × $2.5/Mtok = ~$0.20                                                                            │
+│    input         40k × $10/Mtok  = ~$0.40                                                                            │
+│    output       8000 × $30/Mtok  = ~$0.24                                                                            │
+│    subtotal                      = ~$0.84                                                                            │
+│  Both agents use the same rate table. ~ means the applied rate is not the logged model's own published rate.         │
+│                                                                                                                      │
+│  Definitions                                                                                                         │
+│  own: this session's own turns                                                                                       │
+│  subagents: delegated child sessions; their totals include nested descendants                                        │
+│                                                                                                                      │
+│  Cost tree                                                                                                           │
+│  total = own + Σ subs · ↑80k/0/40k ↓8000 / ~$0.84                                                                    │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+j/k scroll   tab switch   w nowrap   T time   esc back   mouse wheel scroll   ? help   q quit

@@ -236,9 +236,8 @@ The nested event objects have these required fields when present:
 | `compact` | `trigger` string, `post_tokens` integer. |
 
 `usage.context` is the prompt size for the request. `usage.flow` is uncached input,
-cache writes, and output added by that request. Event usage is diagnostic and can
-include a session aggregate that could not be assigned to a request. Use session
-`tokens`, not a sum of events, for totals.
+cache writes, and output added by that request. Event usage is diagnostic. Use
+session `tokens`, not a sum of events, for totals.
 
 Use `--kind K[,K...]` to keep selected event kinds. `--offset` refers to the full
 timeline before kind filtering. `event.index` therefore stays stable across
@@ -288,7 +287,7 @@ for an event:
 `raw_json` is a string. agtlog does not decode and re-encode its key order or
 spacing. `--raw` requires JSON format; combining it with `--format text` is a usage
 error. The event-page response budget does not apply because truncation would
-violate byte exactness. An aggregate event without a physical source line returns
+violate byte exactness. An event without an available physical source line returns
 `record_unavailable`. A changed source line returns `record_changed`.
 
 ## `search`

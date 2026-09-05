@@ -638,10 +638,35 @@ func sessionInfoLines(session *model.Session) []detailLine {
 	if session.DuplicatedUSD > 0 {
 		tokenLabel = "gross tokens: "
 	}
-	lines = append(lines,
-		infoDetailLine(tokenLabel+formatTokenFlow(sessionFlowUsage(session)), detailRow),
-		infoDetailLine("", detailRow),
-	)
+	lines = append(lines, infoDetailLine(tokenLabel+formatTokenFlow(sessionFlowUsage(session)), detailRow))
+	var unattributedModels []string
+	unattributedUsage := make(map[string]model.Usage)
+	unattributedUSD := make(map[string]float64)
+	for _, request := range session.Requests {
+		if request.Offset >= 0 {
+			continue
+		}
+		name := request.Usage.Model
+		if _, exists := unattributedUsage[name]; !exists {
+			unattributedModels = append(unattributedModels, name)
+		}
+		unattributedUsage[name] = unattributedUsage[name].Add(request.Usage)
+		unattributedUSD[name] += request.USD
+	}
+	if len(unattributedModels) > 0 {
+		missing, estimatedRates := modelCostMarkers(session.Cost)
+		for _, name := range unattributedModels {
+			_, estimated := estimatedRates[name]
+			cost := model.Cost{USD: unattributedUSD[name], Estimated: estimated || missing[name]}
+			if missing[name] {
+				cost.MissingPricingModels = []string{name}
+			}
+			lines = append(lines, infoDetailLine(fmt.Sprintf("unattributed: %s · %s · %s",
+				displayModelName(name), formatTokenFlow(unattributedUsage[name]), formatCost(cost)), detailRow))
+		}
+		lines = append(lines, infoDetailLine("Codex's cumulative total did not reconcile with per-request usage for that span, so its turn rows carry no cost.", detailSecondary))
+	}
+	lines = append(lines, infoDetailLine("", detailRow))
 	ownCost := session.Cost
 	ownCost.USD -= session.DuplicatedUSD
 	modelHeading := "Own model costs · "
@@ -716,6 +741,20 @@ func infoDetailLine(text string, role detailRole) detailLine {
 	return detailLine{text: detailPlainText(text), role: role}
 }
 
+// modelCostMarkers indexes the session's pricing caveats by logged model so a
+// per-model line carries its own ~ and ! markers rather than the session-wide flag.
+func modelCostMarkers(cost model.Cost) (missing map[string]bool, estimatedRates map[string]string) {
+	missing = make(map[string]bool, len(cost.MissingPricingModels))
+	for _, name := range cost.MissingPricingModels {
+		missing[name] = true
+	}
+	estimatedRates = make(map[string]string, len(cost.EstimatedRates))
+	for _, rate := range cost.EstimatedRates {
+		estimatedRates[rate.Model] = rate.PricingModel
+	}
+	return missing, estimatedRates
+}
+
 func ownModelCostLines(session *model.Session) []string {
 	byModel := make(map[string]model.Usage)
 	seen := make(map[string]bool)
@@ -763,14 +802,7 @@ func ownModelCostLines(session *model.Session) []string {
 	if len(order) == 0 {
 		return []string{"No own model usage."}
 	}
-	missing := make(map[string]bool, len(session.Cost.MissingPricingModels))
-	for _, name := range session.Cost.MissingPricingModels {
-		missing[name] = true
-	}
-	estimatedRates := make(map[string]string, len(session.Cost.EstimatedRates))
-	for _, rate := range session.Cost.EstimatedRates {
-		estimatedRates[rate.Model] = rate.PricingModel
-	}
+	missing, estimatedRates := modelCostMarkers(session.Cost)
 	lines := make([]string, 0, len(order)*6)
 	for _, name := range order {
 		usage := byModel[name]
@@ -2543,10 +2575,7 @@ func detailModels(session *model.Session) string {
 	if len(session.Models) == 0 {
 		return ""
 	}
-	missing := make(map[string]bool, len(session.Cost.MissingPricingModels))
-	for _, name := range session.Cost.MissingPricingModels {
-		missing[name] = true
-	}
+	missing, _ := modelCostMarkers(session.Cost)
 	labels := make([]string, 0, len(session.Models))
 	for _, name := range session.Models {
 		label := shortModelName(name)

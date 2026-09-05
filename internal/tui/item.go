@@ -291,7 +291,6 @@ func itemMetadataLines(event model.Event, now time.Time, agent model.AgentKind) 
 			fields = append(fields, struct{ label, value string }{label: "post tokens", value: humanTokens(event.CompactPostTokens)})
 		}
 	}
-
 	labelWidth := 0
 	for _, field := range fields {
 		if field.value != "" {
