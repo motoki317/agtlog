@@ -54,8 +54,8 @@ func parseTieredSession(t *testing.T, events ...string) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); got != "codex-parser-v24" {
-		t.Fatalf("CacheFingerprint() = %q, want parse-only v24 fingerprint", got)
+	if got := testParser().CacheFingerprint(); got != "codex-parser-v25" {
+		t.Fatalf("CacheFingerprint() = %q, want segment-aware v25 fingerprint", got)
 	}
 }
 
@@ -514,7 +514,7 @@ func TestLoadEventsRollsBackBridgePrefixWithoutDroppingUsage(t *testing.T) {
 	}
 }
 
-func TestLoadEventsRendersUncleanPartitionAsAggregateUsage(t *testing.T) {
+func TestLoadEventsLeavesUncleanPartitionUnpriced(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout-unclean-usage.jsonl")
 	content := strings.Join([]string{
 		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
@@ -533,10 +533,11 @@ func TestLoadEventsRendersUncleanPartitionAsAggregateUsage(t *testing.T) {
 	if err := testParser().LoadEvents(context.Background(), session); err != nil {
 		t.Fatalf("LoadEvents() error = %v", err)
 	}
-	if len(session.Events) != 3 || session.Events[0].Usage != nil || session.Events[1].Usage != nil ||
-		session.Events[2].Kind != model.EventUsage || session.Events[2].Usage == nil ||
-		session.Events[2].Usage.InputTokens != 30 || session.Events[2].Cost.Total() != session.Cost.USD {
-		t.Fatalf("LoadEvents().Events = %#v, want unpriced requests and one aggregate usage row", session.Events)
+	if len(session.Requests) != 1 || session.Requests[0].Offset != -1 || session.Requests[0].Usage.InputTokens != 30 {
+		t.Fatalf("Requests = %#v, want one aggregate ledger entry", session.Requests)
+	}
+	if len(session.Events) != 2 || session.Events[0].Usage != nil || session.Events[1].Usage != nil {
+		t.Fatalf("LoadEvents().Events = %#v, want unpriced requests without an aggregate row", session.Events)
 	}
 }
 
@@ -757,6 +758,20 @@ func TestResumableParseMatchesFullParseAcrossAppendedChunks(t *testing.T) {
 			`{"timestamp":"2026-01-02T03:05:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":35},"last_token_usage":{"input_tokens":15}}}}`,
 		}, "\n") + "\n")},
 	)
+	for _, unclean := range []bool{false, true} {
+		last := &tokenUsage{InputTokens: 20, TotalTokens: 20}
+		if unclean {
+			last = nil
+		}
+		cases = append(cases, parityCase{name: "generated/segments-" + strconv.FormatBool(unclean), content: []byte(strings.Join([]string{
+			`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-resumed"}}`,
+			`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+			segmentTokenLine("04:01", &tokenUsage{InputTokens: 100, TotalTokens: 100}, &tokenUsage{InputTokens: 100, TotalTokens: 100}),
+			segmentTokenLine("04:02", &tokenUsage{InputTokens: 20, TotalTokens: 20}, &tokenUsage{InputTokens: 20, TotalTokens: 20}),
+			segmentTokenLine("04:03", &tokenUsage{InputTokens: 40, TotalTokens: 40}, last),
+			segmentTokenLine("04:04", &tokenUsage{InputTokens: 10, TotalTokens: 10}, &tokenUsage{InputTokens: 10, TotalTokens: 10}),
+		}, "\n") + "\n")})
+	}
 	sort.Slice(cases, func(i, j int) bool { return cases[i].name < cases[j].name })
 
 	for _, test := range cases {
@@ -2885,5 +2900,125 @@ func TestLoadEventsPreservesDistinctEncryptedMessages(t *testing.T) {
 		if !event.Timestamp.Equal(wantTimestamp) {
 			t.Errorf("encrypted event %d timestamp = %v, want preferred mirror timestamp %v", index, event.Timestamp, wantTimestamp)
 		}
+	}
+}
+
+func segmentTokenLine(second string, total, last *tokenUsage) string {
+	record := map[string]any{"timestamp": "2026-01-02T03:" + second + "Z", "type": "event_msg", "payload": map[string]any{"type": "token_count", "info": map[string]any{"total_token_usage": total, "last_token_usage": last}}}
+	line, _ := json.Marshal(record)
+	return string(line)
+}
+
+func TestParseCounterSegments(t *testing.T) {
+	tokens := func(n int64) *tokenUsage { return &tokenUsage{InputTokens: n, TotalTokens: n} }
+	for _, test := range []struct {
+		name      string
+		lines     []string
+		want      int64
+		requests  []int64
+		aggregate []bool
+	}{
+		{"two clean segments", []string{segmentTokenLine("04:01", tokens(100), tokens(100)), segmentTokenLine("04:02", tokens(150), tokens(50)), segmentTokenLine("04:03", tokens(20), tokens(20)), segmentTokenLine("04:04", tokens(50), tokens(30))}, 200, []int64{100, 50, 20, 30}, nil},
+		{"clean then unclean", []string{segmentTokenLine("04:01", tokens(100), tokens(100)), segmentTokenLine("04:02", tokens(20), tokens(20)), segmentTokenLine("04:03", tokens(50), nil)}, 150, []int64{100, 50}, []bool{false, true}},
+		{"rewind baseline", []string{segmentTokenLine("04:01", tokens(100), tokens(100)), segmentTokenLine("04:02", tokens(80), tokens(20)), segmentTokenLine("04:03", tokens(90), tokens(10))}, 130, []int64{100, 20, 10}, nil},
+		{"later duplicate", []string{segmentTokenLine("04:01", tokens(100), tokens(100)), segmentTokenLine("04:02", tokens(20), tokens(20)), segmentTokenLine("04:03", tokens(20), tokens(20)), segmentTokenLine("04:04", tokens(30), tokens(10))}, 130, []int64{100, 20, 10}, nil},
+		{"missing restart last", []string{segmentTokenLine("04:01", tokens(100), tokens(100)), segmentTokenLine("04:02", tokens(20), nil)}, 120, []int64{100, 20}, []bool{false, true}},
+		{"invalid restart last", []string{segmentTokenLine("04:01", tokens(100), tokens(100)), segmentTokenLine("04:02", tokens(20), tokens(-1))}, 120, []int64{100, 20}, []bool{false, true}},
+		{"invalid field subtraction", []string{segmentTokenLine("04:01", tokens(100), tokens(100)), segmentTokenLine("04:02", tokens(20), &tokenUsage{InputTokens: 10, CachedInputTokens: 1, TotalTokens: 10})}, 120, []int64{100, 20}, []bool{false, true}},
+		{"replay then reset", []string{`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-child","thread_source":"subagent"}}`, segmentTokenLine("04:01.100", tokens(100), tokens(100)), segmentTokenLine("04:01.200", tokens(80), tokens(20)), segmentTokenLine("04:02", tokens(110), tokens(30)), segmentTokenLine("04:03", tokens(20), tokens(20))}, 50, []int64{30, 20}, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := parseTieredSession(t, test.lines...)
+			if got := session.TotalUsage().TotalTokens(); got != test.want {
+				t.Fatalf("tokens = %d, want %d", got, test.want)
+			}
+			if len(session.Requests) != len(test.requests) {
+				t.Fatalf("requests = %#v", session.Requests)
+			}
+			for i, request := range session.Requests {
+				aggregate := len(test.aggregate) > 0 && test.aggregate[i]
+				if request.Usage.InputTokens != test.requests[i] || (request.Offset < 0) != aggregate {
+					t.Fatalf("request %d = %#v", i, request)
+				}
+			}
+		})
+	}
+}
+
+func TestLoadEventsAcrossCounterSegments(t *testing.T) {
+	for _, unclean := range []bool{false, true} {
+		t.Run(strconv.FormatBool(unclean), func(t *testing.T) {
+			tokens := func(n int64) *tokenUsage { return &tokenUsage{InputTokens: n, TotalTokens: n} }
+			last := tokens(10)
+			if unclean {
+				last = nil
+			}
+			session := parseTieredSession(t,
+				`{"timestamp":"2026-01-02T03:04:06Z","type":"event_msg","payload":{"type":"agent_message","message":"First route"}}`,
+				segmentTokenLine("04:07", tokens(100), tokens(100)),
+				`{"timestamp":"2026-01-02T03:04:08Z","type":"event_msg","payload":{"type":"agent_message","message":"Second route"}}`,
+				segmentTokenLine("04:09", tokens(20), tokens(20)),
+				`{"timestamp":"2026-01-02T03:04:10Z","type":"event_msg","payload":{"type":"agent_message","message":"Final route"}}`,
+				segmentTokenLine("04:11", tokens(30), last),
+			)
+			if err := tieredTestParser().LoadEvents(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			if len(session.Events) != 3 {
+				t.Fatalf("events = %#v, want only three physical replies", session.Events)
+			}
+			var rowUSD float64
+			for i, event := range session.Events {
+				if event.Kind != model.EventAssistantText {
+					t.Fatalf("event %d = %#v, want reply", i, event)
+				}
+				if wantPriced := i == 0 || !unclean; event.Priced != wantPriced || (event.Usage != nil) != wantPriced {
+					t.Fatalf("event %d = %#v, priced want %v", i, event, wantPriced)
+				}
+				rowUSD += event.Cost.Total()
+			}
+			var aggregateUSD float64
+			for _, request := range session.Requests {
+				if request.Offset < 0 {
+					aggregateUSD += request.USD
+				}
+			}
+			if math.Abs(rowUSD+aggregateUSD-session.Cost.USD) > 1e-12 {
+				t.Fatalf("row USD %g + aggregate USD %g != session USD %g", rowUSD, aggregateUSD, session.Cost.USD)
+			}
+		})
+	}
+}
+
+func TestParseCounterSegmentsPreservesModelAttribution(t *testing.T) {
+	usage := func(input, cache, output, reasoning int64) *tokenUsage {
+		return &tokenUsage{InputTokens: input, CachedInputTokens: cache, OutputTokens: output, ReasoningOutputTokens: reasoning, TotalTokens: input + output}
+	}
+	session := parseTieredSession(t,
+		segmentTokenLine("04:06", usage(100, 40, 20, 5), usage(100, 40, 20, 5)),
+		`{"timestamp":"2026-01-02T03:04:07Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		segmentTokenLine("04:08", usage(60, 30, 10, 4), usage(20, 10, 4, 2)),
+		segmentTokenLine("04:09", usage(80, 40, 14, 6), nil),
+		`{"timestamp":"2026-01-02T03:04:10Z","type":"turn_context","payload":{"model":"gpt-5.6"}}`,
+		segmentTokenLine("04:11", usage(10, 5, 2, 1), usage(10, 5, 2, 1)),
+	)
+	want := []model.Usage{
+		{Model: "gpt-5.6", InputTokens: 110, CacheReadTokens: 45, OutputTokens: 22, InputIncludesCacheRead: true},
+		{Model: "gpt-5.4", InputTokens: 40, CacheReadTokens: 20, OutputTokens: 8, InputIncludesCacheRead: true},
+	}
+	if !reflect.DeepEqual(session.Usage, want) {
+		t.Fatalf("usage = %#v, want %#v", session.Usage, want)
+	}
+	if len(session.Requests) != 3 {
+		t.Fatalf("requests = %#v, want clean, aggregate, clean", session.Requests)
+	}
+	for i, request := range session.Requests {
+		if (request.Offset < 0) != (i == 1) || request.Usage.Model != []string{"gpt-5.6", "gpt-5.4", "gpt-5.6"}[i] ||
+			request.Usage.InputTokens != []int64{100, 40, 10}[i] {
+			t.Fatalf("request %d = %#v", i, request)
+		}
+	}
+	if session.Requests[0].Offset >= session.Requests[2].Offset {
+		t.Fatalf("request offsets out of file order: %#v", session.Requests)
 	}
 }

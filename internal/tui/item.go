@@ -291,9 +291,6 @@ func itemMetadataLines(event model.Event, now time.Time, agent model.AgentKind) 
 			fields = append(fields, struct{ label, value string }{label: "post tokens", value: humanTokens(event.CompactPostTokens)})
 		}
 	}
-	if event.UsageAggregate {
-		fields = append(fields, struct{ label, value string }{label: "scope", value: "session-level fallback usage, not one request"})
-	}
 	labelWidth := 0
 	for _, field := range fields {
 		if field.value != "" {
@@ -318,7 +315,7 @@ func itemRequestLines(event model.Event, agent model.AgentKind) []detailLine {
 		return nil
 	}
 	tokenLine := "tokens  " + formatTokenFlow(*event.Usage)
-	if !event.UsageAggregate && event.Usage.TotalTokens() > 0 {
+	if event.Usage.TotalTokens() > 0 {
 		tokenLine += " · ctx " + humanTokens(event.Usage.TotalTokens())
 	}
 	lines := []detailLine{{text: detailPlainText(tokenLine), role: detailRow, agent: agent}}

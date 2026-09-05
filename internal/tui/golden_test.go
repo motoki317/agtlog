@@ -309,3 +309,27 @@ func normalizeGolden(view string) string {
 	}
 	return strings.Join(lines, "\n") + "\n"
 }
+
+func TestGoldenInfoUnattributedFrame(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	usage := model.Usage{Model: "gpt-5.6", InputTokens: 120_000, CacheReadTokens: 80_000, OutputTokens: 8_000, InputIncludesCacheRead: true}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentCodex, Path: "/workspace/starship/route.jsonl", CWD: "/workspace/starship", Project: "starship", Title: "Plan route",
+		Models: []string{"gpt-5.6"}, StartedAt: goldenNow.Add(-20 * time.Minute), UpdatedAt: goldenNow,
+		Usage: []model.Usage{usage}, Cost: model.Cost{USD: 0.84, Estimated: true, EstimatedRates: []model.EstimatedRate{{Model: "gpt-5.6", PricingModel: "gpt-5"}}}, ModelCosts: map[string]float64{"gpt-5.6": 0.84},
+		Requests:            []model.RequestUsage{{Offset: -1, Usage: usage, USD: 0.84}},
+		ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5.6": {CacheRead: testCostBuckets(80_000, 0.20), Input: testCostBuckets(40_000, 0.40), Output: testCostBuckets(8_000, 0.24)}},
+	}
+	m := newModelWithClock([]*model.Session{root}, nil, func() time.Time { return goldenNow })
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 38))
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	for range 2 {
+		tm.Send(tea.KeyMsg{Type: tea.KeyTab})
+	}
+	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "unattributed:") }, teatest.WithDuration(time.Second))
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second)).(Model)
+	teatest.RequireEqualOutput(t, []byte(normalizeGolden(final.View())))
+}

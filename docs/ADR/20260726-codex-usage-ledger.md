@@ -77,3 +77,11 @@ one full pass. Speculative processing preserves the one-pass bound.
 
 Changing the replay boundary in this work was rejected because it would move Info-tab totals
 without the parent-child oracle needed to establish the correct policy.
+
+# Notes
+
+[Counter-segment partitioning](./20260905-codex-counter-segments.md) revises
+whole-file reconciliation and aggregate timeline rows. Reconciliation now applies
+per cumulative-counter segment, and the Info tab displays aggregate amounts as
+`unattributed` usage. This record remains accepted: its ledger, snapshot bound,
+and request attribution rules still apply.

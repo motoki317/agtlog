@@ -30,8 +30,8 @@ The list fills the terminal with three stacked regions:
 
 The detail screen uses the same structure. A rounded `Session` panel contains three metadata
 lines, a rounded tab panel consumes the remaining height, and an unbordered detail key bar sits at
-the bottom. The tab panel leads with the active `Timeline` or `Subagents` name and shows the
-inactive name faint when space permits. The help view is a full-width rounded panel. Every view
+the bottom. The tab panel leads with the active `Timeline`, `Subagents`, or `Info` name and shows
+inactive names faint when space permits. The help view is a full-width rounded panel. Every view
 recomputes its panel, viewport, and column geometry after a terminal resize, including detail
 screens stored beneath a drilled child.
 The navigation stack stores session details and item views behind the same `detailScreen`
@@ -147,8 +147,7 @@ The header panel uses three lines:
 The timeline is one flat chronological list, expanded by default. A session is one continuous log,
 so every event — prompt, thinking summary, tool call, compaction, system note, unattributed usage,
 subagent spawn — is a sibling row. Request rows state their tokens, cost, and total context after
-their output. Usage fallback rows include the model; aggregate `session usage` rows omit context
-because they do not represent one request:
+their output. Usage fallback rows include the model:
 
 ```text
 ▸ you: Investigate the failing watcher                                    ctx 62k
@@ -165,8 +164,9 @@ triggered. Each billed request then reports its post-output total. These request
 fall without a compaction; a compaction row reports its logged post-compaction value.
 When a billed request has no eligible content row, a muted `unattributed usage` row carries its
 model, tokens, cost, and context. If cumulative usage cannot be partitioned safely into request
-deltas, ordinary request rows remain unpriced and one `session usage` row per model carries the
-authoritative aggregate.
+deltas for a counter segment, its request rows remain unpriced. The Info tab reports the
+authoritative aggregate as `unattributed` usage under Cost, with tokens and cost per model.
+A secondary line explains why that span has no turn costs. Clean segments retain their request metrics.
 
 Indentation is reserved for what a row contains. A prompt with more than one line, an assistant
 reply beyond the preview cap, and a tool call with a diff, output, or multiline input each carry
@@ -208,8 +208,7 @@ has a source record.
 Event presents metadata as aligned label and value columns. Request shows token flow, request
 context after output where one exists, and the same per-bucket rate terms used by Info before
 closing with a precise total. A substituted rate names both the published stand-in and the logged
-model before the arithmetic. Aggregate usage identifies itself as session-level fallback usage and
-carries no request context.
+model before the arithmetic.
 
 A tool item shows its full Input, Diff, Output, and Result summary sections, bounded only by the
 model's per-field limit rather than the timeline preview cap. Other content sections use Message,

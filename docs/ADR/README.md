@@ -41,3 +41,4 @@ trade-offs and alternatives that led to each choice.
 | 2026-08-22 | [Follow session index](./20260822-follow-session-index.md) | Rebuild live snapshots from copied, path-indexed parser output |
 | 2026-08-22 | [Codex summary checkpoints](./20260822-codex-summary-checkpoints.md) | Resume live Codex summaries after validated complete JSONL lines |
 | 2026-08-23 | [Extra agent home directories](./20260823-extra-agent-home-directories.md) | Add explicit homes without redirecting Claude Code or Codex writes |
+| 2026-09-05 | [Codex counter segments](./20260905-codex-counter-segments.md) | Reconcile cumulative-counter segments independently and show unattributed usage in Info |
