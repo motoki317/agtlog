@@ -27,7 +27,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v24"
+	return "codex-parser-v25"
 }
 
 type tokenUsage struct {
@@ -81,8 +81,9 @@ type summaryAccumulator struct {
 	usageByModel   map[string]*tokenUsage
 	usageOrder     []string
 	pricingRecords []tokenUsageRecord
+	closedRecords  []tokenUsageRecord
 	replaySecond   string
-	replayBaseline tokenUsage
+	baseline       tokenUsage
 	runningMax     tokenUsage
 	replayActive   bool
 	hasLast        bool
@@ -127,6 +128,7 @@ func (a *summaryAccumulator) clone() *summaryAccumulator {
 	}
 	cloned.usageOrder = append([]string(nil), a.usageOrder...)
 	cloned.pricingRecords = append([]tokenUsageRecord(nil), a.pricingRecords...)
+	cloned.closedRecords = append([]tokenUsageRecord(nil), a.closedRecords...)
 	cloned.seenModels = make(map[string]bool, len(a.seenModels))
 	for usageModel, seen := range a.seenModels {
 		cloned.seenModels[usageModel] = seen
@@ -226,6 +228,25 @@ func (a *summaryAccumulator) ingest(line []byte, offset int64) {
 	if record.Type == "event_msg" && !inReplayPrefix && record.Payload.Type == "item_completed" && record.Payload.Item.Type == "SubAgentActivity" && record.Payload.Item.Kind == "started" {
 		addSubagent(a.session, a.session.Path, record.Payload.Item.AgentPath, record.Payload.Item.AgentThreadID, a.session.UpdatedAt)
 	}
+	if validTotal && !inReplayPrefix && record.Payload.Info.Total.TotalTokens < a.runningMax.TotalTokens {
+		a.closedRecords = append(a.closedRecords, a.segmentRecords()...)
+		a.replayActive = false
+		a.lastTotal = nil
+		a.lastTotalModel = ""
+		a.summedLast = tokenUsage{}
+		a.usageByModel = make(map[string]*tokenUsage)
+		a.usageOrder = nil
+		a.pricingRecords = nil
+		a.runningMax = tokenUsage{}
+		a.hasLast = false
+		a.baseline = tokenUsage{}
+		if last := record.Payload.Info.Last; last != nil && validTokenUsage(last) {
+			baseline := *record.Payload.Info.Total
+			if subtractTokenUsage(&baseline, last) {
+				a.baseline = baseline
+			}
+		}
+	}
 	if validTotal {
 		copy := *record.Payload.Info.Total
 		a.lastTotal = &copy
@@ -234,8 +255,8 @@ func (a *summaryAccumulator) ingest(line []byte, offset int64) {
 	if isTokenCount && a.replayActive {
 		if inReplayPrefix {
 			if validTotal {
-				a.replayBaseline = *record.Payload.Info.Total
-				a.runningMax = a.replayBaseline
+				a.baseline = *record.Payload.Info.Total
+				a.runningMax = a.baseline
 			}
 			return
 		}
@@ -270,16 +291,11 @@ func (a *summaryAccumulator) ingest(line []byte, offset int64) {
 	}
 }
 
-func (a *summaryAccumulator) finish(ctx context.Context, sourceSize int64) (*model.Session, error) {
-	session := cloneSummarySession(a.session)
-	session.SourceSize = sourceSize
-	session.Usage = nil
-	session.Requests = nil
-
+func (a *summaryAccumulator) segmentRecords() []tokenUsageRecord {
 	var ownTotal *tokenUsage
 	if a.lastTotal != nil {
 		candidate := *a.lastTotal
-		if subtractTokenUsage(&candidate, &a.replayBaseline) {
+		if subtractTokenUsage(&candidate, &a.baseline) {
 			ownTotal = &candidate
 		}
 	}
@@ -296,24 +312,35 @@ func (a *summaryAccumulator) finish(ctx context.Context, sourceSize int64) (*mod
 	if !cleanPartition {
 		pricingRecords = make([]tokenUsageRecord, 0, len(usageOrder))
 		for _, usageModel := range usageOrder {
-			if err := ctx.Err(); err != nil {
-				return nil, err
-			}
 			pricingRecords = append(pricingRecords, tokenUsageRecord{model: usageModel, usage: *usageByModel[usageModel], offset: -1})
 		}
 	}
-	for _, usageModel := range usageOrder {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	return pricingRecords
+}
+
+func (a *summaryAccumulator) finish(ctx context.Context, sourceSize int64) (*model.Session, error) {
+	session := cloneSummarySession(a.session)
+	session.SourceSize = sourceSize
+	session.Usage = nil
+	session.Requests = nil
+
+	usageIndex := make(map[string]int)
+	for _, records := range [][]tokenUsageRecord{a.closedRecords, a.segmentRecords()} {
+		for _, record := range records {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			usage := codexUsage(record.model, record.usage)
+			index, exists := usageIndex[record.model]
+			if !exists {
+				usageIndex[record.model] = len(session.Usage)
+				session.Usage = append(session.Usage, usage)
+			} else {
+				session.Usage[index] = session.Usage[index].Add(usage)
+				session.Usage[index].Model = record.model
+			}
+			session.Requests = append(session.Requests, model.RequestUsage{Offset: record.offset, Usage: usage})
 		}
-		session.Usage = append(session.Usage, codexUsage(usageModel, *usageByModel[usageModel]))
-	}
-	for _, record := range pricingRecords {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		usage := codexUsage(record.model, record.usage)
-		session.Requests = append(session.Requests, model.RequestUsage{Offset: record.offset, Usage: usage})
 	}
 	a.parser.calculator.ApplySessionCodex(session, a.parser.defaultPricingModel)
 	if session.AgentPath != "" {
@@ -875,8 +902,6 @@ func subtractTokenUsage(total *tokenUsage, baseline *tokenUsage) bool {
 }
 
 func advanceTokenUsageMax(runningMax *tokenUsage, candidate *tokenUsage) bool {
-	// Ceiling: post-revert records below an earlier maximum stay skipped, and the
-	// clean-partition guard leaves the final cumulative usage on lumped pricing.
 	values := [][2]*int64{
 		{&runningMax.InputTokens, &candidate.InputTokens},
 		{&runningMax.CachedInputTokens, &candidate.CachedInputTokens},
