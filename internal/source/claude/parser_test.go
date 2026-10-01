@@ -570,7 +570,7 @@ func TestParseRerootsFlatParentWhoseDirectorySubtreeWouldExceedDepthLimit(t *tes
 			t.Fatal(err)
 		}
 		id := fmt.Sprintf("nested-%02d", index)
-		current = filepath.Join(childDir, "agent-"+id+".jsonl")
+		current = filepath.Join(childDir, "n.jsonl")
 		content := `{"type":"user","agentId":` + strconv.Quote(id) + `,"message":{"content":"Inspect seedlings"}}` + "\n"
 		if err := os.WriteFile(current, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
