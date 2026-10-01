@@ -33,7 +33,8 @@ CLI sorting accepts both recursive `turns` and own `messages`.
 
 # Consequences
 
-The Subagents table gives up title width for a five-cell turn column.
+The Subagents table replaces its token column with a five-cell turn column.
+The remaining width goes to the title. Tokens remain in Info and Timeline.
 
 # Impact
 

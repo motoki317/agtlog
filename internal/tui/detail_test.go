@@ -1280,15 +1280,15 @@ func TestLoadingSummaryTabsRemainInteractiveForRootAndChild(t *testing.T) {
 func TestSubagentsTabListsAllDescendantsInPreOrder(t *testing.T) {
 	verifier := &model.Session{
 		ID: "verify", Agent: model.AgentCodex, Title: "Verify cavern", Models: []string{"gpt-5.6-sol"},
-		Usage: []model.Usage{{InputTokens: 25}}, Cost: model.Cost{USD: 0.25, Estimated: true},
+		Cost: model.Cost{USD: 0.25, Estimated: true},
 	}
 	mapper := &model.Session{
 		ID: "map", Agent: model.AgentClaude, Title: "Map cavern", Models: []string{"claude-sonnet-4-7"},
-		Usage: []model.Usage{{InputTokens: 50}}, Cost: model.Cost{USD: 0.50}, Subagents: []*model.Session{verifier},
+		Cost: model.Cost{USD: 0.50}, Subagents: []*model.Session{verifier},
 	}
 	scout := &model.Session{
 		ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge", Models: []string{"claude-opus-4-8"},
-		Usage: []model.Usage{{InputTokens: 100}}, Cost: model.Cost{USD: 1.00}, Subagents: []*model.Session{mapper},
+		Cost: model.Cost{USD: 1.00}, Subagents: []*model.Session{mapper},
 	}
 	root := &model.Session{ID: "route", Agent: model.AgentClaude, Subagents: []*model.Session{scout}}
 	detail := newDetailState(root, 120, 16, newStyles())
@@ -1299,9 +1299,9 @@ func TestSubagentsTabListsAllDescendantsInPreOrder(t *testing.T) {
 		prefix string
 		cells  []string
 	}{
-		{prefix: "│› claude Scout ridge", cells: []string{"opus-4.8", "175", "~$1.75"}},
-		{prefix: "│  claude └─ Map cavern", cells: []string{"sonnet-4-7", "75", "~$0.75"}},
-		{prefix: "│  codex     └─ Verify cavern", cells: []string{"gpt-5.6", "25", "~$0.25"}},
+		{prefix: "│› claude Scout ridge", cells: []string{"opus-4.8", "~$1.75"}},
+		{prefix: "│  claude └─ Map cavern", cells: []string{"sonnet-4-7", "~$0.75"}},
+		{prefix: "│  codex     └─ Verify cavern", cells: []string{"gpt-5.6", "~$0.25"}},
 	}
 	position := 0
 	for _, want := range wants {
@@ -1407,7 +1407,7 @@ func TestSubagentRowsRenderSortedTreeGuides(t *testing.T) {
 	}
 	columns := []listColumn{{kind: columnTitle, width: 40}}
 	for index, want := range wants {
-		row := subagentRow(flattened[index], time.Time{}, columns, "", 0, "", "")
+		row := subagentRow(flattened[index], time.Time{}, columns, "", 0, "")
 		if got := strings.TrimRight(row, " "); got != want {
 			t.Errorf("row %d title = %q, want %q", index, got, want)
 		}
@@ -1483,7 +1483,7 @@ func TestSubagentColumnFocusTracksVisibleColumnsAcrossResize(t *testing.T) {
 	}
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortColumnKey)})
 
-	detail.resize(35, 12)
+	detail.resize(28, 12)
 	if detail.subagentColumnFocus != columnTitle {
 		t.Fatalf("focus after model column dropped = %v, want nearest title", detail.subagentColumnFocus)
 	}
@@ -1491,8 +1491,8 @@ func TestSubagentColumnFocusTracksVisibleColumnsAcrossResize(t *testing.T) {
 		t.Fatalf("sort after model column dropped = %#v, want retained model sort", detail.subagentSort)
 	}
 	detail.update(tea.KeyMsg{Type: tea.KeyRight})
-	if detail.subagentColumnFocus != columnTokens {
-		t.Fatalf("focus after narrow right press = %v, want next visible tokens", detail.subagentColumnFocus)
+	if detail.subagentColumnFocus != columnCost {
+		t.Fatalf("focus after narrow right press = %v, want next visible cost", detail.subagentColumnFocus)
 	}
 }
 
@@ -1742,10 +1742,9 @@ func TestSubagentsRowAppliesCellStylesAfterFitting(t *testing.T) {
 	styled := detail.styleLine(detail.rendered[detail.renderedStarts[1]].text, line, false, true)
 
 	for name, want := range map[string]string{
-		"agent":  styleSet.codex.Render("codex"),
-		"turns":  styleSet.muted.Render("   14"),
-		"tokens": styleSet.accent.Render(humanTokens(selected.TotalUsage().TotalTokens())),
-		"cost":   styleSet.estimated.Render(formatCost(selected.TotalCost())),
+		"agent": styleSet.codex.Render("codex"),
+		"turns": styleSet.muted.Render("   14"),
+		"cost":  styleSet.estimated.Render(formatCost(selected.TotalCost())),
 	} {
 		if !strings.Contains(styled, want) {
 			t.Errorf("Subagents row missing %s cell style in %q", name, styled)
@@ -1753,7 +1752,7 @@ func TestSubagentsRowAppliesCellStylesAfterFitting(t *testing.T) {
 	}
 }
 
-func TestSubagentsRowsShowAgeAndDropItBeforeUsage(t *testing.T) {
+func TestSubagentsRowsShowAgeAndDropItBeforeCost(t *testing.T) {
 	now := time.Date(2026, 1, 2, 6, 0, 0, 0, time.UTC)
 	child := &model.Session{
 		ID: "review", Agent: model.AgentCodex, Title: "Review lunar telemetry", Models: []string{"gpt-5.6-sol"}, UpdatedAt: now.Add(-12 * time.Minute),
@@ -1771,7 +1770,7 @@ func TestSubagentsRowsShowAgeAndDropItBeforeUsage(t *testing.T) {
 
 	detail.resize(42, 14)
 	text := detail.lines[1].text
-	if strings.Contains(text, "12m") || !strings.Contains(text, humanTokens(child.TotalUsage().TotalTokens())) || !strings.Contains(text, formatCost(child.TotalCost())) {
+	if strings.Contains(text, "12m") || !strings.Contains(text, formatCost(child.TotalCost())) {
 		t.Fatalf("narrow subagent row priority = %q", text)
 	}
 	for _, row := range detail.rendered {
@@ -1786,7 +1785,7 @@ func TestSubagentColumnsDropAgeThenTurns(t *testing.T) {
 		width      int
 		age, turns bool
 	}{
-		{67, true, true}, {66, false, true}, {62, false, true}, {61, false, false},
+		{60, true, true}, {59, false, true}, {55, false, true}, {54, false, false},
 	} {
 		columns := subagentColumns(test.width)
 		if columnVisible(columnAge, columns) != test.age || columnVisible(columnTurns, columns) != test.turns {
@@ -1795,6 +1794,20 @@ func TestSubagentColumnsDropAgeThenTurns(t *testing.T) {
 		if listColumnsWidth(columns) != test.width {
 			t.Errorf("width %d: used %d", test.width, listColumnsWidth(columns))
 		}
+	}
+}
+
+func TestSubagentColumnsGiveTokenWidthToTitle(t *testing.T) {
+	columns := subagentColumns(86)
+	var titles []string
+	for _, column := range columns {
+		titles = append(titles, column.title)
+		if column.kind == columnTitle && column.width != 46 {
+			t.Errorf("TITLE width = %d, want 46", column.width)
+		}
+	}
+	if want := []string{"AGENT", "TITLE", "MODEL", "TURNS", "COST", "AGE"}; !slices.Equal(titles, want) {
+		t.Fatalf("columns = %v, want %v", titles, want)
 	}
 }
 
@@ -1860,17 +1873,15 @@ func TestSubagentColumnsStayAlignedAtNarrowWidths(t *testing.T) {
 		width int
 		want  []listColumn
 	}{
-		{width: 28, want: []listColumn{
+		{width: 21, want: []listColumn{
 			{kind: columnAgent, title: "AGENT", width: listAgentWidth},
 			{kind: columnTitle, title: "TITLE", width: 6},
-			{kind: columnTokens, title: "TOKENS", width: 6, right: true},
 			{kind: columnCost, title: "COST", width: listCostWidth, right: true},
 		}},
-		{width: 40, want: []listColumn{
+		{width: 33, want: []listColumn{
 			{kind: columnAgent, title: "AGENT", width: listAgentWidth},
 			{kind: columnTitle, title: "TITLE", width: 4},
 			{kind: columnModel, title: "MODEL", width: listModelWidth},
-			{kind: columnTokens, title: "TOKENS", width: 6, right: true},
 			{kind: columnCost, title: "COST", width: listCostWidth, right: true},
 		}},
 	}
@@ -1881,7 +1892,7 @@ func TestSubagentColumnsStayAlignedAtNarrowWidths(t *testing.T) {
 				t.Fatalf("columns = %#v, want %#v", columns, test.want)
 			}
 			header := subagentHeader(columns, sortState{}, listColumnKind(-1), newStyles()).plain
-			row := subagentRow(item, time.Time{}, columns, "gpt-5.6", 0, "2500", "~$0.75")
+			row := subagentRow(item, time.Time{}, columns, "gpt-5.6", 0, "~$0.75")
 			if got := ansi.StringWidth(header); got != test.width {
 				t.Errorf("header width = %d, want %d: %q", got, test.width, header)
 			}
@@ -1940,6 +1951,9 @@ func TestSubagentsHeaderNamesAndAlignsColumns(t *testing.T) {
 		t.Fatalf("Subagents lines = %#v, want header and data row", detail.lines)
 	}
 	header, row := detail.lines[0].text, detail.lines[1].text
+	if strings.Contains(header, "TOKENS") || strings.Contains(row, "2500") {
+		t.Fatalf("Subagents retained token column: header %q row %q", header, row)
+	}
 	columns := []struct {
 		title string
 		value string
@@ -1949,7 +1963,6 @@ func TestSubagentsHeaderNamesAndAlignsColumns(t *testing.T) {
 		{title: "TITLE", value: "Map fictional cavern"},
 		{title: "MODEL", value: "gpt-5.6"},
 		{title: "TURNS", value: "14", right: true},
-		{title: "TOKENS", value: "2500", right: true},
 		{title: "COST", value: "~$0.75", right: true},
 		{title: "AGE", value: "12m", right: true},
 	}
@@ -1980,11 +1993,11 @@ func TestDeepSubagentRowKeepsAgentIdentity(t *testing.T) {
 		{ID: "deep-last", Agent: model.AgentCodex, Title: "Inspect fictional last depth"},
 	}
 	items := flattenSubagents(root, sortState{})
-	columns := subagentColumns(102)
+	columns := subagentColumns(95)
 	titleStart := columns[0].width + 1
 	depthElevenRow := subagentRow(
 		items[11],
-		time.Time{}, columns, "gpt-5.6", 0, "2500", "~$0.75",
+		time.Time{}, columns, "gpt-5.6", 0, "~$0.75",
 	)
 	depthElevenTitle := ansi.Cut(depthElevenRow, titleStart, titleStart+columns[1].width)
 	if wantPrefix := strings.Repeat(" ", 30) + "└─ "; !strings.HasPrefix(depthElevenTitle, wantPrefix) {
@@ -1993,7 +2006,7 @@ func TestDeepSubagentRowKeepsAgentIdentity(t *testing.T) {
 	for index, wantPrefix := range []string{"…├─ ", "…└─ "} {
 		row := subagentRow(
 			items[12+index],
-			time.Time{}, columns, "gpt-5.6", 0, "2500", "~$0.75",
+			time.Time{}, columns, "gpt-5.6", 0, "~$0.75",
 		)
 		agentCell := ansi.Cut(row, 0, columns[0].width)
 		if got := strings.TrimSpace(agentCell); got != "codex" {
@@ -3601,11 +3614,11 @@ func TestLiveUpdateRefreshesDrilledBreadcrumbs(t *testing.T) {
 func TestLiveUpdateRefreshesRecursiveSubagentTotals(t *testing.T) {
 	mapper := &model.Session{
 		ID: "mapper", Agent: model.AgentCodex, Path: "/workspace/mapper.jsonl",
-		Usage: []model.Usage{{InputTokens: 50}}, Cost: model.Cost{USD: 0.05, Estimated: true},
+		Messages: 2, ToolCalls: 1, Cost: model.Cost{USD: 0.05, Estimated: true},
 	}
 	scout := &model.Session{
 		ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl",
-		Usage: []model.Usage{{InputTokens: 100}}, Cost: model.Cost{USD: 0.10}, Subagents: []*model.Session{mapper},
+		Messages: 3, ToolCalls: 2, Cost: model.Cost{USD: 0.10}, Subagents: []*model.Session{mapper},
 	}
 	root := &model.Session{ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{scout}}
 	m := NewModel([]*model.Session{root}, nil)
@@ -3615,23 +3628,32 @@ func TestLiveUpdateRefreshesRecursiveSubagentTotals(t *testing.T) {
 	}
 
 	replacement := cloneSession(root)
-	replacement.Subagents[0].Subagents[0].Usage = []model.Usage{{InputTokens: 250}}
+	replacement.Subagents[0].Subagents[0].ToolCalls = 6
 	replacement.Subagents[0].Subagents[0].Cost = model.Cost{USD: 0.25, Estimated: true}
 	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
 	m = updated.(Model)
 
-	for _, line := range detailStateFromScreen(t, m.detail).lines {
+	detail := detailStateFromScreen(t, m.detail)
+	turnStart := 0
+	for _, column := range detail.visibleSubagentColumns() {
+		if column.kind == columnTurns {
+			break
+		}
+		turnStart += column.width + 1
+	}
+	wantTurns := map[string]string{"scout": "13", "mapper": "8"}
+	for _, line := range detail.lines {
 		if line.subagentSession == nil {
 			continue
 		}
-		wantTokens := humanTokens(line.subagentSession.TotalUsage().TotalTokens())
-		wantCost := formatCost(line.subagentSession.TotalCost())
-		if line.subagentTokens != wantTokens || line.subagentCost != wantCost {
-			t.Errorf("%s cached totals = %q/%q, want %q/%q", line.subagentSession.ID, line.subagentTokens, line.subagentCost, wantTokens, wantCost)
+		id := line.subagentSession.ID
+		if got := strings.TrimSpace(ansi.Cut(line.text, turnStart, turnStart+listTurnsWidth)); got != wantTurns[id] {
+			t.Errorf("%s turns = %q, want %q", id, got, wantTurns[id])
 		}
-	}
-	if got := detailStateFromScreen(t, m.detail).lines[1].subagentTokens; got != "350" {
-		t.Fatalf("refreshed scout recursive tokens = %q, want 350", got)
+		wantCost := formatCost(line.subagentSession.TotalCost())
+		if line.subagentCost != wantCost {
+			t.Errorf("%s cached cost = %q, want %q", id, line.subagentCost, wantCost)
+		}
 	}
 	if got := detailStateFromScreen(t, m.detail).lines[1].subagentCost; got != "~$0.35" {
 		t.Fatalf("refreshed scout recursive cost = %q, want ~$0.35", got)

@@ -4,12 +4,12 @@
 │branch orbit/alpha │ Jan 02 05:44→Jan 02 06:04 │ total ~$1.72                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Timeline  [Subagents (5)]  Info ──────────────────────────────────────────────────────╮
-│  AGENT  TITLE                                   MODEL         TURNS TOKENS    COST  AGE│
-│› codex  Ship the expedition                     gpt-5.6           6   4000   $0.20   1m│
-│  claude Scout the ridge                         opus-4.8         27    60k  ~$0.68  12m│
-│  codex  ├─ Map the cavern                       gpt-5.6          14    12k  ~$0.20   3m│
-│  claude │  └─ Inspect the cave map              sonnet-4-7        5   2000  ~$0.08   2m│
-│  codex  └─ Review the findings                  gpt-5.6           3   3000  ~$0.16   4m│
+│  AGENT  TITLE                                          MODEL         TURNS    COST  AGE│
+│› codex  Ship the expedition                            gpt-5.6           6   $0.20   1m│
+│  claude Scout the ridge                                opus-4.8         27  ~$0.68  12m│
+│  codex  ├─ Map the cavern                              gpt-5.6          14  ~$0.20   3m│
+│  claude │  └─ Inspect the cave map                     sonnet-4-7        5  ~$0.08   2m│
+│  codex  └─ Review the findings                         gpt-5.6           3  ~$0.16   4m│
 │                                                                                        │
 │                                                                                        │
 │                                                                                        │

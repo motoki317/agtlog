@@ -192,10 +192,10 @@ refreshes, while selection follows the session identity. Column sorts also reord
 within each parent, so descendants remain beneath their parent.
 
 Nested descendants are indented by depth. Each row shows `AGENT`, `TITLE`, `MODEL`, `TURNS`,
-`TOKENS`, `COST`, and `AGE`. Turns, tokens, and cost include all descendants. `TURNS` uses five
+`COST`, and `AGE`. Turns and cost include all descendants. `TURNS` uses five
 right-aligned cells and the muted style, like Sessions. Under width pressure, `AGE` disappears
 first, then `TURNS`. Next, `TITLE` shrinks to four cells and `MODEL` to nine, before `MODEL` disappears.
-Further pressure shrinks `TITLE`, `AGENT`, `COST`, then `TOKENS` to one cell each.
+Further pressure shrinks `TITLE`, `AGENT`, then `COST` to one cell each.
 Columns then disappear from the right until the row fits.
 
 The tab has its own selection, column focus, and sort state. It supports step and edge movement

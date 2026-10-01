@@ -38,7 +38,6 @@ const (
 	columnAge
 	columnTurns
 	columnSubagents
-	columnTokens
 	columnCost
 )
 

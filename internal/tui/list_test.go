@@ -537,7 +537,7 @@ func TestListColumnsFillWidthAndDropLowValueFieldsInOrder(t *testing.T) {
 func TestSessionListNeverIncludesTokenColumn(t *testing.T) {
 	for _, width := range []int{40, 80, 160} {
 		for _, column := range listColumns(width) {
-			if column.kind == columnTokens || column.title == "TOKENS" {
+			if column.title == "TOKENS" {
 				t.Fatalf("%d-column session list retained token column: %#v", width, column)
 			}
 		}
