@@ -275,7 +275,7 @@ func TestColoredWideListRowsAlignWithHeader(t *testing.T) {
 	for rowIndex, row := range rendered[1:] {
 		start := listCursorWidth
 		for _, column := range columns {
-			if column.kind == columnAgent || column.kind == columnAge || column.kind == columnMessages || column.kind == columnCost {
+			if column.kind == columnAgent || column.kind == columnAge || column.kind == columnTurns || column.kind == columnCost {
 				if cell := strings.TrimSpace(ansi.Cut(row, start, start+column.width)); cell == "" {
 					t.Errorf("row %d %s cell is empty", rowIndex, column.title)
 				}
@@ -503,8 +503,8 @@ func TestListColumnsFillWidthAndDropLowValueFieldsInOrder(t *testing.T) {
 		width int
 		want  []listColumnKind
 	}{
-		{width: 74, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnModel, columnAge, columnMessages, columnSubagents, columnCost}},
-		{width: 73, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnAge, columnMessages, columnSubagents, columnCost}},
+		{width: 74, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnModel, columnAge, columnTurns, columnSubagents, columnCost}},
+		{width: 73, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnAge, columnTurns, columnSubagents, columnCost}},
 		{width: 59, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnAge, columnSubagents, columnCost}},
 		{width: 53, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnAge, columnCost}},
 		{width: 48, want: []listColumnKind{columnAgent, columnTitle, columnAge, columnCost}},
@@ -537,7 +537,7 @@ func TestListColumnsFillWidthAndDropLowValueFieldsInOrder(t *testing.T) {
 func TestSessionListNeverIncludesTokenColumn(t *testing.T) {
 	for _, width := range []int{40, 80, 160} {
 		for _, column := range listColumns(width) {
-			if column.kind == columnTokens || column.title == "TOKENS" {
+			if column.title == "TOKENS" {
 				t.Fatalf("%d-column session list retained token column: %#v", width, column)
 			}
 		}
@@ -1416,7 +1416,7 @@ func TestSessionUpdateReattributesOwnershipAfterOriginMutation(t *testing.T) {
 	}
 }
 
-func TestUnrelatedLiveUpdateRefreshesOpenInfoOwnership(t *testing.T) {
+func TestUnrelatedLiveUpdateRefreshesOpenOverviewOwnership(t *testing.T) {
 	started := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)
 	request := model.RequestUsage{MessageID: "message-shared", RequestID: "request-shared", USD: 0.25}
 	currentOwner := &model.Session{
@@ -1433,8 +1433,6 @@ func TestUnrelatedLiveUpdateRefreshesOpenInfoOwnership(t *testing.T) {
 	m = updated.(Model)
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = updated.(Model)
 
 	earlier := &model.Session{
 		ID: "session-earlier", Agent: model.AgentClaude, Path: "/workspace/earlier.jsonl", Title: "Earlier origin",
@@ -1446,7 +1444,7 @@ func TestUnrelatedLiveUpdateRefreshesOpenInfoOwnership(t *testing.T) {
 	view := ansi.Strip(m.detail.view())
 	if !strings.Contains(view, "owned: $0.00") ||
 		!strings.Contains(view, "replayed −$0.25, 1 request, from Earlier origin (session-earlier)") {
-		t.Fatalf("open Info tab did not refresh indirect ownership:\n%s", view)
+		t.Fatalf("open Overview tab did not refresh indirect ownership:\n%s", view)
 	}
 }
 
@@ -1466,7 +1464,7 @@ func TestUnrelatedLiveUpdateRefreshesOwnershipInBuriedRootDetail(t *testing.T) {
 	source.AttributeOwnership([]*model.Session{currentOwner, replay})
 	m := NewModel([]*model.Session{currentOwner, replay}, nil)
 	root := newDetailState(currentOwner, 100, 30, m.styles)
-	root.tab = tabInfo
+	root.tab = tabOverview
 	root.rebuild()
 	m.screen = screenDetail
 	m.detailStack = []detailScreen{root}
@@ -1483,7 +1481,7 @@ func TestUnrelatedLiveUpdateRefreshesOwnershipInBuriedRootDetail(t *testing.T) {
 	view := ansi.Strip(buried.view())
 	if !strings.Contains(view, "owned: $0.00") ||
 		!strings.Contains(view, "replayed −$0.25, 1 request, from Earlier origin (session-earlier)") {
-		t.Fatalf("buried Info tab did not refresh indirect ownership:\n%s", view)
+		t.Fatalf("buried Overview tab did not refresh indirect ownership:\n%s", view)
 	}
 	if detailStateFromScreen(t, m.detail).session != child {
 		t.Fatalf("buried-root refresh replaced active child detail: %#v", m.detail)
@@ -1519,8 +1517,6 @@ func TestPendingDetailLoadCannotRestoreStaleOwnership(t *testing.T) {
 		identity:   sessionIdentity(currentOwner),
 		session:    staleLoad,
 	})
-	m = updated.(Model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
@@ -1636,8 +1632,6 @@ func TestManualRefreshUpdatesOwnershipInOpenDetail(t *testing.T) {
 	m = updated.(Model)
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
-	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-	m = updated.(Model)
 	m.refreshGeneration = 1
 
 	refreshedCurrent := cloneSession(current)
@@ -1653,7 +1647,7 @@ func TestManualRefreshUpdatesOwnershipInOpenDetail(t *testing.T) {
 	view := ansi.Strip(m.detail.view())
 	if !strings.Contains(view, "owned: $0.00") ||
 		!strings.Contains(view, "replayed −$0.25, 1 request, from Earlier origin (session-earlier)") {
-		t.Fatalf("manual refresh left open Info ownership stale:\n%s", view)
+		t.Fatalf("manual refresh left open Overview ownership stale:\n%s", view)
 	}
 }
 

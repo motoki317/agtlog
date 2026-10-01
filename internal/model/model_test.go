@@ -9,6 +9,32 @@ import (
 	"testing"
 )
 
+func TestSessionTurns(t *testing.T) {
+	cases := []struct {
+		name       string
+		session    Session
+		own, total int
+	}{
+		{name: "empty"},
+		{name: "own", session: Session{Messages: 3, ToolCalls: 4}, own: 7, total: 7},
+		{name: "nested group", session: Session{Messages: 2, ToolCalls: 1, Subagents: []*Session{
+			{Messages: 4, ToolCalls: 5, Subagents: []*Session{{Messages: 1, ToolCalls: 2}}},
+			{Group: true, Subagents: []*Session{{Messages: 6, ToolCalls: 7}}},
+		}}, own: 3, total: 28},
+		{name: "group", session: Session{Group: true, Subagents: []*Session{{Messages: 2, ToolCalls: 3}}}, total: 5},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.session.Turns(); got != test.own {
+				t.Errorf("Turns() = %d, want %d", got, test.own)
+			}
+			if got := test.session.TotalTurns(); got != test.total {
+				t.Errorf("TotalTurns() = %d, want %d", got, test.total)
+			}
+		})
+	}
+}
+
 func TestEventRecordRefIsNotSerialized(t *testing.T) {
 	event := Event{
 		Kind:         EventUser,

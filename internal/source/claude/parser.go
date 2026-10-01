@@ -143,7 +143,7 @@ func NewParser(calculator cost.Calculator) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v18"
+	return "claude-parser-v19"
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
@@ -1292,11 +1292,6 @@ func (p Parser) parseFile(ctx context.Context, path string) (*model.Session, map
 	var titlePrompt string
 	hasAITitle := false
 	var usageRecords []usageRecord
-	// messages counts this session's own conversation turns: user prompts (records
-	// carrying text, not tool-result-only) plus assistant text replies. It matches
-	// the user+assistant message lines the detail timeline shows, so a session with
-	// many interactions no longer reads as one message.
-	messages := 0
 	err = jsonl.ForEachContext(ctx, file, func(line []byte) {
 		var envelope struct {
 			Type      string `json:"type"`
@@ -1337,7 +1332,7 @@ func (p Parser) parseFile(ctx context.Context, path string) (*model.Session, map
 			var content userContentRecord
 			if jsonl.Unmarshal(line, &content) == nil {
 				if text := userText(content.Message.Content); text != "" {
-					messages++
+					session.Messages++
 					if session.Title == "" && !hasAITitle {
 						session.Title = model.CleanTitle(text)
 						if session.Title != "" {
@@ -1347,7 +1342,9 @@ func (p Parser) parseFile(ctx context.Context, path string) (*model.Session, map
 				}
 			}
 		case "assistant":
-			messages += assistantTextBlocks(record.Message.Content)
+			messages, toolCalls := assistantBlockCounts(record.Message.Content)
+			session.Messages += messages
+			session.ToolCalls += toolCalls
 		}
 		if record.Type == "assistant" && (record.IsAPIErrorMessage || meaningfulJSON(record.Error) || meaningfulJSON(record.APIErrorStatus)) {
 			session.HasError = true
@@ -1412,7 +1409,6 @@ func (p Parser) parseFile(ctx context.Context, path string) (*model.Session, map
 			seenModels[record.Usage.Model] = true
 		}
 	}
-	session.Messages = messages
 	return session, workflowNames, titlePrompt, nil
 }
 
@@ -1423,24 +1419,27 @@ func retainedTitlePrompt(prompt string) string {
 	return prompt
 }
 
-// assistantTextBlocks counts the text blocks in an assistant message that the
-// detail timeline renders as their own message lines, applying the same
-// non-empty predicate so the list count and the timeline agree.
-func assistantTextBlocks(content json.RawMessage) int {
+// Empty text blocks do not produce timeline messages. Tool spawns count like
+// other tool calls even though the timeline renders them as subagent rows.
+func assistantBlockCounts(content json.RawMessage) (messages, toolCalls int) {
 	var blocks []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
 	if jsonl.Unmarshal(content, &blocks) != nil {
-		return 0
+		return 0, 0
 	}
-	count := 0
 	for _, block := range blocks {
-		if block.Type == "text" && model.CleanTimelineText(block.Text) != "" {
-			count++
+		switch block.Type {
+		case "text":
+			if model.CleanTimelineText(block.Text) != "" {
+				messages++
+			}
+		case "tool_use":
+			toolCalls++
 		}
 	}
-	return count
+	return messages, toolCalls
 }
 
 func meaningfulJSON(value json.RawMessage) bool {

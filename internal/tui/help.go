@@ -15,7 +15,7 @@ func (m Model) helpView() string {
 		"? help · q/ctrl-c quit",
 	}
 	if !m.styles.mono {
-		lines[4] += " · t theme"
+		lines[len(lines)-3] += " · t theme"
 	}
 	if m.screen == screenDetail {
 		if _, item := m.detail.(*itemView); item {
@@ -31,29 +31,21 @@ func (m Model) helpView() string {
 			}
 		} else {
 			detail, _ := m.detail.(*detailState)
-			if detail != nil && detail.tab == tabInfo {
+			if detail != nil && detail.tab == tabOverview {
 				lines = []string{
-					"j/k scroll · g/G edge",
-					"tab tabs · w wrap · " + timeFormatKey + " time",
-					"esc/h back",
-					"mouse wheel scroll",
-					"? help · q/ctrl-c quit",
-				}
-				if !m.styles.mono {
-					lines[2] += " · t theme"
-				}
-			} else if detail != nil && detail.tab == tabSubagents {
-				lines = []string{
-					"j/k scroll · g/G edge",
+					"j/k move/scroll · g/G edge",
+					"pgup/pgdn page",
 					"←/→ column · ⇧" + sortColumnKey + " sort",
-					"⇧" + sortAgeKey + " age · ⇧" + sortTitleKey + " title · enter/l open",
-					"tab tabs · " + timeFormatKey + " time",
+					"⇧" + sortAgeKey + " age · ⇧" + sortTitleKey + " title",
+					"enter/l open",
+					"w wrap",
+					"tab Timeline/Overview · " + timeFormatKey + " time",
 					"esc/h back",
 					"mouse wheel scroll · click select",
 					"? help · q/ctrl-c quit",
 				}
 				if !m.styles.mono {
-					lines[4] += " · t theme"
+					lines[len(lines)-3] += " · t theme"
 				}
 			} else {
 				mouseHelp := "mouse wheel scroll · click select"
@@ -70,7 +62,7 @@ func (m Model) helpView() string {
 					"? help · q/ctrl-c quit",
 				}
 				if !m.styles.mono {
-					lines[4] += " · t theme"
+					lines[len(lines)-3] += " · t theme"
 				}
 			}
 		}

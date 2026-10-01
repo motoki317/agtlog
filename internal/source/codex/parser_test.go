@@ -54,8 +54,8 @@ func parseTieredSession(t *testing.T, events ...string) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); got != "codex-parser-v25" {
-		t.Fatalf("CacheFingerprint() = %q, want segment-aware v25 fingerprint", got)
+	if got := testParser().CacheFingerprint(); got != "codex-parser-v26" {
+		t.Fatalf("CacheFingerprint() = %q, want tool-count v26 fingerprint", got)
 	}
 }
 
@@ -1371,6 +1371,72 @@ func TestParseDeduplicatesNonAdvancingRootTokenCount(t *testing.T) {
 	}
 	if got := session.TotalUsage().TotalTokens(); got != 300_000 {
 		t.Fatalf("Parse().TotalUsage() = %d, want final cumulative 300000", got)
+	}
+}
+
+func TestParseCountsToolCalls(t *testing.T) {
+	for _, fork := range []bool{false, true} {
+		t.Run(strconv.FormatBool(fork), func(t *testing.T) {
+			meta := `{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-tools"}}`
+			if fork {
+				meta = `{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"thread-tools","thread_source":"subagent"}}`
+			}
+			session := parseTieredSession(t, meta,
+				`{"timestamp":"2026-01-02T03:05:00.010Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"old-function","arguments":"{}"}}`,
+				`{"timestamp":"2026-01-02T03:05:00.020Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"old-custom","input":"patch"}}`,
+				`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100},"last_token_usage":{"input_tokens":100}}}}`,
+				`{"timestamp":"2026-01-02T03:05:00.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200},"last_token_usage":{"input_tokens":100}}}}`,
+				`{"timestamp":"2026-01-02T03:05:01Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"function","arguments":"{}"}}`,
+				`{"timestamp":"2026-01-02T03:05:02Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"custom","input":"patch"}}`,
+				`{"timestamp":"2026-01-02T03:05:03Z","type":"response_item","payload":{"type":"function_call_output","call_id":"function","output":"done"}}`,
+				`{"timestamp":"2026-01-02T03:05:04Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"custom","output":"done"}}`,
+				`{"timestamp":"2026-01-02T03:05:05Z","type":"event_msg","payload":{"type":"function_call"}}`,
+				`{"timestamp":"2026-01-02T03:05:06Z","type":"response_item","payload":{"type":"web_search_call"}}`,
+			)
+			want := 4
+			if fork {
+				want = 2
+			}
+			if session.ToolCalls != want || session.Messages != 0 {
+				t.Fatalf("counts = %d tools, %d messages, want %d tools, 0 messages", session.ToolCalls, session.Messages, want)
+			}
+		})
+	}
+}
+
+func TestSummaryCheckpointRetainsToolCalls(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tools.jsonl")
+	prefix := "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-tools\"}}\n" +
+		"{\"type\":\"response_item\",\"payload\":{\"type\":\"function_call\"}}\n"
+	if err := os.WriteFile(path, []byte(prefix), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, checkpoint, err := testParser().parseResumableContext(context.Background(), path, nil)
+	if err != nil || checkpoint == nil {
+		t.Fatalf("initial parse: checkpoint %v, error %v", checkpoint, err)
+	}
+	if initial.ToolCalls != 1 || checkpoint.accumulator.clone().session.ToolCalls != 1 {
+		t.Fatal("initial count did not survive accumulator clone")
+	}
+	suffix := "{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call\"}}\n" +
+		"{\"type\":\"response_item\",\"payload\":{\"type\":\"custom_tool_call_output\"}}\n"
+	if err := os.WriteFile(path, []byte(prefix+suffix), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resumed := false
+	got, _, err := testParser().parseResumableContextAfterValidation(context.Background(), path, checkpoint, func() { resumed = true })
+	if err != nil || !resumed {
+		t.Fatalf("resume = %t, error %v", resumed, err)
+	}
+	full, err := testParser().ParseContext(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ToolCalls != 2 || !reflect.DeepEqual(got, full) {
+		t.Fatalf("resumed tools = %d, full tools = %d, want identical summaries with 2 tools", got.ToolCalls, full.ToolCalls)
+	}
+	if initial.ToolCalls != 1 || checkpoint.accumulator.session.ToolCalls != 1 {
+		t.Fatal("resume mutated the original summary or checkpoint")
 	}
 }
 

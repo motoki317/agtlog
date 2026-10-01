@@ -22,18 +22,18 @@ var goldenNow = time.Date(2026, 1, 2, 6, 4, 0, 0, time.UTC)
 func TestGoldenListFrame(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	subagent := &model.Session{
-		ID: "builder", Agent: model.AgentClaude, Models: []string{"claude-opus-4-8"},
+		ID: "builder", Messages: 3, ToolCalls: 4, Agent: model.AgentClaude, Models: []string{"claude-opus-4-8"},
 		Usage: []model.Usage{{InputTokens: 180_000, OutputTokens: 20_000}}, Cost: model.Cost{USD: 1.02},
 	}
 	sessions := []*model.Session{
 		{
 			ID: "launch", Agent: model.AgentClaude, Path: "/workspace/starship/launch.jsonl", Project: "starship", Title: "Plan the lunar launch",
-			Models: []string{"claude-opus-4-8"}, UpdatedAt: goldenNow.Add(-10 * time.Minute), Messages: 12,
+			Models: []string{"claude-opus-4-8"}, UpdatedAt: goldenNow.Add(-10 * time.Minute), Messages: 12, ToolCalls: 8,
 			Usage: []model.Usage{{InputTokens: 900_000, OutputTokens: 100_000}}, Cost: model.Cost{USD: 4.21}, Subagents: []*model.Session{subagent},
 		},
 		{
 			ID: "harbor", Agent: model.AgentCodex, Path: "/workspace/harbor/route.jsonl", Project: "harbor", Title: "Chart autonomous route",
-			Models: []string{"gpt-5.6-sol"}, UpdatedAt: goldenNow.Add(-2 * time.Hour), Messages: 8,
+			Models: []string{"gpt-5.6-sol"}, UpdatedAt: goldenNow.Add(-2 * time.Hour), Messages: 8, ToolCalls: 2,
 			Usage: []model.Usage{{InputTokens: 88_000, OutputTokens: 4_000}}, Cost: model.Cost{USD: 0.76},
 		},
 	}
@@ -213,41 +213,42 @@ func TestGoldenItemFrame(t *testing.T) {
 	teatest.RequireEqualOutput(t, []byte(normalizeGolden(final.View())))
 }
 
-func TestGoldenSubagentsFrame(t *testing.T) {
+func TestGoldenOverviewSubagentsFrame(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	inspector := &model.Session{
-		ID: "inspector", Agent: model.AgentClaude, Title: "Inspect the cave map", Models: []string{"claude-sonnet-4-7"},
+		ID: "inspector", Messages: 2, ToolCalls: 3, Agent: model.AgentClaude, Title: "Inspect the cave map", Models: []string{"claude-sonnet-4-7"},
 		UpdatedAt: goldenNow.Add(-2 * time.Minute),
 		Usage:     []model.Usage{{InputTokens: 1_500, OutputTokens: 500}}, Cost: model.Cost{USD: 0.08, Estimated: true},
 	}
 	mapper := &model.Session{
-		ID: "mapper", Agent: model.AgentCodex, Title: "Map the cavern", Models: []string{"gpt-5.6-sol"},
+		ID: "mapper", Messages: 4, ToolCalls: 5, Agent: model.AgentCodex, Title: "Map the cavern", Models: []string{"gpt-5.6-sol"},
 		UpdatedAt: goldenNow.Add(-3 * time.Minute),
 		Usage:     []model.Usage{{InputTokens: 8_000, OutputTokens: 2_000}}, Cost: model.Cost{USD: 0.12, Estimated: true},
 		Subagents: []*model.Session{inspector},
 	}
 	reviewer := &model.Session{
-		ID: "reviewer", Agent: model.AgentCodex, Title: "Review the findings", Models: []string{"gpt-5.6-sol"},
+		ID: "reviewer", Messages: 2, ToolCalls: 1, Agent: model.AgentCodex, Title: "Review the findings", Models: []string{"gpt-5.6-sol"},
 		UpdatedAt: goldenNow.Add(-4 * time.Minute),
 		Usage:     []model.Usage{{InputTokens: 2_500, OutputTokens: 500}}, Cost: model.Cost{USD: 0.16, Estimated: true},
 	}
 	scout := &model.Session{
-		ID: "scout", Agent: model.AgentClaude, Title: "Scout the ridge", Models: []string{"claude-opus-4-8"},
+		ID: "scout", Messages: 6, ToolCalls: 4, Agent: model.AgentClaude, Title: "Scout the ridge", Models: []string{"claude-opus-4-8"},
 		UpdatedAt: goldenNow.Add(-12 * time.Minute),
 		Usage:     []model.Usage{{InputTokens: 40_000, OutputTokens: 5_000}}, Cost: model.Cost{USD: 0.32}, Subagents: []*model.Session{mapper, reviewer},
 	}
 	shipper := &model.Session{
-		ID: "shipper", Agent: model.AgentCodex, Title: "Ship the expedition", Models: []string{"gpt-5.6-sol"},
+		ID: "shipper", Messages: 2, ToolCalls: 4, Agent: model.AgentCodex, Title: "Ship the expedition", Models: []string{"gpt-5.6-sol"},
 		UpdatedAt: goldenNow.Add(-1 * time.Minute),
 		Usage:     []model.Usage{{InputTokens: 3_000, OutputTokens: 1_000}}, Cost: model.Cost{USD: 0.20},
 	}
 	root := &model.Session{
 		ID: "route", Agent: model.AgentClaude, Path: "/workspace/starship/route.jsonl", CWD: "/workspace/starship", Project: "starship", Title: "Plan route",
 		Models: []string{"claude-opus-4-8"}, GitBranch: "orbit/alpha", StartedAt: goldenNow.Add(-20 * time.Minute), UpdatedAt: goldenNow,
-		Usage: []model.Usage{{InputTokens: 120_000, OutputTokens: 8_000}}, Cost: model.Cost{USD: 0.84}, Subagents: []*model.Session{scout, shipper},
+		Usage:      []model.Usage{{Model: "claude-opus-4-8", InputTokens: 120_000, OutputTokens: 8_000}},
+		ModelCosts: map[string]float64{"claude-opus-4-8": 0.84}, Cost: model.Cost{USD: 0.84}, Subagents: []*model.Session{scout, shipper},
 	}
 	m := newModelWithClock([]*model.Session{root}, nil, func() time.Time { return goldenNow })
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(90, 18))
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(90, 26))
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
 	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "Map the cavern") }, teatest.WithDuration(time.Second))
@@ -259,8 +260,22 @@ func TestGoldenSubagentsFrame(t *testing.T) {
 	teatest.RequireEqualOutput(t, []byte(normalizeGolden(final.View())))
 }
 
-func TestGoldenInfoFrame(t *testing.T) {
+func TestGoldenOverviewFrame(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
+	m := newModelWithClock([]*model.Session{goldenOverviewSession(t)}, nil, func() time.Time { return goldenNow })
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 38))
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
+	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "subtotal") }, teatest.WithDuration(time.Second))
+	if err := tm.Quit(); err != nil {
+		t.Fatal(err)
+	}
+	final := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second)).(Model)
+	teatest.RequireEqualOutput(t, []byte(normalizeGolden(final.View())))
+}
+
+func goldenOverviewSession(t *testing.T) *model.Session {
+	t.Helper()
 	pricing, err := cost.EmbeddedTable()
 	if err != nil {
 		t.Fatal(err)
@@ -272,34 +287,21 @@ func TestGoldenInfoFrame(t *testing.T) {
 	}
 	rootCost := calculator.Calculate(rootUsage)
 	mapper := &model.Session{
-		ID: "mapper", Agent: model.AgentCodex, Title: "Map the cavern", Models: []string{"gpt-5.6-sol"},
+		ID: "mapper", Messages: 1, ToolCalls: 2, Agent: model.AgentCodex, Title: "Map the cavern", Models: []string{"gpt-5.6-sol"},
 		Usage: []model.Usage{{Model: "gpt-5.6-sol", InputTokens: 8_000, OutputTokens: 2_000}}, ModelCosts: map[string]float64{"gpt-5.6-sol": 0.12},
 		ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5.6-sol": {Input: testCostBuckets(8_000, 0.08), Output: testCostBuckets(2_000, 0.04)}}, Cost: model.Cost{USD: 0.12},
 	}
 	scout := &model.Session{
-		ID: "scout", Agent: model.AgentClaude, Title: "Scout the ridge", Models: []string{"claude-opus-4-8"},
+		ID: "scout", Messages: 3, ToolCalls: 5, Agent: model.AgentClaude, Title: "Scout the ridge", Models: []string{"claude-opus-4-8"},
 		Usage: []model.Usage{{Model: "claude-opus-4-8", InputTokens: 40_000, OutputTokens: 5_000}}, ModelCosts: map[string]float64{"claude-opus-4-8": 0.32},
 		ModelCostBreakdowns: map[string]model.CostBreakdown{"claude-opus-4-8": {Input: testCostBuckets(40_000, 0.20), Output: testCostBuckets(5_000, 0.12)}}, Cost: model.Cost{USD: 0.32}, Subagents: []*model.Session{mapper},
 	}
-	root := &model.Session{
-		ID: "route", Agent: model.AgentClaude, Path: "/workspace/starship/route.jsonl", CWD: "/workspace/starship", Project: "starship", Title: "Plan route",
+	return &model.Session{
+		ID: "route", Messages: 5, ToolCalls: 7, Agent: model.AgentClaude, Path: "/workspace/starship/route.jsonl", CWD: "/workspace/starship", Project: "starship", Title: "Plan route",
 		Models: []string{"claude-opus-4-8"}, GitBranch: "orbit/alpha", StartedAt: goldenNow.Add(-20 * time.Minute), UpdatedAt: goldenNow,
 		Usage: []model.Usage{rootUsage}, ModelCosts: map[string]float64{"claude-opus-4-8": rootCost.USD},
 		ModelCostBreakdowns: map[string]model.CostBreakdown{"claude-opus-4-8": calculator.Breakdown(rootUsage)}, Cost: rootCost, Subagents: []*model.Session{scout},
 	}
-	m := newModelWithClock([]*model.Session{root}, nil, func() time.Time { return goldenNow })
-	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 38))
-	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	for range 2 {
-		tm.Send(tea.KeyMsg{Type: tea.KeyTab})
-	}
-	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "total = own") }, teatest.WithDuration(time.Second))
-	if err := tm.Quit(); err != nil {
-		t.Fatal(err)
-	}
-	final := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second)).(Model)
-
-	teatest.RequireEqualOutput(t, []byte(normalizeGolden(final.View())))
 }
 
 func normalizeGolden(view string) string {
@@ -310,7 +312,7 @@ func normalizeGolden(view string) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
-func TestGoldenInfoUnattributedFrame(t *testing.T) {
+func TestGoldenOverviewUnattributedFrame(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	usage := model.Usage{Model: "gpt-5.6", InputTokens: 120_000, CacheReadTokens: 80_000, OutputTokens: 8_000, InputIncludesCacheRead: true}
 	root := &model.Session{
@@ -323,9 +325,7 @@ func TestGoldenInfoUnattributedFrame(t *testing.T) {
 	m := newModelWithClock([]*model.Session{root}, nil, func() time.Time { return goldenNow })
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 38))
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	for range 2 {
-		tm.Send(tea.KeyMsg{Type: tea.KeyTab})
-	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
 	teatest.WaitFor(t, tm.Output(), func(output []byte) bool { return strings.Contains(string(output), "unattributed:") }, teatest.WithDuration(time.Second))
 	if err := tm.Quit(); err != nil {
 		t.Fatal(err)

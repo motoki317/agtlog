@@ -15,6 +15,7 @@
       "started_at": "2026-08-05T07:41:12+09:00",
       "updated_at": "2026-08-05T09:12:04+09:00",
       "messages": 1,
+      "turns": 4,
       "subagents": 1,
       "has_error": false,
       "tokens": {
@@ -47,6 +48,7 @@
       "started_at": "2026-08-05T05:50:00+09:00",
       "updated_at": "2026-08-05T06:12:04+09:00",
       "messages": 2,
+      "turns": 2,
       "subagents": 0,
       "has_error": false,
       "tokens": {

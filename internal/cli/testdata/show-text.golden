@@ -4,6 +4,7 @@ PROJECT	forge
 TITLE	Repair relay
 TOKENS	40
 COST	0.03!
+TURNS	4	self=2	descendants=2
 SUBAGENT	claude:session-claude#scout
 [0]	07:41:12	user	Repair the relay
 [1]	09:01:00	tool-call	Bash(inspect relay) -> exit 7  1.0s  ctx 30

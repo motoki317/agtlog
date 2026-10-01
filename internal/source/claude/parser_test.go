@@ -148,8 +148,8 @@ func parseFlatSidecarBaseline(t *testing.T) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); got != "claude-parser-v18" {
-		t.Fatalf("CacheFingerprint() = %q, want parse-only v18 fingerprint", got)
+	if got := testParser().CacheFingerprint(); got != "claude-parser-v19" {
+		t.Fatalf("CacheFingerprint() = %q, want tool-count v19 fingerprint", got)
 	}
 }
 
@@ -570,7 +570,7 @@ func TestParseRerootsFlatParentWhoseDirectorySubtreeWouldExceedDepthLimit(t *tes
 			t.Fatal(err)
 		}
 		id := fmt.Sprintf("nested-%02d", index)
-		current = filepath.Join(childDir, "agent-"+id+".jsonl")
+		current = filepath.Join(childDir, "n.jsonl")
 		content := `{"type":"user","agentId":` + strconv.Quote(id) + `,"message":{"content":"Inspect seedlings"}}` + "\n"
 		if err := os.WriteFile(current, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
@@ -1208,7 +1208,7 @@ func TestParseBuildsUnifiedSessionMetadata(t *testing.T) {
 	}
 }
 
-func TestParseCountsUserAndAssistantMessages(t *testing.T) {
+func TestParseCountsMessagesAndToolCalls(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session-count.jsonl")
 	lines := []string{
 		`{"type":"user","timestamp":"2026-01-02T03:00:00Z","sessionId":"s","message":{"role":"user","content":"First question"}}`,
@@ -1216,6 +1216,7 @@ func TestParseCountsUserAndAssistantMessages(t *testing.T) {
 		`{"type":"user","timestamp":"2026-01-02T03:00:20Z","sessionId":"s","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"file.txt"}]}}`,
 		`{"type":"assistant","timestamp":"2026-01-02T03:00:30Z","sessionId":"s","message":{"id":"a2","model":"claude-opus-4-8","content":[{"type":"text","text":"Answer two"}],"usage":{"input_tokens":12,"output_tokens":6}}}`,
 		`{"type":"assistant","timestamp":"2026-01-02T03:00:40Z","sessionId":"s","message":{"id":"a3","model":"claude-opus-4-8","content":[{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"x"}}],"usage":{"input_tokens":8,"output_tokens":4}}}`,
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:50Z","sessionId":"s","message":{"content":[{"type":"tool_use","id":"t3","name":"Agent","input":{}},{"type":"tool_use","id":"t4","name":"Task","input":{}},{"type":"tool_use","id":"t5","name":"Workflow","input":{}},{"type":"thinking","thinking":"Plan"},{"type":"text","text":" "},{"type":"server_tool_use","name":"advisor"}]}}`,
 	}
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1228,6 +1229,9 @@ func TestParseCountsUserAndAssistantMessages(t *testing.T) {
 	// and the tool-only assistant record are turns of tooling, not messages.
 	if session.Messages != 3 {
 		t.Errorf("Parse().Messages = %d, want 3", session.Messages)
+	}
+	if session.ToolCalls != 5 {
+		t.Errorf("Parse().ToolCalls = %d, want 5", session.ToolCalls)
 	}
 }
 

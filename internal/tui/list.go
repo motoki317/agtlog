@@ -22,7 +22,7 @@ const (
 	listModelWidth     = 13
 	listAgeWidth       = 4
 	listTimeWidth      = 15
-	listMessagesWidth  = 5
+	listTurnsWidth     = 5
 	listSubagentsWidth = 4
 	listCostWidth      = 7
 	listCursorWidth    = 2
@@ -36,9 +36,8 @@ const (
 	columnTitle
 	columnModel
 	columnAge
-	columnMessages
+	columnTurns
 	columnSubagents
-	columnTokens
 	columnCost
 )
 
@@ -56,7 +55,7 @@ var sessionListColumnOrder = []listColumnKind{
 	columnTitle,
 	columnModel,
 	columnAge,
-	columnMessages,
+	columnTurns,
 	columnSubagents,
 	columnCost,
 }
@@ -64,6 +63,7 @@ var sessionListColumnOrder = []listColumnKind{
 type sessionPresentation struct {
 	cost          model.Cost
 	subagentCount int
+	turns         int
 	model         string
 }
 
@@ -71,7 +71,7 @@ func newSessionPresentation(session *model.Session) sessionPresentation {
 	cost := session.OwnedCost()
 	return sessionPresentation{
 		cost: cost, subagentCount: subagentCount(session),
-		model: shortModelsWithCost(session, cost),
+		model: shortModelsWithCost(session, cost), turns: session.TotalTurns(),
 	}
 }
 
@@ -149,11 +149,11 @@ func listColumns(width int, absolute ...bool) []listColumn {
 		{kind: columnTitle, title: "TITLE", width: listTitleWidth},
 		{kind: columnModel, title: "MODEL", width: listModelWidth},
 		{kind: columnAge, title: timeTitle, width: timeWidth, right: true, absoluteTime: absoluteTime},
-		{kind: columnMessages, title: "MSGS", width: listMessagesWidth, right: true},
+		{kind: columnTurns, title: "TURNS", width: listTurnsWidth, right: true},
 		{kind: columnSubagents, title: "SUBS", width: listSubagentsWidth, right: true},
-		{kind: columnCost, title: "$", width: listCostWidth, right: true},
+		{kind: columnCost, title: "COST", width: listCostWidth, right: true},
 	}
-	for _, kind := range []listColumnKind{columnModel, columnMessages, columnSubagents, columnProject, columnAge} {
+	for _, kind := range []listColumnKind{columnModel, columnTurns, columnSubagents, columnProject, columnAge} {
 		if listColumnsWidth(columns) <= width {
 			break
 		}
@@ -243,8 +243,8 @@ func sessionCellWithPresentation(session *model.Session, presentation sessionPre
 			return formatDetailTime(session.UpdatedAt, sessionSpansMultipleDates(session))
 		}
 		return formatAge(now, session.UpdatedAt)
-	case columnMessages:
-		return compactCount(int64(session.Messages), column.width)
+	case columnTurns:
+		return compactCount(int64(presentation.turns), column.width)
 	case columnSubagents:
 		if presentation.subagentCount == 0 {
 			return ""
@@ -653,7 +653,7 @@ func styleSessionCell(cell string, session *model.Session, presentation sessionP
 			agentStyle = styles.codex
 		}
 		return agentStyle.Render(cell)
-	case columnAge, columnMessages:
+	case columnAge, columnTurns:
 		return styles.muted.Render(cell)
 	case columnSubagents:
 		return styles.accent.Render(cell)

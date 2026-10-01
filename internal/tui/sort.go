@@ -28,7 +28,7 @@ func (s sortState) press(kind listColumnKind) sortState {
 
 func preferDescending(kind listColumnKind) bool {
 	switch kind {
-	case columnMessages, columnSubagents, columnTokens, columnCost:
+	case columnTurns, columnSubagents, columnCost:
 		return true
 	default:
 		return false
@@ -48,12 +48,10 @@ func compareSessionColumnValue(kind listColumnKind, left, right *model.Session) 
 		result = strings.Compare(shortModelsWithCost(left, left.OwnedCost()), shortModelsWithCost(right, right.OwnedCost()))
 	case columnAge:
 		result = left.UpdatedAt.Compare(right.UpdatedAt)
-	case columnMessages:
-		result = cmp.Compare(left.Messages, right.Messages)
+	case columnTurns:
+		result = cmp.Compare(left.TotalTurns(), right.TotalTurns())
 	case columnSubagents:
 		result = cmp.Compare(subagentCount(left), subagentCount(right))
-	case columnTokens:
-		result = cmp.Compare(left.OwnedUsage().TotalTokens(), right.OwnedUsage().TotalTokens())
 	case columnCost:
 		result = cmp.Compare(normalizedUSD(left.OwnedCost().USD), normalizedUSD(right.OwnedCost().USD))
 	}
@@ -79,12 +77,10 @@ func sortColumnLabel(kind listColumnKind) string {
 		return "model"
 	case columnAge:
 		return "age"
-	case columnMessages:
-		return "msgs"
+	case columnTurns:
+		return "turns"
 	case columnSubagents:
 		return "subs"
-	case columnTokens:
-		return "tokens"
 	case columnCost:
 		return "cost"
 	default:

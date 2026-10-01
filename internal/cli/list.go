@@ -91,7 +91,7 @@ func parseListOptions(args []string, help io.Writer) (listOptions, error) {
 	flags.StringVar(&options.query, "query", "", "fuzzy-match agent, project, and title")
 	flags.StringVar(&options.since, "since", "", "minimum update time: RFC3339, local date, or duration")
 	flags.StringVar(&options.until, "until", "", "maximum update time: RFC3339, local date, or duration")
-	flags.StringVar(&options.sort, "sort", "updated", "sort by updated, started, tokens, cost, or messages")
+	flags.StringVar(&options.sort, "sort", "updated", "sort by updated, started, tokens, cost, turns, or messages")
 	flags.StringVar(&options.order, "order", "desc", "sort order: asc or desc")
 	flags.IntVar(&options.limit, "limit", 50, "maximum sessions to return")
 	flags.IntVar(&options.offset, "offset", 0, "sessions to skip")
@@ -102,7 +102,7 @@ func parseListOptions(args []string, help io.Writer) (listOptions, error) {
 	if err := options.common.validate(); err != nil {
 		return listOptions{}, err
 	}
-	if !slices.Contains([]string{"updated", "started", "tokens", "cost", "messages"}, options.sort) {
+	if !slices.Contains([]string{"updated", "started", "tokens", "cost", "turns", "messages"}, options.sort) {
 		return listOptions{}, usageError(fmt.Sprintf("invalid sort %q", options.sort))
 	}
 	if options.order != "asc" && options.order != "desc" {
@@ -175,6 +175,8 @@ func sortListSessions(sessions []*model.Session, field, order string) {
 			result = cmp.Compare(left.OwnedUsage().TotalTokens(), right.OwnedUsage().TotalTokens())
 		case "cost":
 			result = cmp.Compare(costDTO(left.OwnedCost()).USD, costDTO(right.OwnedCost()).USD)
+		case "turns":
+			result = cmp.Compare(left.TotalTurns(), right.TotalTurns())
 		case "messages":
 			result = cmp.Compare(left.Messages, right.Messages)
 		default:

@@ -30,7 +30,7 @@ The list fills the terminal with three stacked regions:
 
 The detail screen uses the same structure. A rounded `Session` panel contains three metadata
 lines, a rounded tab panel consumes the remaining height, and an unbordered detail key bar sits at
-the bottom. The tab panel leads with the active `Timeline`, `Subagents`, or `Info` name and shows
+the bottom. The tab panel leads with the active `Timeline` or `Overview` name and shows
 inactive names faint when space permits. The help view is a full-width rounded panel. Every view
 recomputes its panel, viewport, and column geometry after a terminal resize, including detail
 screens stored beneath a drilled child.
@@ -77,13 +77,13 @@ profiles use explicit palette fallbacks so the base, prompt, and selection backg
 distinct after color conversion.
 
 The selected list row is one full-width highlight bar with a single foreground color. Unselected
-rows use the agent color in `AGENT`, the accent color in `SUBS`, muted `AGE` and `MSGS`, and the
+rows use the agent color in `AGENT`, the accent color in `SUBS`, muted `AGE` and `TURNS`, and the
 estimated style for `~$`.
 
 ## Session columns
 
 The list interleaves all agents and shows one row per top-level session. Subagents do not become
-separate rows; their tokens and cost are included recursively in the parent.
+separate rows. Their turns, tokens, and cost are included recursively in the parent.
 
 | Column | Width and alignment | Content | First sort |
 | --- | --- | --- | --- |
@@ -92,15 +92,15 @@ separate rows; their tokens and cost are included recursively in the parent.
 | `TITLE` | 20 minimum, left | Agent title or first useful user prompt; absorbs remaining width | A→Z |
 | `MODEL` | 13, left | Costliest model, plus `+N` and missing-pricing `!` markers | A→Z |
 | `AGE` | 4, right | Relative time such as `5m`, `2h`, `4d`, or `1.2y` | Oldest first |
-| `MSGS` | 5, right | Own message count | Largest first |
+| `TURNS` | 5, right | User messages, agent messages, and tool calls, including all descendants | Largest first |
 | `SUBS` | 4, right | Count of subagents folded recursively into the row; blank when none | Largest first |
-| `$` | 7, right | Recursive cost; Codex estimates use `~$` and partial totals use `!` | Largest first |
+| `COST` | 7, right | Recursive cost; Codex estimates use `~$` and partial totals use `!` | Largest first |
 
 Columns have one space between them. Header and data rows use identical widths and alignment.
 Slack grows `TITLE` first, then `PROJECT` up to 18 columns, then returns to `TITLE`. When the
-minimum set does not fit, columns disappear in this order: `MODEL`, `MSGS`, `SUBS`, `PROJECT`,
+minimum set does not fit, columns disappear in this order: `MODEL`, `TURNS`, `SUBS`, `PROJECT`,
 then `AGE`.
-At ordinary narrow widths the retained core is `AGENT TITLE $`; at smaller physical widths the
+At ordinary narrow widths the retained core is `AGENT TITLE COST`; at smaller physical widths the
 title shrinks and the lowest-value numeric field eventually disappears. Rows never wrap or cross
 the panel border.
 
@@ -164,8 +164,8 @@ triggered. Each billed request then reports its post-output total. These request
 fall without a compaction; a compaction row reports its logged post-compaction value.
 When a billed request has no eligible content row, a muted `unattributed usage` row carries its
 model, tokens, cost, and context. If cumulative usage cannot be partitioned safely into request
-deltas for a counter segment, its request rows remain unpriced. The Info tab reports the
-authoritative aggregate as `unattributed` usage under Cost, with tokens and cost per model.
+deltas for a counter segment, its request rows remain unpriced. Overview reports the
+authoritative aggregate as `unattributed` usage below Activity, with tokens and cost per model.
 A secondary line explains why that span has no turn costs. Clean segments retain their request metrics.
 
 Indentation is reserved for what a row contains. A prompt with more than one line, an assistant
@@ -175,9 +175,8 @@ first, followed by a muted `output:` section. Non-file tools and multiline comma
 input. Each section keeps its head and tail when it exceeds the preview line cap and inserts one
 `… N lines hidden …` row.
 
-`E` and `C` set the fold state every row takes unless the reader has folded that row itself. A
-followed session keeps appending rows, so the choice governs what arrives next as well as what is
-already on screen, and a drilled subagent opens under the same state.
+`E` and `C` replace individual Timeline fold choices and set the state for existing and incoming
+rows. A drilled subagent opens under the same state.
 
 A subagent never expands inline. `enter` or `l` on its row pushes the current detail state and opens
 the child on its Timeline tab. The `Session` title carries the project and ancestor session labels
@@ -185,28 +184,53 @@ as a `›`-separated breadcrumb. `esc` or `h` restores the nearest stored parent
 root returns to the session list. Each child inherits its parent's wrap setting, while later wrap
 changes affect only the active screen.
 
-The Subagents tab lists every descendant in pre-order. Its cleared order sorts siblings within
-each parent by `StartedAt`, oldest first, so descendants remain beneath their parent and active
-siblings do not move as their `UpdatedAt` changes. Column sorts also reorder siblings rather than
-the flattened list. The `AGE` column is the exception to the cleared key: it sorts the displayed
-`UpdatedAt` value. Nested descendants are indented by depth; each row shows the agent, title,
-costliest model, recursive tokens, recursive cost, and relative age. Age is omitted first under
-width pressure so token and cost cells remain intact. Agent, token, and estimated-cost cells
-receive their semantic styles only after the plain row is fitted. The tab has its own selection,
-column focus, and sort state, supports step and edge movement, and drills into the selected session
-on Timeline. A session without descendants shows `No subagents`.
+### Overview
+
+Overview combines an Activity table, own-model cost blocks, and the Subagents table.
+Activity shows `TURNS`, `TOKENS`, and `COST`, right-aligned, for `own`, `subagents`, and `total`.
+A session without subagents shows only `own`. Tokens and cost use the same owned split as the
+header, so replayed Claude requests are subtracted. Under width pressure, Activity drops `TOKENS`.
+Replay attribution and unreconciled Codex usage appear below Activity only when applicable.
+
+Own model costs show each model's full display name and pricing markers, followed by its rate
+lines, logged-cost overrides, replayed amounts, and subtotals. These blocks occupy the scrollable
+viewport and are not focusable. A session without model usage shows `No own model usage.`
+The rate-table estimate note appears only when an own model uses an estimated rate.
+
+The Subagents table lists every descendant in pre-order. Its cleared order sorts siblings within
+each parent by `UpdatedAt` descending, like Sessions. Zero timestamps sort last, and ties use
+session identity. The cleared header shows no arrow. Running siblings can move during live
+refreshes, while selection follows the session identity. Column sorts also reorder siblings
+within each parent, so descendants remain beneath their parent.
+
+Nested descendants are indented by depth. Each row shows `AGENT`, `TITLE`, `MODEL`, `TURNS`,
+`COST`, and `AGE`. Turns and cost include all descendants. `TURNS` uses five right-aligned cells
+and the muted style, like Sessions. Under width pressure, `AGE` disappears first, then `TURNS`.
+Next, `TITLE` shrinks to four cells and `MODEL` to nine, before `MODEL` disappears.
+Further pressure shrinks `TITLE`, `AGENT`, then `COST` to one cell each.
+Columns then disappear from the right until the row fits.
+
+Only subagent rows are focusable. On first entry, Overview selects the first subagent.
+`j`/`k`, up/down arrows, edge keys, and mouse clicks move selection among subagents.
+`g` also scrolls to the top. Page keys and the mouse wheel scroll the viewport independently.
+`enter` or `l` opens the selected subagent on Timeline; back restores the parent's selection.
+Column focus and sort shortcuts act on the Subagents table whenever Overview is active.
+A drilled child inherits column focus and sort. A session without subagents has no selection;
+`j`/`k` scroll its viewport. An empty table shows `No subagents`.
+Nested own-cost splits are available in each child's Overview.
+
+### Timeline and item navigation
 
 Timeline rows wrap by default. `w` switches the current detail screen between hard wrapping and
 truncation. Wrapping operates on plain text before color is applied; every visual row retains
 the logical row's role, and selection highlights all wrapped rows belonging to the selected item.
 
-`space` is the only in-place expansion key. `enter` or `l` opens the focused row: a subagent opens
+On Timeline, `space` toggles expansion. `enter` or `l` opens the focused row: a subagent opens
 its session detail, while an assistant reply, tool, thinking row, user message, compaction, system
-event, or usage event opens a pushed item view. Item views use the Info tab's section vocabulary
-and order: Event, Request when the row carries usage, kind-specific content, then Raw when the row
-has a source record.
+event, or usage event opens a pushed item view. Item views use this section order: Event,
+Request when the row carries usage, kind-specific content, then Raw when the row has a source record.
 Event presents metadata as aligned label and value columns. Request shows token flow, request
-context after output where one exists, and the same per-bucket rate terms used by Info before
+context after output where one exists, and the same per-bucket rate terms used by Overview before
 closing with a precise total. A substituted rate names both the published stand-in and the logged
 model before the arithmetic.
 
@@ -219,7 +243,8 @@ title extends the session breadcrumb with a short event label. Its viewport supp
 ## Key budget
 
 Bindings stay single-key and follow terminal and Vim conventions:
-The detail key bar states the primary split as `space toggle · enter open`.
+The Timeline key bar states the primary split as `space toggle · enter open`. Overview adds
+table sort hints.
 
 | Screen | Keys | Action |
 | --- | --- | --- |
@@ -234,13 +259,15 @@ The detail key bar states the primary split as `space toggle · enter open`.
 | List | `enter` | Open detail |
 | List | `r` | Rediscover sessions |
 | Detail | `j`/`k`, `↑`/`↓`, `g`/`G` | Move and scroll; `g`/`G` jumps to top or bottom |
-| Detail | `space` | Expand or collapse the selected row's body; no-op on subagents |
+| Timeline | `space` | Expand or collapse the selected row's body; no-op on subagents |
 | Timeline | `←`/`→` | Collapse or expand the focused row |
 | Timeline | `E` / `C` | Expand or collapse every row, including the rows that arrive later |
-| Subagents | `←`/`→`, `shift+O`, `shift+A`, `shift+N` | Move column focus or cycle the focused, AGE, or TITLE sort |
-| Detail | `enter`, `l` | Open the focused row; subagents open session detail and other rows open an item view |
-| Detail | `tab`/`shift+tab` | Cycle Timeline, Subagents, and Info |
-| Detail | `w` | Toggle timeline wrapping; wrapping is the default |
+| Overview | `pgup`/`pgdn` | Scroll the viewport independently of selection |
+| Overview | `←`/`→`, `shift+O`, `shift+A`, `shift+N` | Move column focus or cycle the focused, AGE, or TITLE sort |
+| Timeline | `enter`, `l` | Open the focused subagent or item view |
+| Overview | `enter`, `l` | Open the selected subagent on Timeline |
+| Detail | `tab`/`shift+tab` | Switch between Timeline and Overview |
+| Detail | `w` | Toggle wrapping of prose and model rates; table rows stay fitted |
 | Detail | `esc`/`h` | Pop the current detail screen; return to the list at the root |
 | Item | `j`/`k`, `↑`/`↓`, `g`/`G` | Scroll by a row or jump to an edge |
 | Item | `w` | Toggle wrapping; wrapping is the default |

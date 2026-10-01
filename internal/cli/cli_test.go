@@ -212,6 +212,43 @@ func TestListFiltersSortsAndPages(t *testing.T) {
 	}
 }
 
+func TestListSortsRecursiveTurnsAndPreservesMessages(t *testing.T) {
+	registry := &fakeRegistry{sessions: []*model.Session{
+		{ID: "own", Agent: model.AgentClaude, Messages: 5},
+		{ID: "tree", Agent: model.AgentClaude, Messages: 1, ToolCalls: 2, Subagents: []*model.Session{{Group: true, Subagents: []*model.Session{{Messages: 3, ToolCalls: 4}}}}},
+	}}
+	for _, test := range []struct{ sort, order, first string }{
+		{"turns", "desc", "tree"}, {"turns", "asc", "own"}, {"messages", "desc", "own"},
+	} {
+		var output bytes.Buffer
+		if err := Execute(context.Background(), []string{"list", "--sort", test.sort, "--order", test.order}, &output, io.Discard, func(context.Context, Options) (Registry, error) { return registry, nil }); err != nil {
+			t.Fatal(err)
+		}
+		var response ListResponse
+		if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.SchemaVersion != 1 || len(response.Sessions) != 2 || response.Sessions[0].Ref != "claude:"+test.first {
+			t.Fatalf("%s %s: %#v", test.sort, test.order, response)
+		}
+		for _, session := range response.Sessions {
+			if session.Ref == "claude:tree" && (session.Turns != 10 || session.Messages != 1) {
+				t.Fatalf("tree = %#v, want turns 10 and messages 1", session)
+			}
+		}
+	}
+}
+
+func TestSessionJSONAlwaysEmitsTurns(t *testing.T) {
+	encoded, err := json.Marshal(sessionDTO(&model.Session{}, "claude:empty"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(encoded, []byte(`"turns":0`)) {
+		t.Fatalf("zero turns missing: %s", encoded)
+	}
+}
+
 func TestListPagingDoesNotOverflow(t *testing.T) {
 	registry := &fakeRegistry{sessions: []*model.Session{{ID: "session-a", Agent: model.AgentClaude}}}
 	var output bytes.Buffer

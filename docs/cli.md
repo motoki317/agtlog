@@ -114,6 +114,7 @@ and `updated_at`.
 | `started_at` | timestamp | Start time for this node. |
 | `updated_at` | timestamp | Latest time for this node or any descendant. |
 | `messages` | integer | Message count for this node, excluding descendants. |
+| `turns` | integer, optional | User messages, agent messages, and tool calls for this node and all descendants, including Workflow children. Always emitted by current producers, absent from older v1 producers. |
 | `subagents` | integer | Recursive agent transcript count. Workflow group containers are excluded. |
 | `has_error` | boolean | Whether this node reports an API error. |
 | `tokens` | token totals | Recursive owned token totals. |
@@ -188,10 +189,10 @@ of 5 August but excludes the rest of that day. The next date also includes exact
 its midnight because the boundary is inclusive; use an explicit final timestamp
 when that distinction matters.
 
-Use `--sort updated|started|tokens|cost|messages` and `--order asc|desc` to set the
+Use `--sort updated|started|tokens|cost|turns|messages` and `--order asc|desc` to set the
 order. Use `--limit N` and `--offset N` for pages. The default limit is 50.
 `--all` removes the limit. Equal sort values use agent and then root ID in
-ascending order.
+ascending order. `turns` sorts the recursive count. `messages` sorts only this node’s messages.
 
 For `list`, `show`, and `search`, `--all` sets `page.limit` to `0`. This value is a
 sentinel for an unbounded count request, not the number of items returned.
@@ -202,8 +203,12 @@ sentinel for an unbounded count request, not the number of items returned.
 `show` returns one session node, its direct subagent refs, its attribution split,
 and its event timeline.
 
-The `self` values under `totals.tokens` and `totals.cost` cover the selected node.
+The `self` values under `totals.tokens`, `totals.cost`, and `totals.turns` cover the selected node.
 The `descendants` values cover its recursive children, and `total` is their sum.
+`totals.turns` contains integer counts and is optional for older v1 producers.
+Current producers always emit it, including zero counts. `session.turns` remains
+the recursive total. Text output adds `TURNS` after `COST`, followed by the total,
+`self=<own>`, and `descendants=<descendants>` as tab-separated fields.
 
 Each event always contains integer `index`, timestamp string `timestamp`, event-kind
 string `kind`, string `text`, string `model`, and string array `truncated`. The

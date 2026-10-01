@@ -528,7 +528,7 @@ func (m *Model) activateDetailSelection() (bool, tea.Cmd) {
 		if label := detailCrumbLabel(detail.session); label != "" {
 			crumbs = append(crumbs, label)
 		}
-		if detail.tab == tabSubagents {
+		if detail.tab == tabOverview {
 			crumbs = append(crumbs, subagentCrumbLabels(detail.session, subagent)...)
 		}
 		m.detailStack = append(m.detailStack, m.detail)
@@ -825,16 +825,11 @@ func captureDetailRestoreState(detail *detailState) detailRestoreState {
 		tab:                 detail.tab,
 		subagentSort:        detail.subagentSort,
 		subagentColumnFocus: detail.subagentColumnFocus,
-		subagentSelection:   detail.subagentSelection,
 		expanded:            make(map[string]bool, len(detail.expanded)),
+		tabFocusKeys:        detail.tabFocusKeys,
 	}
 	if len(detail.focusables) > 0 {
 		restore.focusKey = detail.focusables[detail.focus].key
-	}
-	if detail.tab == tabSubagents {
-		if session := detail.focusedSubagent(); session != nil {
-			restore.selectedSubagent = sessionIdentity(session)
-		}
 	}
 	for key, expanded := range detail.expanded {
 		restore.expanded[key] = expanded
@@ -852,30 +847,20 @@ func (m *Model) replacementDetailStateFromRestore(restore detailRestoreState, se
 	replacement.tab = restore.tab
 	replacement.subagentSort = restore.subagentSort
 	replacement.subagentColumnFocus = restore.subagentColumnFocus
-	replacement.subagentSelection = restore.subagentSelection
+	replacement.tabFocusKeys = restore.tabFocusKeys
 	replacement.focus = restore.focus
 	if restore.pinned {
+		replacement.tabFocusKeys[tabTimeline] = ""
 		replacement.focus = -1
 	}
 	for key, expanded := range restore.expanded {
 		replacement.expanded[key] = expanded
 	}
 	replacement.resize(m.width, m.height)
-	if replacement.tab == tabSubagents {
+	if !restore.pinned {
 		replacement.viewport.SetYOffset(restore.viewportOffset)
-	}
-	if replacement.tab == tabSubagents && restore.selectedSubagent != "" {
-		for index, item := range replacement.subagents {
-			if sessionIdentity(item.s) == restore.selectedSubagent {
-				replacement.subagentSelection = index
-				replacement.selectedLine = subagentDetailLine(index)
-				replacement.rebuildRendered()
-				break
-			}
-		}
-	} else if replacement.tab == tabTimeline && !restore.pinned {
 		for index, item := range replacement.focusables {
-			if item.key == restore.focusKey && index != replacement.focus {
+			if item.key == restore.focusKey {
 				oldLine := replacement.selectedLine
 				replacement.focus = index
 				replacement.updateSelection(oldLine, item.line)
@@ -885,7 +870,8 @@ func (m *Model) replacementDetailStateFromRestore(restore detailRestoreState, se
 	}
 	if restore.pinned {
 		replacement.anchorBottom()
-	} else if replacement.tab != tabSubagents {
+	}
+	if replacement.tab == tabTimeline && !restore.pinned {
 		replacement.viewport.SetYOffset(restore.viewportOffset)
 	}
 	return replacement
@@ -1063,7 +1049,7 @@ func (m *Model) refreshOpenOwnership(identity string, previous ownershipAttribut
 		return
 	}
 	copyOwnershipAttribution(root.session, summary)
-	if root.tab == tabInfo {
+	if root.tab == tabOverview {
 		root.rebuildPreservingViewport()
 	}
 }
@@ -1117,9 +1103,6 @@ func (m *Model) applyChildDetailLoaded(loaded childDetailLoadedMsg) (Model, tea.
 				restore.focus = prior.focus
 				restore.pinned = prior.pinned
 				restore.viewportOffset = prior.viewportOffset
-			}
-			if restore.selectedSubagent == "" {
-				restore.selectedSubagent = prior.selectedSubagent
 			}
 		}
 		replacement := m.replacementDetailStateFromRestore(restore, loaded.session, previous.crumbs)
