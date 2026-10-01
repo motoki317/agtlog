@@ -7,33 +7,28 @@ status: "accepted"
 # Context
 
 Sessions uses newest-update-first order when sorting is cleared. Subagents used
-oldest-start-first order to keep running siblings stationary. The user chose
-consistent cleared order across both tables.
+oldest-start-first order to keep running siblings stationary. Consistent recency
+order lets readers find recent work the same way in both tables.
 
 # Decision
 
 Cleared Subagents order uses `UpdatedAt` descending within each parent, with
 zero timestamps last and session identity as the tie-breaker. The header shows
-no arrow. The traversal sorts copied sibling slices and preserves pre-order,
-so children stay beneath their parents. Selection follows session identity
-across rebuilds and live refreshes.
+no arrow. Selection follows session identity across rebuilds and live refreshes.
 
-This decision supersedes the cleared-order paragraph and the rejected
-“Using `UpdatedAt` for cleared Subagents order” alternative in
-[Table sorting](./20260722-table-sorting.md), including its stationary-siblings consequence.
+This decision supersedes the cleared-order parts of
+[Table sorting](./20260722-table-sorting.md), as listed in that ADR's Notes.
 Its column focus, sort cycle, and tree traversal decisions still apply.
 
 # Consequences
 
-The most recently updated sibling appears first in both tables. Running
-siblings can move as their timestamps advance, including updates from descendants.
-The user accepts that movement in exchange for consistent recency order.
+Running siblings can move as their timestamps advance, including updates from descendants.
 
 # Impact
 
-The change affects the TUI Subagents table's cleared order. Explicit sorts,
-column focus, and the three-state sort cycle retain their behavior.
-The source session graph remains unchanged.
+The change affects cleared Subagents ordering in `internal/tui` and its ordering,
+selection, and golden-frame tests. Explicit sorts, column focus, and the three-state
+sort cycle retain their behavior. The source session graph remains unchanged.
 
 # Alternatives
 

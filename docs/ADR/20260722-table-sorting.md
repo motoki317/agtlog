@@ -68,7 +68,11 @@ paths, which provides no useful chronology.
 
 # Notes
 
-[Subagent age order](./20261001-subagent-age-order.md) supersedes the cleared-order paragraph, the rejected `UpdatedAt` alternative, and their stationary-siblings consequence.
+[Subagent age order](./20261001-subagent-age-order.md) supersedes the Decision sentence that chooses
+`StartedAt` for cleared order, the Context argument against `UpdatedAt`, and the rejected
+“Using `UpdatedAt` for cleared Subagents order” alternative. Its moving-siblings consequence also
+replaces the stationary-siblings consequence here.
 
-The focused-column interaction follows the k9s table pattern. Timeline and Info remain unsorted
-because neither tab is a table.
+The focused-column interaction follows the k9s table pattern.
+[Overview tab](./20261001-overview-tab.md) replaces Info and the separate Subagents
+tab. Only the Subagents table within Overview supports column sorting.

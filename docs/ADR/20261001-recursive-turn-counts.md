@@ -19,29 +19,35 @@ children of Workflow group nodes.
 
 Claude counts every assistant `tool_use` block, including Agent, Task, and
 Workflow spawns. Codex counts `function_call` and `custom_tool_call` response
-items outside the fork replay prefix. Tool outputs do not count as turns.
+items outside the [fork replay prefix](./20260726-codex-usage-ledger.md). Tool outputs do not count as turns.
 Claude counts nonempty user-text records and assistant text blocks as messages.
 Codex counts user and agent event messages, including completed-item wrappers.
-Tool-only assistant records add tool calls but no messages.
+Claude tool-only assistant records add tool calls but no messages.
 
 The TUI Sessions and Subagents tables show recursive `TURNS` counts.
-CLI list text shows the same count, and both list headers name cost `COST`.
+The Subagents table drops `TOKENS` so its activity columns match Sessions.
+CLI list text shows the same turn count.
 CLI JSON adds `turns` to the shared session object without changing `messages`
 or schema version 1. Current producers always emit `turns`, including zero.
 Consumers must tolerate its absence from older v1 producers.
 CLI sorting accepts both recursive `turns` and own `messages`.
 
+Overview Activity separates own, subagent, and total turns beside owned tokens
+and owned cost. A leaf shows only its own activity.
+CLI `show` adds `totals.turns` with integer `self`, `descendants`, and `total`
+counts. Older v1 producers omit this object. Text output shows the same split
+after `COST`. The shared `session.turns` field remains recursive.
+
 # Consequences
 
 The Subagents table replaces its token column with a five-cell turn column.
-The remaining width goes to the title. Tokens remain in Info and Timeline.
+The remaining width goes to the title. Tokens remain in Overview Activity and Timeline.
 
 # Impact
 
 Both summary parsers retain an own tool-call count. Their fingerprints advance
 to `claude-parser-v19` and `codex-parser-v26` to invalidate summaries without it.
-The cache envelope is unchanged. Codex checkpoint clones preserve the count.
-Render paths compute recursive turns once per row.
+The cache envelope is unchanged.
 
 # Alternatives
 
