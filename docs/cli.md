@@ -203,8 +203,12 @@ sentinel for an unbounded count request, not the number of items returned.
 `show` returns one session node, its direct subagent refs, its attribution split,
 and its event timeline.
 
-The `self` values under `totals.tokens` and `totals.cost` cover the selected node.
+The `self` values under `totals.tokens`, `totals.cost`, and `totals.turns` cover the selected node.
 The `descendants` values cover its recursive children, and `total` is their sum.
+`totals.turns` contains integer counts and is optional for older v1 producers.
+Current producers always emit it, including zero counts. `session.turns` remains
+the recursive total. Text output adds `TURNS` after `COST`, followed by the total,
+`self=<own>`, and `descendants=<descendants>` as tab-separated fields.
 
 Each event always contains integer `index`, timestamp string `timestamp`, event-kind
 string `kind`, string `text`, string `model`, and string array `truncated`. The

@@ -38,6 +38,11 @@
     "claude:session-claude#scout"
   ],
   "totals": {
+    "turns": {
+      "self": 2,
+      "descendants": 2,
+      "total": 4
+    },
     "tokens": {
       "self": {
         "uncached_input": 20,

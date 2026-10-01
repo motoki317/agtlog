@@ -521,6 +521,42 @@ func TestShowTotalsSeparateSelfAndDescendants(t *testing.T) {
 	}
 }
 
+func TestShowTurnTotals(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		session *model.Session
+		want    ScopedTurns
+	}{
+		{"zero", &model.Session{}, ScopedTurns{}},
+		{"leaf", &model.Session{Messages: 5, ToolCalls: 7}, ScopedTurns{Self: 12, Total: 12}},
+		{"nested", &model.Session{Messages: 5, ToolCalls: 7, Subagents: []*model.Session{
+			{Messages: 2, ToolCalls: 3, Subagents: []*model.Session{{Messages: 1, ToolCalls: 2}}},
+			{Group: true, Subagents: []*model.Session{{Messages: 1, ToolCalls: 2}}},
+		}}, ScopedTurns{Self: 12, Descendants: 11, Total: 23}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			totals := showTotals(test.session)
+			if totals.Turns != test.want {
+				t.Fatalf("turn totals = %#v, want %#v", totals.Turns, test.want)
+			}
+			if got := sessionDTO(test.session, "").Turns; got != totals.Turns.Total {
+				t.Fatalf("session.turns = %d, totals.turns.total = %d", got, totals.Turns.Total)
+			}
+		})
+	}
+}
+
+func TestShowTextIncludesTurnSplitAfterCost(t *testing.T) {
+	var output bytes.Buffer
+	response := ShowResponse{Totals: ShowTotals{Turns: ScopedTurns{Self: 12, Descendants: 11, Total: 23}}}
+	if err := writeShowText(&output, response); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "COST\t0.00!\nTURNS\t23\tself=12\tdescendants=11\n") {
+		t.Fatalf("show text missing turn split after cost:\n%s", output.String())
+	}
+}
+
 func TestShowRawPreservesExactRecordBytes(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	raw := []byte(`{ "z": 1, "a": [2, 3] }`)

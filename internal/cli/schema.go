@@ -108,7 +108,14 @@ type ScopedCost struct {
 	Total       Cost `json:"total"`
 }
 
+type ScopedTurns struct {
+	Self        int `json:"self"`
+	Descendants int `json:"descendants"`
+	Total       int `json:"total"`
+}
+
 type ShowTotals struct {
+	Turns  ScopedTurns  `json:"turns"`
 	Tokens ScopedTokens `json:"tokens"`
 	Cost   ScopedCost   `json:"cost"`
 }

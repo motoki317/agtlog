@@ -60,6 +60,9 @@ func writeShowText(output io.Writer, response ShowResponse) error {
 		terminalSafe(response.Session.Title), humanTokens(response.Session.Tokens.Total), humanCost(response.Session.Cost)); err != nil {
 		return err
 	}
+	if _, err := fmt.Fprintf(output, "TURNS\t%d\tself=%d\tdescendants=%d\n", response.Totals.Turns.Total, response.Totals.Turns.Self, response.Totals.Turns.Descendants); err != nil {
+		return err
+	}
 	for _, ref := range response.SubagentRefs {
 		if _, err := fmt.Fprintf(output, "SUBAGENT\t%s\n", terminalSafe(ref)); err != nil {
 			return err

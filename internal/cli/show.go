@@ -361,7 +361,9 @@ func showTotals(session *model.Session) ShowTotals {
 	descendantUsage := session.OwnedDescendantUsage()
 	selfCost := session.OwnedSelfCost()
 	descendantCost := session.OwnedDescendantCost()
+	ownTurns, totalTurns := session.Turns(), session.TotalTurns()
 	return ShowTotals{
+		Turns:  ScopedTurns{Self: ownTurns, Descendants: totalTurns - ownTurns, Total: totalTurns},
 		Tokens: ScopedTokens{Self: tokenTotals(selfUsage), Descendants: tokenTotals(descendantUsage), Total: tokenTotals(session.OwnedUsage())},
 		Cost:   ScopedCost{Self: costDTO(selfCost), Descendants: costDTO(descendantCost), Total: costDTO(session.OwnedCost())},
 	}
