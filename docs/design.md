@@ -77,13 +77,13 @@ profiles use explicit palette fallbacks so the base, prompt, and selection backg
 distinct after color conversion.
 
 The selected list row is one full-width highlight bar with a single foreground color. Unselected
-rows use the agent color in `AGENT`, the accent color in `SUBS`, muted `AGE` and `MSGS`, and the
+rows use the agent color in `AGENT`, the accent color in `SUBS`, muted `AGE` and `TURNS`, and the
 estimated style for `~$`.
 
 ## Session columns
 
 The list interleaves all agents and shows one row per top-level session. Subagents do not become
-separate rows; their tokens and cost are included recursively in the parent.
+separate rows. Their turns, tokens, and cost are included recursively in the parent.
 
 | Column | Width and alignment | Content | First sort |
 | --- | --- | --- | --- |
@@ -92,15 +92,15 @@ separate rows; their tokens and cost are included recursively in the parent.
 | `TITLE` | 20 minimum, left | Agent title or first useful user prompt; absorbs remaining width | A→Z |
 | `MODEL` | 13, left | Costliest model, plus `+N` and missing-pricing `!` markers | A→Z |
 | `AGE` | 4, right | Relative time such as `5m`, `2h`, `4d`, or `1.2y` | Oldest first |
-| `MSGS` | 5, right | Own message count | Largest first |
+| `TURNS` | 5, right | User messages, agent messages, and tool calls, including all descendants | Largest first |
 | `SUBS` | 4, right | Count of subagents folded recursively into the row; blank when none | Largest first |
-| `$` | 7, right | Recursive cost; Codex estimates use `~$` and partial totals use `!` | Largest first |
+| `COST` | 7, right | Recursive cost; Codex estimates use `~$` and partial totals use `!` | Largest first |
 
 Columns have one space between them. Header and data rows use identical widths and alignment.
 Slack grows `TITLE` first, then `PROJECT` up to 18 columns, then returns to `TITLE`. When the
-minimum set does not fit, columns disappear in this order: `MODEL`, `MSGS`, `SUBS`, `PROJECT`,
+minimum set does not fit, columns disappear in this order: `MODEL`, `TURNS`, `SUBS`, `PROJECT`,
 then `AGE`.
-At ordinary narrow widths the retained core is `AGENT TITLE $`; at smaller physical widths the
+At ordinary narrow widths the retained core is `AGENT TITLE COST`; at smaller physical widths the
 title shrinks and the lowest-value numeric field eventually disappears. Rows never wrap or cross
 the panel border.
 
@@ -186,15 +186,21 @@ root returns to the session list. Each child inherits its parent's wrap setting,
 changes affect only the active screen.
 
 The Subagents tab lists every descendant in pre-order. Its cleared order sorts siblings within
-each parent by `StartedAt`, oldest first, so descendants remain beneath their parent and active
-siblings do not move as their `UpdatedAt` changes. Column sorts also reorder siblings rather than
-the flattened list. The `AGE` column is the exception to the cleared key: it sorts the displayed
-`UpdatedAt` value. Nested descendants are indented by depth; each row shows the agent, title,
-costliest model, recursive tokens, recursive cost, and relative age. Age is omitted first under
-width pressure so token and cost cells remain intact. Agent, token, and estimated-cost cells
-receive their semantic styles only after the plain row is fitted. The tab has its own selection,
-column focus, and sort state, supports step and edge movement, and drills into the selected session
-on Timeline. A session without descendants shows `No subagents`.
+each parent by `UpdatedAt` descending, like Sessions. Zero timestamps sort last, and ties use
+session identity. The cleared header shows no arrow. Running siblings can move during live
+refreshes, while selection follows the session identity. Column sorts also reorder siblings
+within each parent, so descendants remain beneath their parent.
+
+Nested descendants are indented by depth. Each row shows `AGENT`, `TITLE`, `MODEL`, `TURNS`,
+`TOKENS`, `COST`, and `AGE`. Turns, tokens, and cost include all descendants. `TURNS` uses five
+right-aligned cells and the muted style, like Sessions. Under width pressure, `AGE` disappears
+first, then `TURNS`. Next, `TITLE` shrinks to four cells and `MODEL` to nine, before `MODEL` disappears.
+Further pressure shrinks `TITLE`, `AGENT`, `COST`, then `TOKENS` to one cell each.
+Columns then disappear from the right until the row fits.
+
+The tab has its own selection, column focus, and sort state. It supports step and edge movement
+and drills into the selected session on Timeline. A session without descendants shows
+`No subagents`.
 
 Timeline rows wrap by default. `w` switches the current detail screen between hard wrapping and
 truncation. Wrapping operates on plain text before color is applied; every visual row retains

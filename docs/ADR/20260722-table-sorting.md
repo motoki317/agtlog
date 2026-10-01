@@ -68,5 +68,7 @@ paths, which provides no useful chronology.
 
 # Notes
 
+[Subagent age order](./20261001-subagent-age-order.md) supersedes the cleared-order paragraph, the rejected `UpdatedAt` alternative, and their stationary-siblings consequence.
+
 The focused-column interaction follows the k9s table pattern. Timeline and Info remain unsorted
 because neither tab is a table.

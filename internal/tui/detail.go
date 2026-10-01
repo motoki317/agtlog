@@ -1037,7 +1037,11 @@ func formatTokenFlow(usage model.Usage) string {
 }
 
 func (d *detailState) rebuildSubagents() {
-	d.rebuildSubagentsKeeping("")
+	selected := ""
+	if session := d.focusedSubagent(); session != nil {
+		selected = sessionIdentity(session)
+	}
+	d.rebuildSubagentsKeeping(selected)
 }
 
 func (d *detailState) rebuildSubagentsKeeping(selected string) {
@@ -1067,7 +1071,7 @@ func (d *detailState) rebuildSubagentsKeeping(selected string) {
 			cost := formatCost(totalCost)
 			modelName := terminalText(shortModelsWithCost(session, totalCost), 96)
 			d.lines[subagentDetailLine(index)] = detailLine{
-				text: subagentRow(item, d.now, columns, modelName, tokens, cost), nowrap: true,
+				text: subagentRow(item, d.now, columns, modelName, session.TotalTurns(), tokens, cost), nowrap: true,
 				key: sessionIdentity(session), subagent: true, subagentSession: session, subagentTokens: tokens, subagentCost: cost, role: detailRow, agent: session.Agent,
 			}
 		}
@@ -1100,12 +1104,16 @@ func subagentColumns(width int) []listColumn {
 		{kind: columnAgent, title: "AGENT", width: listAgentWidth},
 		{kind: columnTitle, title: "TITLE", width: 20},
 		{kind: columnModel, title: "MODEL", width: listModelWidth},
+		{kind: columnTurns, title: "TURNS", width: listTurnsWidth, right: true},
 		{kind: columnTokens, title: "TOKENS", width: 6, right: true},
 		{kind: columnCost, title: "COST", width: listCostWidth, right: true},
 		{kind: columnAge, title: "AGE", width: listAgeWidth, right: true},
 	}
 	if listColumnsWidth(columns) > width {
 		columns = removeListColumn(columns, columnAge)
+	}
+	if listColumnsWidth(columns) > width {
+		columns = removeListColumn(columns, columnTurns)
 	}
 	for _, shrink := range []struct {
 		kind  listColumnKind
@@ -1146,6 +1154,7 @@ var subagentColumnOrder = []listColumnKind{
 	columnAgent,
 	columnTitle,
 	columnModel,
+	columnTurns,
 	columnTokens,
 	columnCost,
 	columnAge,
@@ -1169,7 +1178,7 @@ func subagentHeader(columns []listColumn, state sortState, focus listColumnKind,
 	}
 }
 
-func subagentRow(item flattenedSubagent, now time.Time, columns []listColumn, modelName, tokens, cost string) string {
+func subagentRow(item flattenedSubagent, now time.Time, columns []listColumn, modelName string, turns int, tokens, cost string) string {
 	session := item.s
 	cells := make([]string, len(columns))
 	for index, column := range columns {
@@ -1181,6 +1190,8 @@ func subagentRow(item flattenedSubagent, now time.Time, columns []listColumn, mo
 			value = subagentTitleCell(item, column.width)
 		case columnModel:
 			value = modelName
+		case columnTurns:
+			value = compactCount(int64(turns), column.width)
 		case columnTokens:
 			value = tokens
 		case columnCost:
@@ -1230,21 +1241,14 @@ func subagentTitleCell(item flattenedSubagent, width int) string {
 }
 
 func flattenSubagents(session *model.Session, state sortState) []flattenedSubagent {
+	if !state.active {
+		state = sortState{kind: columnAge, desc: true, active: true}
+	}
 	var flattened []flattenedSubagent
 	var appendChildren func(*model.Session, int, *subagentTreePosition)
 	appendChildren = func(parent *model.Session, depth int, parentPosition *subagentTreePosition) {
 		children := append([]*model.Session(nil), parent.Subagents...)
-		if state.active {
-			sortSessions(children, state)
-		} else {
-			sort.SliceStable(children, func(i, j int) bool {
-				left, right := children[i], children[j]
-				if left.StartedAt.IsZero() != right.StartedAt.IsZero() {
-					return !left.StartedAt.IsZero()
-				}
-				return left.StartedAt.Before(right.StartedAt)
-			})
-		}
+		sortSessions(children, state)
 		for index, child := range children {
 			last := index == len(children)-1
 			flattened = append(flattened, flattenedSubagent{
@@ -2536,6 +2540,16 @@ func (d *detailState) styleSubagentLine(line string, detail detailLine) string {
 	session := detail.subagentSession
 	tokens, cost := detail.subagentTokens, detail.subagentCost
 	var cells []styleCell
+	columnOffset := min(2, ansi.StringWidth(line))
+	for _, column := range d.visibleSubagentColumns() {
+		end := columnOffset + column.width
+		if column.kind == columnTurns {
+			startByte := len(ansi.Cut(line, 0, columnOffset))
+			endByte := startByte + len(ansi.Cut(line, columnOffset, end))
+			cells = append(cells, styleCell{start: startByte, end: endByte, style: d.styles.muted})
+		}
+		columnOffset = end + 1
+	}
 	agent := terminalText(string(session.Agent), 32)
 	if start := strings.Index(line, agent); start >= 0 {
 		cells = append(cells, styleCell{start: start, end: start + len(agent), style: d.agentStyle(session.Agent)})
@@ -2558,6 +2572,7 @@ func (d *detailState) styleSubagentLine(line string, detail detailLine) string {
 	if len(cells) == 0 {
 		return d.styles.row.Render(line)
 	}
+	sort.Slice(cells, func(i, j int) bool { return cells[i].start < cells[j].start })
 	return renderStyleCells(line, d.styles.row, cells)
 }
 

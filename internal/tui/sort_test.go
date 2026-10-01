@@ -40,7 +40,7 @@ func TestSortColumnsChooseTheirPreferredFirstDirection(t *testing.T) {
 		{kind: columnTitle},
 		{kind: columnModel},
 		{kind: columnAge},
-		{kind: columnMessages, desc: true},
+		{kind: columnTurns, desc: true},
 		{kind: columnSubagents, desc: true},
 		{kind: columnTokens, desc: true},
 		{kind: columnCost, desc: true},
@@ -64,7 +64,7 @@ func TestSortSessionsUsesDisplayedColumnValues(t *testing.T) {
 		{name: "title", kind: columnTitle, left: &model.Session{Title: "alpha\nignored"}, right: &model.Session{Title: "Beta"}},
 		{name: "model", kind: columnModel, left: &model.Session{Models: []string{"claude-alpha"}}, right: &model.Session{Models: []string{"claude-beta"}}},
 		{name: "age", kind: columnAge, left: &model.Session{UpdatedAt: earlier}, right: &model.Session{UpdatedAt: later}},
-		{name: "messages", kind: columnMessages, left: &model.Session{Messages: 1}, right: &model.Session{Messages: 2}},
+		{name: "turns", kind: columnTurns, left: &model.Session{Messages: 5}, right: &model.Session{Messages: 1, ToolCalls: 1, Subagents: []*model.Session{{Group: true, Subagents: []*model.Session{{Messages: 2, ToolCalls: 3}}}}}},
 		{name: "subagents", kind: columnSubagents, left: &model.Session{Subagents: []*model.Session{{}}}, right: &model.Session{Subagents: []*model.Session{{Subagents: []*model.Session{{}}}}}},
 		{name: "tokens", kind: columnTokens, left: &model.Session{Usage: []model.Usage{{InputTokens: 1}}}, right: &model.Session{Subagents: []*model.Session{{Usage: []model.Usage{{OutputTokens: 2}}}}}},
 		{name: "cost", kind: columnCost, left: &model.Session{Cost: model.Cost{USD: 1}}, right: &model.Session{Subagents: []*model.Session{{Cost: model.Cost{USD: 2}}}}},
@@ -144,7 +144,7 @@ func TestSortSessionsKeepsIdentityTiesDeterministicInBothDirections(t *testing.T
 	beta := &model.Session{ID: "beta", Messages: 2}
 	for _, desc := range []bool{false, true} {
 		sessions := []*model.Session{beta, alpha}
-		sortSessions(sessions, sortState{kind: columnMessages, desc: desc, active: true})
+		sortSessions(sessions, sortState{kind: columnTurns, desc: desc, active: true})
 		if sessions[0] != alpha || sessions[1] != beta {
 			t.Fatalf("desc=%t equal-key order = %q, %q; want alpha, beta", desc, sessions[0].ID, sessions[1].ID)
 		}

@@ -30,7 +30,7 @@ func writeText(output io.Writer, value any) error {
 
 func writeListText(output io.Writer, response ListResponse) error {
 	table := tabwriter.NewWriter(output, 0, 2, 2, ' ', 0)
-	if _, err := fmt.Fprintln(table, "REF\tAGENT\tPROJECT\tTITLE\tAGE\tMSGS\tSUBS\tTOKENS\t$"); err != nil {
+	if _, err := fmt.Fprintln(table, "REF\tAGENT\tPROJECT\tTITLE\tAGE\tTURNS\tSUBS\tTOKENS\tCOST"); err != nil {
 		return err
 	}
 	for _, session := range response.Sessions {
@@ -40,7 +40,7 @@ func writeListText(output io.Writer, response ListResponse) error {
 		}
 		if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
 			terminalSafe(session.Ref), terminalSafe(session.Agent), terminalSafe(session.Project), terminalSafe(session.Title),
-			textAge(session.UpdatedAt), session.Messages, subs, humanTokens(session.Tokens.Total), humanCost(session.Cost)); err != nil {
+			textAge(session.UpdatedAt), session.Turns, subs, humanTokens(session.Tokens.Total), humanCost(session.Cost)); err != nil {
 			return err
 		}
 	}

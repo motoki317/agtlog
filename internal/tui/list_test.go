@@ -275,7 +275,7 @@ func TestColoredWideListRowsAlignWithHeader(t *testing.T) {
 	for rowIndex, row := range rendered[1:] {
 		start := listCursorWidth
 		for _, column := range columns {
-			if column.kind == columnAgent || column.kind == columnAge || column.kind == columnMessages || column.kind == columnCost {
+			if column.kind == columnAgent || column.kind == columnAge || column.kind == columnTurns || column.kind == columnCost {
 				if cell := strings.TrimSpace(ansi.Cut(row, start, start+column.width)); cell == "" {
 					t.Errorf("row %d %s cell is empty", rowIndex, column.title)
 				}
@@ -503,8 +503,8 @@ func TestListColumnsFillWidthAndDropLowValueFieldsInOrder(t *testing.T) {
 		width int
 		want  []listColumnKind
 	}{
-		{width: 74, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnModel, columnAge, columnMessages, columnSubagents, columnCost}},
-		{width: 73, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnAge, columnMessages, columnSubagents, columnCost}},
+		{width: 74, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnModel, columnAge, columnTurns, columnSubagents, columnCost}},
+		{width: 73, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnAge, columnTurns, columnSubagents, columnCost}},
 		{width: 59, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnAge, columnSubagents, columnCost}},
 		{width: 53, want: []listColumnKind{columnAgent, columnProject, columnTitle, columnAge, columnCost}},
 		{width: 48, want: []listColumnKind{columnAgent, columnTitle, columnAge, columnCost}},

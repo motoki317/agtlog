@@ -1324,30 +1324,38 @@ func TestSubagentsTabListsAllDescendantsInPreOrder(t *testing.T) {
 	}
 }
 
-func TestSubagentsDefaultSortsSiblingsOldestFirstWithinTree(t *testing.T) {
+func TestSubagentsDefaultSortsSiblingsNewestUpdateFirstWithinTree(t *testing.T) {
 	start := time.Date(2026, time.July, 22, 8, 0, 0, 0, time.UTC)
-	earlyChild := &model.Session{ID: "early-child", StartedAt: start.Add(time.Hour)}
-	early := &model.Session{ID: "early", StartedAt: start, Subagents: []*model.Session{earlyChild}}
-	lateChild := &model.Session{ID: "late-child", StartedAt: start.Add(3 * time.Hour)}
-	laterChild := &model.Session{ID: "later-child", StartedAt: start.Add(4 * time.Hour)}
-	late := &model.Session{ID: "late", StartedAt: start.Add(2 * time.Hour), Subagents: []*model.Session{laterChild, lateChild}}
-	root := &model.Session{ID: "root", Subagents: []*model.Session{late, early}}
+	earlyChild := &model.Session{ID: "early-child", UpdatedAt: start.Add(time.Hour)}
+	early := &model.Session{ID: "early", StartedAt: start.Add(time.Hour), UpdatedAt: start, Subagents: []*model.Session{earlyChild}}
+	lateChild := &model.Session{ID: "late-child", UpdatedAt: start.Add(3 * time.Hour)}
+	laterChild := &model.Session{ID: "later-child", UpdatedAt: start.Add(4 * time.Hour)}
+	unknownChild := &model.Session{ID: "unknown-child"}
+	late := &model.Session{ID: "late", StartedAt: start, UpdatedAt: start.Add(2 * time.Hour), Subagents: []*model.Session{unknownChild, lateChild, laterChild}}
+	tie := &model.Session{ID: "tie", UpdatedAt: late.UpdatedAt}
+	unknown := &model.Session{ID: "unknown"}
+	root := &model.Session{ID: "root", Subagents: []*model.Session{unknown, tie, early, late}}
+	rootBefore := append([]*model.Session(nil), root.Subagents...)
+	childBefore := append([]*model.Session(nil), late.Subagents...)
 
 	flattened := flattenSubagents(root, sortState{})
 	want := []struct {
 		id    string
 		depth int
 	}{
-		{id: "early", depth: 0},
-		{id: "early-child", depth: 1},
-		{id: "late", depth: 0},
-		{id: "late-child", depth: 1},
-		{id: "later-child", depth: 1},
+		{"late", 0}, {"later-child", 1}, {"late-child", 1}, {"unknown-child", 1},
+		{"tie", 0}, {"early", 0}, {"early-child", 1}, {"unknown", 0},
+	}
+	if len(flattened) != len(want) {
+		t.Fatalf("rows = %d, want %d", len(flattened), len(want))
 	}
 	for index, expected := range want {
 		if got := flattened[index]; got.s.ID != expected.id || got.depth != expected.depth {
 			t.Fatalf("flattened[%d] = %s at depth %d, want %s at depth %d", index, got.s.ID, got.depth, expected.id, expected.depth)
 		}
+	}
+	if !slices.Equal(root.Subagents, rootBefore) || !slices.Equal(late.Subagents, childBefore) {
+		t.Fatal("cleared sort mutated source children")
 	}
 }
 
@@ -1399,7 +1407,7 @@ func TestSubagentRowsRenderSortedTreeGuides(t *testing.T) {
 	}
 	columns := []listColumn{{kind: columnTitle, width: 40}}
 	for index, want := range wants {
-		row := subagentRow(flattened[index], time.Time{}, columns, "", "", "")
+		row := subagentRow(flattened[index], time.Time{}, columns, "", 0, "", "")
 		if got := strings.TrimRight(row, " "); got != want {
 			t.Errorf("row %d title = %q, want %q", index, got, want)
 		}
@@ -1442,7 +1450,7 @@ func TestSubagentSelectionSurvivesResortByIdentity(t *testing.T) {
 	}
 }
 
-func TestSubagentAgeShortcutCyclesBackToStartedOrder(t *testing.T) {
+func TestSubagentAgeShortcutCyclesBackToNewestUpdateOrder(t *testing.T) {
 	start := time.Date(2026, time.July, 22, 8, 0, 0, 0, time.UTC)
 	oldUpdate := &model.Session{ID: "old-update", StartedAt: start.Add(time.Hour), UpdatedAt: start}
 	newUpdate := &model.Session{ID: "new-update", StartedAt: start, UpdatedAt: start.Add(time.Hour)}
@@ -1722,7 +1730,7 @@ func TestSubagentsRowAppliesCellStylesAfterFitting(t *testing.T) {
 	first := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge"}
 	now := time.Date(2026, 1, 2, 6, 0, 0, 0, time.UTC)
 	selected := &model.Session{
-		ID: "map", Agent: model.AgentCodex, Title: "Map cavern", Models: []string{"gpt-5.6-sol"},
+		ID: "map", Agent: model.AgentCodex, Title: "Map 洞窟 14 cavern", Messages: 3, ToolCalls: 11, Models: []string{"gpt-5.6-sol"},
 		UpdatedAt: now.Add(-2 * time.Minute),
 		Usage:     []model.Usage{{InputTokens: 2_500}}, Cost: model.Cost{USD: 0.75, Estimated: true},
 	}
@@ -1730,11 +1738,12 @@ func TestSubagentsRowAppliesCellStylesAfterFitting(t *testing.T) {
 	detail := newDetailState(&model.Session{ID: "route", Subagents: []*model.Session{first, selected}}, 100, 14, styleSet)
 	detail.now = now
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
-	line := detail.lines[2]
-	styled := detail.styleLine(detail.rendered[detail.renderedStarts[2]].text, line, false, true)
+	line := detail.lines[1]
+	styled := detail.styleLine(detail.rendered[detail.renderedStarts[1]].text, line, false, true)
 
 	for name, want := range map[string]string{
 		"agent":  styleSet.codex.Render("codex"),
+		"turns":  styleSet.muted.Render("   14"),
 		"tokens": styleSet.accent.Render(humanTokens(selected.TotalUsage().TotalTokens())),
 		"cost":   styleSet.estimated.Render(formatCost(selected.TotalCost())),
 	} {
@@ -1772,6 +1781,74 @@ func TestSubagentsRowsShowAgeAndDropItBeforeUsage(t *testing.T) {
 	}
 }
 
+func TestSubagentColumnsDropAgeThenTurns(t *testing.T) {
+	for _, test := range []struct {
+		width      int
+		age, turns bool
+	}{
+		{67, true, true}, {66, false, true}, {62, false, true}, {61, false, false},
+	} {
+		columns := subagentColumns(test.width)
+		if columnVisible(columnAge, columns) != test.age || columnVisible(columnTurns, columns) != test.turns {
+			t.Errorf("width %d columns = %#v, want age %t, turns %t", test.width, columns, test.age, test.turns)
+		}
+		if listColumnsWidth(columns) != test.width {
+			t.Errorf("width %d: used %d", test.width, listColumnsWidth(columns))
+		}
+	}
+}
+
+func TestSubagentTurnsFocusAndSortCycle(t *testing.T) {
+	old := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	leaf := &model.Session{ID: "leaf", Messages: 5, UpdatedAt: old.Add(time.Minute)}
+	branch := &model.Session{ID: "branch", Messages: 1, ToolCalls: 1, UpdatedAt: old, Subagents: []*model.Session{{ID: "nested", Messages: 7}}}
+	detail := newDetailState(&model.Session{ID: "root", Subagents: []*model.Session{branch, leaf}}, 100, 14, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyTab})
+	for range 3 {
+		detail.update(tea.KeyMsg{Type: tea.KeyRight})
+	}
+	if detail.subagentColumnFocus != columnTurns {
+		t.Fatalf("focus = %v, want turns", detail.subagentColumnFocus)
+	}
+	for _, want := range []string{"branch", "leaf", "leaf"} {
+		detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortColumnKey)})
+		if detail.subagents[0].s.ID != want {
+			t.Fatalf("first = %s, want %s", detail.subagents[0].s.ID, want)
+		}
+		if detail.focusedSubagent() != leaf {
+			t.Fatal("sort lost selected identity")
+		}
+	}
+	if detail.subagentSort.active || strings.ContainsAny(detail.lines[0].text, "↑↓") {
+		t.Fatalf("cleared header = %q", detail.lines[0].text)
+	}
+}
+
+func TestSubagentClearedOrderPreservesSelectionAcrossRebuildAndLiveUpdate(t *testing.T) {
+	now := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	first := &model.Session{ID: "first", Agent: model.AgentClaude, UpdatedAt: now}
+	second := &model.Session{ID: "second", Agent: model.AgentClaude, UpdatedAt: now.Add(-time.Minute)}
+	root := &model.Session{ID: "root", Agent: model.AgentClaude, Subagents: []*model.Session{first, second}}
+	m := NewModel([]*model.Session{root}, nil)
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyTab}} {
+		updated, _ := m.Update(key)
+		m = updated.(Model)
+	}
+	detail := detailStateFromScreen(t, m.detail)
+	second.UpdatedAt = now.Add(time.Minute)
+	detail.rebuild()
+	if detail.focusedSubagent() != first || detail.subagents[0].s != second {
+		t.Fatal("rebuild lost selected identity or newest-first order")
+	}
+	replacement := cloneSession(root)
+	replacement.Subagents[0].UpdatedAt = now.Add(2 * time.Minute)
+	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+	detail = detailStateFromScreen(t, updated.(Model).detail)
+	if detail.focusedSubagent().ID != first.ID || detail.subagents[0].s.ID != first.ID || detail.subagentSort.active {
+		t.Fatal("live update lost cleared order or selected identity")
+	}
+}
+
 func TestSubagentColumnsStayAlignedAtNarrowWidths(t *testing.T) {
 	child := &model.Session{ID: "map", Agent: model.AgentCodex, Title: "Map fictional cavern"}
 	root := &model.Session{ID: "scout", Subagents: []*model.Session{{
@@ -1804,7 +1881,7 @@ func TestSubagentColumnsStayAlignedAtNarrowWidths(t *testing.T) {
 				t.Fatalf("columns = %#v, want %#v", columns, test.want)
 			}
 			header := subagentHeader(columns, sortState{}, listColumnKind(-1), newStyles()).plain
-			row := subagentRow(item, time.Time{}, columns, "gpt-5.6", "2500", "~$0.75")
+			row := subagentRow(item, time.Time{}, columns, "gpt-5.6", 0, "2500", "~$0.75")
 			if got := ansi.StringWidth(header); got != test.width {
 				t.Errorf("header width = %d, want %d: %q", got, test.width, header)
 			}
@@ -1852,6 +1929,7 @@ func TestSubagentsHeaderNamesAndAlignsColumns(t *testing.T) {
 	now := time.Date(2026, 1, 2, 6, 0, 0, 0, time.UTC)
 	child := &model.Session{
 		ID: "map", Agent: model.AgentCodex, Title: "Map fictional cavern", Models: []string{"gpt-5.6-sol"}, UpdatedAt: now.Add(-12 * time.Minute),
+		Messages: 2, ToolCalls: 3, Subagents: []*model.Session{{Messages: 4, ToolCalls: 5}},
 		Usage: []model.Usage{{InputTokens: 2_500}}, Cost: model.Cost{USD: 0.75, Estimated: true},
 	}
 	detail := newDetailState(&model.Session{ID: "route", Subagents: []*model.Session{child}}, 100, 14, newStyles())
@@ -1870,6 +1948,7 @@ func TestSubagentsHeaderNamesAndAlignsColumns(t *testing.T) {
 		{title: "AGENT", value: "codex"},
 		{title: "TITLE", value: "Map fictional cavern"},
 		{title: "MODEL", value: "gpt-5.6"},
+		{title: "TURNS", value: "14", right: true},
 		{title: "TOKENS", value: "2500", right: true},
 		{title: "COST", value: "~$0.75", right: true},
 		{title: "AGE", value: "12m", right: true},
@@ -1901,11 +1980,11 @@ func TestDeepSubagentRowKeepsAgentIdentity(t *testing.T) {
 		{ID: "deep-last", Agent: model.AgentCodex, Title: "Inspect fictional last depth"},
 	}
 	items := flattenSubagents(root, sortState{})
-	columns := subagentColumns(96)
+	columns := subagentColumns(102)
 	titleStart := columns[0].width + 1
 	depthElevenRow := subagentRow(
 		items[11],
-		time.Time{}, columns, "gpt-5.6", "2500", "~$0.75",
+		time.Time{}, columns, "gpt-5.6", 0, "2500", "~$0.75",
 	)
 	depthElevenTitle := ansi.Cut(depthElevenRow, titleStart, titleStart+columns[1].width)
 	if wantPrefix := strings.Repeat(" ", 30) + "└─ "; !strings.HasPrefix(depthElevenTitle, wantPrefix) {
@@ -1914,7 +1993,7 @@ func TestDeepSubagentRowKeepsAgentIdentity(t *testing.T) {
 	for index, wantPrefix := range []string{"…├─ ", "…└─ "} {
 		row := subagentRow(
 			items[12+index],
-			time.Time{}, columns, "gpt-5.6", "2500", "~$0.75",
+			time.Time{}, columns, "gpt-5.6", 0, "2500", "~$0.75",
 		)
 		agentCell := ansi.Cut(row, 0, columns[0].width)
 		if got := strings.TrimSpace(agentCell); got != "codex" {
@@ -3416,9 +3495,10 @@ func TestOpenItemFallsBackWhenEventDisappears(t *testing.T) {
 }
 
 func TestSubagentSelectionFollowsIdentityAcrossLiveReorder(t *testing.T) {
-	scout := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl"}
-	mapper := &model.Session{ID: "mapper", Agent: model.AgentCodex, Path: "/workspace/mapper.jsonl"}
-	verifier := &model.Session{ID: "verifier", Agent: model.AgentClaude, Path: "/workspace/verifier.jsonl"}
+	now := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+	scout := &model.Session{ID: "scout", UpdatedAt: now, Agent: model.AgentClaude, Path: "/workspace/scout.jsonl"}
+	mapper := &model.Session{ID: "mapper", UpdatedAt: now.Add(-time.Minute), Agent: model.AgentCodex, Path: "/workspace/mapper.jsonl"}
+	verifier := &model.Session{ID: "verifier", UpdatedAt: now.Add(-2 * time.Minute), Agent: model.AgentClaude, Path: "/workspace/verifier.jsonl"}
 	root := &model.Session{
 		ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl",
 		Subagents: []*model.Session{scout, mapper, verifier},
@@ -3435,6 +3515,7 @@ func TestSubagentSelectionFollowsIdentityAcrossLiveReorder(t *testing.T) {
 		replacement.Subagents[0],
 		replacement.Subagents[1],
 	}
+	replacement.Subagents[0].UpdatedAt = now.Add(time.Minute)
 	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
 	m = updated.(Model)
 

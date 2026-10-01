@@ -71,6 +71,7 @@ type Session struct {
 	StartedAt string      `json:"started_at"`
 	UpdatedAt string      `json:"updated_at"`
 	Messages  int         `json:"messages"`
+	Turns     int         `json:"turns"`
 	Subagents int         `json:"subagents"`
 	HasError  bool        `json:"has_error"`
 	Tokens    TokenTotals `json:"tokens"`
@@ -277,6 +278,7 @@ func sessionDTO(session *model.Session, ref string) Session {
 		StartedAt: timestamp(session.StartedAt),
 		UpdatedAt: timestamp(session.UpdatedAt),
 		Messages:  session.Messages,
+		Turns:     session.TotalTurns(),
 		Subagents: descendantCount(session),
 		HasError:  session.HasError,
 		Tokens:    tokenTotals(session.OwnedUsage()),

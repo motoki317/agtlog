@@ -42,3 +42,5 @@ trade-offs and alternatives that led to each choice.
 | 2026-08-22 | [Codex summary checkpoints](./20260822-codex-summary-checkpoints.md) | Resume live Codex summaries after validated complete JSONL lines |
 | 2026-08-23 | [Extra agent home directories](./20260823-extra-agent-home-directories.md) | Add explicit homes without redirecting Claude Code or Codex writes |
 | 2026-09-05 | [Codex counter segments](./20260905-codex-counter-segments.md) | Reconcile cumulative-counter segments independently and show unattributed usage in Info |
+| 2026-10-01 | [Recursive turn counts](./20261001-recursive-turn-counts.md) | Count messages and tools across the session tree while preserving the messages contract |
+| 2026-10-01 | [Subagent age order](./20261001-subagent-age-order.md) | Match cleared Subagents order to Sessions by newest update within each parent |

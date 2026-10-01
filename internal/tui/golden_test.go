@@ -22,18 +22,18 @@ var goldenNow = time.Date(2026, 1, 2, 6, 4, 0, 0, time.UTC)
 func TestGoldenListFrame(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	subagent := &model.Session{
-		ID: "builder", Agent: model.AgentClaude, Models: []string{"claude-opus-4-8"},
+		ID: "builder", Messages: 3, ToolCalls: 4, Agent: model.AgentClaude, Models: []string{"claude-opus-4-8"},
 		Usage: []model.Usage{{InputTokens: 180_000, OutputTokens: 20_000}}, Cost: model.Cost{USD: 1.02},
 	}
 	sessions := []*model.Session{
 		{
 			ID: "launch", Agent: model.AgentClaude, Path: "/workspace/starship/launch.jsonl", Project: "starship", Title: "Plan the lunar launch",
-			Models: []string{"claude-opus-4-8"}, UpdatedAt: goldenNow.Add(-10 * time.Minute), Messages: 12,
+			Models: []string{"claude-opus-4-8"}, UpdatedAt: goldenNow.Add(-10 * time.Minute), Messages: 12, ToolCalls: 8,
 			Usage: []model.Usage{{InputTokens: 900_000, OutputTokens: 100_000}}, Cost: model.Cost{USD: 4.21}, Subagents: []*model.Session{subagent},
 		},
 		{
 			ID: "harbor", Agent: model.AgentCodex, Path: "/workspace/harbor/route.jsonl", Project: "harbor", Title: "Chart autonomous route",
-			Models: []string{"gpt-5.6-sol"}, UpdatedAt: goldenNow.Add(-2 * time.Hour), Messages: 8,
+			Models: []string{"gpt-5.6-sol"}, UpdatedAt: goldenNow.Add(-2 * time.Hour), Messages: 8, ToolCalls: 2,
 			Usage: []model.Usage{{InputTokens: 88_000, OutputTokens: 4_000}}, Cost: model.Cost{USD: 0.76},
 		},
 	}
@@ -216,28 +216,28 @@ func TestGoldenItemFrame(t *testing.T) {
 func TestGoldenSubagentsFrame(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	inspector := &model.Session{
-		ID: "inspector", Agent: model.AgentClaude, Title: "Inspect the cave map", Models: []string{"claude-sonnet-4-7"},
+		ID: "inspector", Messages: 2, ToolCalls: 3, Agent: model.AgentClaude, Title: "Inspect the cave map", Models: []string{"claude-sonnet-4-7"},
 		UpdatedAt: goldenNow.Add(-2 * time.Minute),
 		Usage:     []model.Usage{{InputTokens: 1_500, OutputTokens: 500}}, Cost: model.Cost{USD: 0.08, Estimated: true},
 	}
 	mapper := &model.Session{
-		ID: "mapper", Agent: model.AgentCodex, Title: "Map the cavern", Models: []string{"gpt-5.6-sol"},
+		ID: "mapper", Messages: 4, ToolCalls: 5, Agent: model.AgentCodex, Title: "Map the cavern", Models: []string{"gpt-5.6-sol"},
 		UpdatedAt: goldenNow.Add(-3 * time.Minute),
 		Usage:     []model.Usage{{InputTokens: 8_000, OutputTokens: 2_000}}, Cost: model.Cost{USD: 0.12, Estimated: true},
 		Subagents: []*model.Session{inspector},
 	}
 	reviewer := &model.Session{
-		ID: "reviewer", Agent: model.AgentCodex, Title: "Review the findings", Models: []string{"gpt-5.6-sol"},
+		ID: "reviewer", Messages: 2, ToolCalls: 1, Agent: model.AgentCodex, Title: "Review the findings", Models: []string{"gpt-5.6-sol"},
 		UpdatedAt: goldenNow.Add(-4 * time.Minute),
 		Usage:     []model.Usage{{InputTokens: 2_500, OutputTokens: 500}}, Cost: model.Cost{USD: 0.16, Estimated: true},
 	}
 	scout := &model.Session{
-		ID: "scout", Agent: model.AgentClaude, Title: "Scout the ridge", Models: []string{"claude-opus-4-8"},
+		ID: "scout", Messages: 6, ToolCalls: 4, Agent: model.AgentClaude, Title: "Scout the ridge", Models: []string{"claude-opus-4-8"},
 		UpdatedAt: goldenNow.Add(-12 * time.Minute),
 		Usage:     []model.Usage{{InputTokens: 40_000, OutputTokens: 5_000}}, Cost: model.Cost{USD: 0.32}, Subagents: []*model.Session{mapper, reviewer},
 	}
 	shipper := &model.Session{
-		ID: "shipper", Agent: model.AgentCodex, Title: "Ship the expedition", Models: []string{"gpt-5.6-sol"},
+		ID: "shipper", Messages: 2, ToolCalls: 4, Agent: model.AgentCodex, Title: "Ship the expedition", Models: []string{"gpt-5.6-sol"},
 		UpdatedAt: goldenNow.Add(-1 * time.Minute),
 		Usage:     []model.Usage{{InputTokens: 3_000, OutputTokens: 1_000}}, Cost: model.Cost{USD: 0.20},
 	}
