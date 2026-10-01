@@ -291,6 +291,7 @@ type Session struct {
 	ParentID   string
 	HasError   bool
 	Messages   int
+	ToolCalls  int
 	Usage      []Usage
 	// Requests is the serialized billed ledger. Codex stores per-request entries
 	// for clean partitions and authoritative per-model aggregates otherwise.
@@ -306,6 +307,18 @@ type Session struct {
 	Events              []Event
 	Group               bool
 	Subagents           []*Session
+}
+
+func (s Session) Turns() int {
+	return s.Messages + s.ToolCalls
+}
+
+func (s Session) TotalTurns() int {
+	total := s.Turns()
+	for _, subagent := range s.Subagents {
+		total += subagent.TotalTurns()
+	}
+	return total
 }
 
 func (s Session) TotalUsage() Usage {
