@@ -53,23 +53,23 @@ func TestDetailHelpKeepsBindingsVisibleAtFortyColumns(t *testing.T) {
 	}
 }
 
-func TestSubagentsHelpIncludesOnlyTableBindings(t *testing.T) {
+func TestOverviewHelpIncludesOnlyTableAndNavigationBindings(t *testing.T) {
 	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
 	m.screen = screenDetail
 	detail := newDetailState(&model.Session{ID: "route"}, m.width, m.height, m.styles)
-	detail.tab = tabSubagents
+	detail.tab = tabOverview
 	detail.rebuild()
 	m.detail = detail
 	view := m.helpView()
 
-	for _, want := range []string{"j/k scroll", "g/G edge", "←/→ column", "⇧O sort", "⇧A age", "⇧N title", "enter/l open", "tab tabs", "T time", "mouse wheel scroll · click select", "esc/h back"} {
+	for _, want := range []string{"j/k move/scroll", "g/G edge", "pgup/pgdn page", "←/→ column", "⇧O sort", "⇧A age", "⇧N title", "enter/l open", "tab Timeline/Overview", "T time", "mouse wheel scroll · click select", "esc/h back"} {
 		if !strings.Contains(view, want) {
-			t.Errorf("Subagents help missing %q:\n%s", want, view)
+			t.Errorf("Overview help missing %q:\n%s", want, view)
 		}
 	}
-	for _, unwanted := range []string{"←/→ fold", "space toggle", "expand all", "collapse all"} {
+	for _, unwanted := range []string{"←/→ fold", "expand all", "collapse all", "space toggle", "enter expand"} {
 		if strings.Contains(view, unwanted) {
-			t.Errorf("Subagents help advertises inapplicable %q:\n%s", unwanted, view)
+			t.Errorf("Overview help advertises inapplicable %q:\n%s", unwanted, view)
 		}
 	}
 }
@@ -90,26 +90,6 @@ func TestItemHelpIncludesOnlyItemBindings(t *testing.T) {
 	for _, sessionOnly := range []string{"space toggle", "E expand all", "C collapse all", "enter open", "tab tabs"} {
 		if strings.Contains(view, sessionOnly) {
 			t.Fatalf("item help advertised session-only binding %q:\n%s", sessionOnly, view)
-		}
-	}
-}
-
-func TestInfoHelpIncludesOnlyApplicableBindings(t *testing.T) {
-	m := newModelWithClockAndTheme(nil, nil, time.Now, themes["default"])
-	m.screen = screenDetail
-	detail := newDetailState(&model.Session{ID: "route"}, m.width, m.height, m.styles)
-	detail.tab = tabInfo
-	detail.rebuild()
-	m.detail = detail
-	view := m.helpView()
-	for _, want := range []string{"j/k scroll", "g/G edge", "tab tabs", "w wrap", "T time", "mouse wheel scroll", "esc/h back"} {
-		if !strings.Contains(view, want) {
-			t.Errorf("Info help missing %q:\n%s", want, view)
-		}
-	}
-	for _, unwanted := range []string{"←/→ fold", "space toggle", "expand all", "enter/l open"} {
-		if strings.Contains(view, unwanted) {
-			t.Errorf("Info help advertises inapplicable %q:\n%s", unwanted, view)
 		}
 	}
 }

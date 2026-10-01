@@ -44,3 +44,4 @@ trade-offs and alternatives that led to each choice.
 | 2026-09-05 | [Codex counter segments](./20260905-codex-counter-segments.md) | Reconcile cumulative-counter segments independently and show unattributed usage in Info |
 | 2026-10-01 | [Recursive turn counts](./20261001-recursive-turn-counts.md) | Count messages and tools across the session tree while preserving the messages contract |
 | 2026-10-01 | [Subagent age order](./20261001-subagent-age-order.md) | Match cleared Subagents order to Sessions by newest update within each parent |
+| 2026-10-01 | [Overview tab](./20261001-overview-tab.md) | Combine own and delegated activity, model costs, and the Subagents table |

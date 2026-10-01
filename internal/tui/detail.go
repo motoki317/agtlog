@@ -21,6 +21,7 @@ type detailState struct {
 	crumbs              []string
 	viewport            viewport.Model
 	expanded            map[string]bool
+	tabFocusKeys        [2]string
 	defaultExpanded     bool
 	focus               int
 	focusables          []detailFocus
@@ -38,7 +39,6 @@ type detailState struct {
 	subagentTotal       int
 	subagentSort        sortState
 	subagentColumnFocus listColumnKind
-	subagentSelection   int
 	subagents           []flattenedSubagent
 	lines               []detailLine
 	rendered            []renderedRow
@@ -97,19 +97,16 @@ func (d *detailState) rowAtY(y int) (int, bool) {
 		return 0, false
 	}
 	detailIndex := d.rendered[renderedIndex].detailIndex
-	if d.tab == tabSubagents {
-		selection := detailIndex - 1
-		if selection >= 0 && selection < len(d.subagents) {
-			return selection, true
-		}
-		return 0, false
-	}
 	focus := -1
 	for index, item := range d.focusables {
 		if item.line > detailIndex {
 			break
 		}
-		focus = index
+		if d.tab != tabOverview || item.line == detailIndex {
+			focus = index
+		} else {
+			focus = -1
+		}
 	}
 	return focus, focus >= 0
 }
@@ -133,6 +130,7 @@ type detailLine struct {
 	subagent        bool
 	subagentSession *model.Session
 	subagentCost    string
+	subagentHeader  bool
 	role            detailRole
 	agent           model.AgentKind
 	event           model.Event
@@ -148,15 +146,14 @@ type detailRestoreState struct {
 	viewportOffset      int
 	pinned              bool
 	focusKey            string
-	selectedSubagent    string
 	defaultExpanded     bool
 	focus               int
 	wrap                bool
 	tab                 detailTab
 	subagentSort        sortState
 	subagentColumnFocus listColumnKind
-	subagentSelection   int
 	expanded            map[string]bool
+	tabFocusKeys        [2]string
 }
 
 type subagentTreePosition struct {
@@ -201,8 +198,7 @@ func scrollViewport(view *viewport.Model, button tea.MouseButton) {
 
 const (
 	tabTimeline detailTab = iota
-	tabSubagents
-	tabInfo
+	tabOverview
 )
 
 const (
@@ -292,7 +288,7 @@ func (d *detailState) markLoadFailed(err error) {
 func (d *detailState) resize(width, height int) {
 	pinned := len(d.rendered) > 0 && d.followingTail()
 	anchorDetail, anchorOffset := -1, 0
-	if d.tab == tabInfo {
+	if d.tab == tabOverview {
 		anchorDetail, anchorOffset = d.renderedViewportAnchor()
 	}
 	d.width, d.height = max(1, width), max(3, height)
@@ -303,7 +299,7 @@ func (d *detailState) resize(width, height int) {
 	d.rebuild()
 	if pinned {
 		d.anchorBottom()
-	} else if d.tab == tabInfo {
+	} else if d.tab == tabOverview {
 		d.restoreRenderedViewportAnchor(anchorDetail, anchorOffset)
 	}
 }
@@ -313,7 +309,7 @@ func (d *detailState) setWrap(wrap bool) {
 		return
 	}
 	d.wrap = wrap
-	if d.tab == tabInfo {
+	if d.tab == tabOverview {
 		d.rebuildPreservingViewport()
 	} else {
 		d.rebuild()
@@ -332,19 +328,19 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 	}
 	switch key.String() {
 	case sortColumnKey:
-		if d.tab == tabSubagents {
+		if d.tab == tabOverview {
 			d.sortSubagents(d.subagentColumnFocus)
 		}
 	case sortAgeKey:
-		if d.tab == tabSubagents {
+		if d.tab == tabOverview {
 			d.sortSubagents(columnAge)
 		}
 	case sortTitleKey:
-		if d.tab == tabSubagents {
+		if d.tab == tabOverview {
 			d.sortSubagents(columnTitle)
 		}
 	case "left", "right":
-		if d.tab == tabSubagents {
+		if d.tab == tabOverview {
 			delta := -1
 			if key.String() == "right" {
 				delta = 1
@@ -355,64 +351,29 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		var cmd tea.Cmd
 		d.viewport, cmd = d.viewport.Update(msg)
 		return cmd
-	case "tab":
-		d.tab = (d.tab + 1) % 3
-		d.viewport.SetYOffset(0)
-		d.rebuild()
-	case "shift+tab":
-		d.tab = (d.tab + 2) % 3
+	case "tab", "shift+tab":
+		d.tabFocusKeys[d.tab] = d.focusKey()
+		d.tab = (d.tab + 1) % 2
+		d.focusables = nil
+		d.focus = -1
 		d.viewport.SetYOffset(0)
 		d.rebuild()
 	case "j", "down":
-		if d.tab == tabInfo {
-			d.viewport.ScrollDown(1)
-		} else if d.tab == tabSubagents {
-			d.moveSubagentSelection(1)
-		} else {
-			d.moveFocus(1)
-		}
+		d.moveFocus(1)
 	case "k", "up":
-		if d.tab == tabInfo {
-			d.viewport.ScrollUp(1)
-		} else if d.tab == tabSubagents {
-			d.moveSubagentSelection(-1)
-		} else {
-			d.moveFocus(-1)
-		}
-	case "g":
-		if d.tab == tabInfo {
-			d.viewport.GotoTop()
-		} else if d.tab == tabSubagents {
-			if len(d.subagents) > 0 && d.subagentSelection != 0 {
-				oldLine := d.selectedLine
-				d.subagentSelection = 0
-				d.updateSelection(oldLine, subagentDetailLine(0))
-			}
-			d.viewport.GotoTop()
-		} else if len(d.focusables) > 0 {
-			oldLine := d.focusables[d.focus].line
+		d.moveFocus(-1)
+	case "g", "home":
+		if len(d.focusables) > 0 {
+			oldLine := d.selectedLine
 			d.focus = 0
-			d.updateSelection(oldLine, d.focusables[d.focus].line)
+			d.updateSelection(oldLine, d.focusables[0].line)
 		}
-	case "G":
-		if d.tab == tabInfo {
-			d.viewport.GotoBottom()
-		} else if d.tab == tabSubagents {
-			last := len(d.subagents) - 1
-			if last >= 0 && d.subagentSelection != last {
-				oldLine := d.selectedLine
-				d.subagentSelection = last
-				d.updateSelection(oldLine, subagentDetailLine(last))
-			}
-			d.anchorBottom()
-		} else if len(d.focusables) > 0 {
-			d.gotoBottom()
-		}
+		d.viewport.GotoTop()
+	case "G", "end":
+		d.gotoBottom()
 	case " ":
-		if d.tab == tabTimeline && len(d.focusables) > 0 && d.focusables[d.focus].expandable {
-			item := d.focusables[d.focus]
-			d.expanded[item.key] = !d.isExpanded(item.key)
-			d.rebuildKeeping(item.key)
+		if d.tab == tabTimeline {
+			d.toggleFocused()
 		}
 	case expandAllKey:
 		if d.tab == tabTimeline {
@@ -473,21 +434,13 @@ func (d *detailState) gotoBottom() {
 	d.anchorBottom()
 }
 
-func (d *detailState) moveSubagentSelection(delta int) {
-	if len(d.subagents) == 0 {
-		return
-	}
-	next := max(0, min(d.subagentSelection+delta, len(d.subagents)-1))
-	if next == d.subagentSelection {
-		return
-	}
-	oldLine := d.selectedLine
-	d.subagentSelection = next
-	d.updateSelection(oldLine, subagentDetailLine(next))
-}
-
 func (d *detailState) moveFocus(direction int) {
 	if len(d.focusables) == 0 {
+		if direction > 0 {
+			d.viewport.ScrollDown(1)
+		} else {
+			d.viewport.ScrollUp(1)
+		}
 		return
 	}
 	next := d.focus + direction
@@ -504,17 +457,12 @@ func (d *detailState) moveFocus(direction int) {
 // rewrites the screen the reader was aiming at.
 func (d *detailState) selectRow(index int) {
 	oldLine := d.selectedLine
-	if d.tab == tabSubagents {
-		d.subagentSelection = index
-		d.updateSelection(oldLine, subagentDetailLine(index))
-		return
-	}
 	d.focus = index
 	d.updateSelection(oldLine, d.focusables[index].line)
 }
 
 func (d *detailState) selectedExpandable() bool {
-	return d.tab == tabTimeline && len(d.focusables) > 0 && d.focusables[d.focus].expandable
+	return len(d.focusables) > 0 && d.focusables[d.focus].expandable
 }
 
 func (d *detailState) collapseFocused() {
@@ -566,25 +514,38 @@ func (d *detailState) setAllExpanded(expanded bool) {
 	d.rebuildKeeping(key)
 }
 
+func (d *detailState) focusKey() string {
+	if d.focus >= 0 && d.focus < len(d.focusables) {
+		return d.focusables[d.focus].key
+	}
+	return ""
+}
+
+func (d *detailState) toggleFocused() {
+	if !d.selectedExpandable() {
+		return
+	}
+	key := d.focusKey()
+	d.expanded[key] = !d.isExpanded(key)
+	d.rebuildKeeping(key)
+}
+
 func (d *detailState) rebuild() {
+	selected := d.focusKey()
+	if selected == "" {
+		selected = d.tabFocusKeys[d.tab]
+	}
 	var lines []detailLine
 	if d.loadStatus == detailStatusFailed {
 		d.subagents = nil
-		d.subagentSelection = 0
 		message := "detail unavailable"
 		if d.err != nil {
 			message = terminalText(d.err.Error(), 512)
 		}
 		lines = []detailLine{{text: "detail error: " + message, role: detailWarning}}
-	} else if d.tab == tabSubagents {
-		d.rebuildSubagents()
-		return
-	} else if d.tab == tabInfo {
-		d.rebuildInfo()
-		return
+	} else if d.tab == tabOverview {
+		lines = d.overviewLines()
 	} else if d.loadStatus == detailStatusLoading {
-		d.subagents = nil
-		d.subagentSelection = 0
 		lines = []detailLine{{text: "Loading timeline…", role: detailSecondary}}
 	} else {
 		lines = d.sessionLines(d.session, 0, sessionIdentity(d.session))
@@ -596,105 +557,25 @@ func (d *detailState) rebuild() {
 			d.focusables = append(d.focusables, detailFocus{key: line.key, line: index, expandable: line.expandable, subagent: line.subagent, subagentSession: line.subagentSession, event: line.event})
 		}
 	}
-	if len(d.focusables) == 0 {
-		d.focus = 0
-	} else if d.focus < 0 || d.focus >= len(d.focusables) {
-		d.focus = len(d.focusables) - 1
+	found := false
+	for index, item := range d.focusables {
+		if item.key == selected {
+			d.focus = index
+			found = true
+			break
+		}
 	}
-	selectedLine := -1
-	if len(d.focusables) > 0 {
-		selectedLine = d.focusables[d.focus].line
+	if !found && (selected == "" || d.focus < 0 || d.focus >= len(d.focusables)) {
+		d.focus = max(0, len(d.focusables)-1)
+		if d.tab == tabOverview {
+			d.focus = 0
+		}
 	}
-	d.selectedLine = selectedLine
-	d.rebuildRendered()
-}
-
-func (d *detailState) rebuildInfo() {
-	d.subagents = nil
-	d.focusables = nil
 	d.selectedLine = -1
-	d.lines = sessionInfoLines(d.session)
+	if len(d.focusables) > 0 {
+		d.selectedLine = d.focusables[d.focus].line
+	}
 	d.rebuildRendered()
-}
-
-func sessionInfoLines(session *model.Session) []detailLine {
-	grossCost := session.TotalCost()
-	lines := []detailLine{infoDetailLine("Cost", detailHeader)}
-	if session.DuplicatedUSD > 0 {
-		lines = append(lines,
-			infoDetailLine(infoCostLine("owned", session.OwnedCost()), detailRow),
-			infoDetailLine(infoCostLine("gross", grossCost), detailRow),
-			infoDetailLine(fmt.Sprintf("replayed total: %s, %s", formatReplayedCost(session.DuplicatedUSD, session.Cost.Estimated), requestCount(session.DuplicatedCount)), detailRow),
-		)
-		for _, owner := range session.DuplicatedOwners {
-			lines = append(lines, infoDetailLine(fmt.Sprintf("  replayed %s, %s, from %s",
-				formatReplayedCost(owner.USD, session.Cost.Estimated), requestCount(owner.Count), duplicateOwnerLabel(owner)), detailRow))
-		}
-	} else {
-		lines = append(lines, infoDetailLine(infoCostLine("total", grossCost), detailRow))
-	}
-	tokenLabel := "tokens: "
-	if session.DuplicatedUSD > 0 {
-		tokenLabel = "gross tokens: "
-	}
-	lines = append(lines, infoDetailLine(tokenLabel+formatTokenFlow(sessionFlowUsage(session)), detailRow))
-	var unattributedModels []string
-	unattributedUsage := make(map[string]model.Usage)
-	unattributedUSD := make(map[string]float64)
-	for _, request := range session.Requests {
-		if request.Offset >= 0 {
-			continue
-		}
-		name := request.Usage.Model
-		if _, exists := unattributedUsage[name]; !exists {
-			unattributedModels = append(unattributedModels, name)
-		}
-		unattributedUsage[name] = unattributedUsage[name].Add(request.Usage)
-		unattributedUSD[name] += request.USD
-	}
-	if len(unattributedModels) > 0 {
-		missing, estimatedRates := modelCostMarkers(session.Cost)
-		for _, name := range unattributedModels {
-			_, estimated := estimatedRates[name]
-			cost := model.Cost{USD: unattributedUSD[name], Estimated: estimated || missing[name]}
-			if missing[name] {
-				cost.MissingPricingModels = []string{name}
-			}
-			lines = append(lines, infoDetailLine(fmt.Sprintf("unattributed: %s · %s · %s",
-				displayModelName(name), formatTokenFlow(unattributedUsage[name]), formatCost(cost)), detailRow))
-		}
-		lines = append(lines, infoDetailLine("Codex's cumulative total did not reconcile with per-request usage for that span, so its turn rows carry no cost.", detailSecondary))
-	}
-	lines = append(lines, infoDetailLine("", detailRow))
-	ownCost := session.Cost
-	ownCost.USD -= session.DuplicatedUSD
-	modelHeading := "Own model costs · "
-	if session.DuplicatedUSD > 0 {
-		modelHeading = "Owned model costs · "
-	}
-	lines = append(lines, infoDetailLine(modelHeading+formatCost(ownCost), detailHeader))
-	for _, line := range ownModelCostLines(session) {
-		lines = append(lines, infoDetailLine(line, detailRow))
-	}
-	lines = append(lines,
-		infoDetailLine("Both agents use the same rate table. ~ means the applied rate is not the logged model's own published rate.", detailSecondary),
-		infoDetailLine("", detailRow),
-		infoDetailLine("Definitions", detailHeader),
-		infoDetailLine("own: this session's own turns", detailRow),
-		infoDetailLine("subagents: delegated child sessions; their totals include nested descendants", detailRow),
-		infoDetailLine("", detailRow),
-	)
-	costTreeHeading := "Cost tree"
-	costTree := sessionCostTree(session)
-	if session.DuplicatedUSD > 0 {
-		costTreeHeading = "Gross cost tree"
-		costTree = grossSessionCostTree(session)
-	}
-	lines = append(lines, infoDetailLine(costTreeHeading, detailHeader))
-	for _, line := range costTree {
-		lines = append(lines, infoDetailLine(line, detailRow))
-	}
-	return lines
 }
 
 func infoCostLine(label string, cost model.Cost) string {
@@ -736,7 +617,7 @@ func duplicateOwnerLabel(owner model.DuplicateOwner) string {
 	return title + " (" + id + ")"
 }
 
-func infoDetailLine(text string, role detailRole) detailLine {
+func overviewLine(text string, role detailRole) detailLine {
 	return detailLine{text: detailPlainText(text), role: role}
 }
 
@@ -754,7 +635,13 @@ func modelCostMarkers(cost model.Cost) (missing map[string]bool, estimatedRates 
 	return missing, estimatedRates
 }
 
-func ownModelCostLines(session *model.Session) []string {
+type ownModelCost struct {
+	title     string
+	estimated bool
+	lines     []string
+}
+
+func ownModelCosts(session *model.Session) []ownModelCost {
 	byModel := make(map[string]model.Usage)
 	seen := make(map[string]bool)
 	var order []string
@@ -798,11 +685,8 @@ func ownModelCostLines(session *model.Session) []string {
 	}
 	sort.Strings(extra)
 	order = append(order, extra...)
-	if len(order) == 0 {
-		return []string{"No own model usage."}
-	}
 	missing, estimatedRates := modelCostMarkers(session.Cost)
-	lines := make([]string, 0, len(order)*6)
+	models := make([]ownModelCost, 0, len(order))
 	for _, name := range order {
 		usage := byModel[name]
 		breakdown, priced := session.ModelCostBreakdowns[name]
@@ -815,7 +699,7 @@ func ownModelCostLines(session *model.Session) []string {
 		if modelEstimated {
 			header += " (est. · priced as " + displayModelName(pricingModel) + ")"
 		}
-		lines = append(lines, header)
+		var lines []string
 		cacheWrite := model.Usage{
 			CacheCreation5mTokens: usage.CacheCreation5mTokens,
 			CacheCreation1hTokens: usage.CacheCreation1hTokens,
@@ -872,8 +756,9 @@ func ownModelCostLines(session *model.Session) []string {
 			ownedUSD := max(0, modelUSD-duplicatedUSD)
 			lines = append(lines, fmt.Sprintf("  %-12s = %s", "subtotal", formatCost(model.Cost{USD: ownedUSD, Estimated: modelEstimated})))
 		}
+		models = append(models, ownModelCost{title: header, estimated: modelEstimated, lines: lines})
 	}
-	return lines
+	return models
 }
 
 func validCostBreakdown(breakdown model.CostBreakdown) bool {
@@ -946,61 +831,6 @@ func formatCostRateGroups(groups []costRateGroup) ([]costRateGroup, int) {
 	return groups, termsWidth
 }
 
-func sessionCostTree(session *model.Session) []string {
-	return sessionCostTreeWithLabels(session, false)
-}
-
-func grossSessionCostTree(session *model.Session) []string {
-	return sessionCostTreeWithLabels(session, true)
-}
-
-func sessionCostTreeWithLabels(session *model.Session, gross bool) []string {
-	total := session.TotalCost()
-	formula := "total = own + Σ subs"
-	if gross {
-		formula = "gross total = gross own + Σ gross subs"
-	}
-	lines := []string{fmt.Sprintf("%s · %s / %s", formula, formatTokenFlow(sessionFlowUsage(session)), formatCost(total))}
-	return appendSessionCostChildren(lines, session, "", gross)
-}
-
-// appendSessionCostChildren renders the own-versus-subagents split under a node.
-// Leaf nodes omit a redundant own row, and group nodes omit it because their
-// totals consist only of child sessions.
-func appendSessionCostChildren(lines []string, session *model.Session, prefix string, gross bool) []string {
-	if len(session.Subagents) == 0 {
-		return lines
-	}
-	ownLabel := "own"
-	if gross {
-		ownLabel = "gross own"
-	}
-	if !session.Group {
-		// Subagents follow the own row, so it is never the last child.
-		lines = append(lines, fmt.Sprintf("%s├─ %s · %s / %s", prefix, ownLabel, formatTokenFlow(ownSessionFlowUsage(session)), formatCost(session.Cost)))
-	}
-	for index, child := range session.Subagents {
-		connector, childPrefix := "├─ ", prefix+"│  "
-		if index == len(session.Subagents)-1 {
-			connector, childPrefix = "└─ ", prefix+"   "
-		}
-		label := firstLine(child.Title)
-		if label == "" {
-			label = terminalText(child.ID, 96)
-		}
-		if label == "" {
-			label = string(child.Agent)
-		}
-		kind := "subagent"
-		if gross {
-			kind = "gross subagent"
-		}
-		lines = append(lines, fmt.Sprintf("%s%s%s %s · %s / %s", prefix, connector, kind, label, formatTokenFlow(sessionFlowUsage(child)), formatCost(child.TotalCost())))
-		lines = appendSessionCostChildren(lines, child, childPrefix, gross)
-	}
-	return lines
-}
-
 func ownSessionFlowUsage(session *model.Session) model.Usage {
 	var own model.Usage
 	for _, usage := range session.Usage {
@@ -1035,62 +865,12 @@ func formatTokenFlow(usage model.Usage) string {
 		humanTokens(usage.CacheReadTokens), humanTokens(cacheWrite), humanTokens(usage.InputTokens), humanTokens(usage.OutputTokens))
 }
 
-func (d *detailState) rebuildSubagents() {
-	selected := ""
-	if session := d.focusedSubagent(); session != nil {
-		selected = sessionIdentity(session)
-	}
-	d.rebuildSubagentsKeeping(selected)
-}
-
-func (d *detailState) rebuildSubagentsKeeping(selected string) {
-	d.focusables = nil
-	d.subagents = flattenSubagents(d.session, d.subagentSort)
-	for index, item := range d.subagents {
-		if sessionIdentity(item.s) == selected {
-			d.subagentSelection = index
-			break
-		}
-	}
-	available := max(0, d.viewport.Width-2)
-	columns := subagentColumns(available)
-	header := detailLine{text: subagentHeader(columns, d.subagentSort, d.subagentColumnFocus, d.styles).plain, nowrap: true, role: detailHeader}
-	if len(d.subagents) == 0 {
-		d.lines = []detailLine{header, {text: "No subagents", role: detailSecondary}}
-		d.selectedLine = -1
-	} else {
-		d.subagentSelection = max(0, min(d.subagentSelection, len(d.subagents)-1))
-		d.lines = make([]detailLine, len(d.subagents)+1)
-		d.lines[0] = header
-		for index, item := range d.subagents {
-			session := item.s
-			totalCost := session.TotalCost()
-			cost := formatCost(totalCost)
-			modelName := terminalText(shortModelsWithCost(session, totalCost), 96)
-			d.lines[subagentDetailLine(index)] = detailLine{
-				text: subagentRow(item, d.now, columns, modelName, session.TotalTurns(), cost), nowrap: true,
-				key: sessionIdentity(session), subagent: true, subagentSession: session, subagentCost: cost, role: detailRow, agent: session.Agent,
-			}
-		}
-		d.selectedLine = subagentDetailLine(d.subagentSelection)
-	}
-	d.rebuildRendered()
-}
-
 func (d *detailState) sortSubagents(kind listColumnKind) {
-	selected := ""
-	if session := d.focusedSubagent(); session != nil {
-		selected = sessionIdentity(session)
-	}
 	if columnVisible(kind, d.visibleSubagentColumns()) {
 		d.subagentColumnFocus = kind
 	}
 	d.subagentSort = d.subagentSort.press(kind)
-	d.rebuildSubagentsKeeping(selected)
-}
-
-func subagentDetailLine(selection int) int {
-	return selection + 1
+	d.rebuild()
 }
 
 func subagentColumns(width int) []listColumn {
@@ -1298,7 +1078,7 @@ func (d *detailState) rebuildRendered() {
 		if line.metrics != "" {
 			rows = []string{composeMetricRow(line.text, line.metrics, bodyWidth)}
 		} else if d.wrap && !line.nowrap && bodyWidth > 0 && ansi.StringWidth(line.text) > bodyWidth {
-			if d.tab == tabInfo {
+			if d.tab == tabOverview {
 				rows = wordWrapRows(line.text, bodyWidth)
 			} else {
 				rows = strings.Split(ansi.Hardwrap(line.text, bodyWidth, true), "\n")
@@ -1663,12 +1443,6 @@ func compactTitle(trigger string) string {
 }
 
 func (d *detailState) focusedSubagent() *model.Session {
-	if d.tab == tabSubagents {
-		if len(d.subagents) == 0 {
-			return nil
-		}
-		return d.subagents[d.subagentSelection].s
-	}
 	if len(d.focusables) == 0 {
 		return nil
 	}
@@ -2063,19 +1837,11 @@ func timelineHiddenMarker(hidden int) string {
 	return fmt.Sprintf("… %d lines hidden …", hidden)
 }
 
-// rowCounter reports the "n/m" position shown in the panel border. The timeline
-// and subagents panels count the cursor's row out of the navigable rows, so the
-// last row reads m/m; a selection-less panel (Info) reports its scroll offset,
-// since its rendered lines are the only position it has.
 func (d *detailState) rowCounter() (current, total int) {
-	switch {
-	case len(d.focusables) > 0:
+	if len(d.focusables) > 0 {
 		return min(d.focus+1, len(d.focusables)), len(d.focusables)
-	case d.tab == tabSubagents && len(d.subagents) > 0:
-		return d.subagentSelection + 1, len(d.subagents)
-	default:
-		return min(len(d.rendered), d.viewport.YOffset+1), len(d.rendered)
 	}
+	return min(len(d.rendered), d.viewport.YOffset+1), len(d.rendered)
 }
 
 func (d *detailState) view() string {
@@ -2146,10 +1912,8 @@ func (d *detailState) compactView(layout detailLayout) string {
 
 func (t detailTab) title() string {
 	switch t {
-	case tabSubagents:
-		return "Subagents"
-	case tabInfo:
-		return "Info"
+	case tabOverview:
+		return "Overview"
 	default:
 		return "Timeline"
 	}
@@ -2179,42 +1943,19 @@ func (d *detailState) compactPanelLabel() panelLabel {
 }
 
 func (d *detailState) tabLabel() panelLabel {
-	timeline := "Timeline"
-	subagents := "Subagents"
-	info := "Info"
-	if count := d.subagentTotal; count > 0 {
-		subagents += fmt.Sprintf(" (%d)", count)
-	}
-	labels := []string{timeline, subagents, info}
-	styles := []lipgloss.Style{d.styles.muted, d.styles.muted, d.styles.muted}
+	labels := []string{"Timeline", "Overview"}
+	styles := []lipgloss.Style{d.styles.muted, d.styles.muted}
 	active := int(d.tab)
-	if active < 0 || active >= len(labels) {
-		active = 0
-	}
 	labels[active] = "[" + labels[active] + "]"
 	styles[active] = d.styles.title
-	return panelLabel{
-		plain:  strings.Join(labels, "  "),
-		styled: styles[0].Render(labels[0]) + d.styles.title.Render("  ") + styles[1].Render(labels[1]) + d.styles.title.Render("  ") + styles[2].Render(labels[2]),
-	}
+	return panelLabel{plain: strings.Join(labels, "  "), styled: styles[0].Render(labels[0]) + d.styles.title.Render("  ") + styles[1].Render(labels[1])}
 }
 
-func (d *detailState) activeTabText() string {
-	label := d.tab.title()
-	if d.tab == tabSubagents {
-		if count := d.subagentTotal; count > 0 {
-			label += fmt.Sprintf(" (%d)", count)
-		}
-	}
-	return "[" + label + "]"
-}
+func (d *detailState) activeTabText() string { return "[" + d.tab.title() + "]" }
 
 func (d *detailState) activeTabLabel() panelLabel {
 	maxWidth := max(1, d.width-5)
 	text := strings.TrimSuffix(strings.TrimPrefix(d.activeTabText(), "["), "]")
-	if ansi.StringWidth(text)+2 > maxWidth && d.tab == tabSubagents && d.subagentTotal > 0 {
-		text = d.tab.title()
-	}
 	plain := "…"
 	if maxWidth >= 2 {
 		plain = "[" + ansi.Truncate(text, maxWidth-2, "…") + "]"
@@ -2224,7 +1965,7 @@ func (d *detailState) activeTabLabel() panelLabel {
 
 func detailKeyText(width int, mono bool, tab detailTab, wrap bool) string {
 	enterHint := "↵ inspect"
-	if tab == tabSubagents {
+	if tab == tabOverview {
 		enterHint = "↵ open"
 	}
 	wrapHint := "w wrap"
@@ -2235,16 +1976,13 @@ func detailKeyText(width int, mono bool, tab detailTab, wrap bool) string {
 	hints := []string{"j/k scroll"}
 	if tab == tabTimeline {
 		hints = append(hints, "←/→ fold", "space toggle", bulkHint, enterHint, "tab switch", wrapHint)
-	} else if tab == tabSubagents {
-		hints = append(hints, "←/→ column", "⇧"+sortColumnKey+" sort", enterHint, "tab switch")
+	} else if tab == tabOverview {
+		hints = append(hints, "←/→ column", "⇧"+sortColumnKey+" sort", enterHint, "tab switch", wrapHint)
 	} else {
 		hints = append(hints, "tab switch", wrapHint)
 	}
 	hints = append(hints, timeFormatKey+" time")
 	mouseHint := "mouse scroll/click"
-	if tab == tabInfo {
-		mouseHint = "mouse wheel scroll"
-	}
 	hints = append(hints, "esc back", mouseHint)
 	if !mono {
 		hints = append(hints, "t theme")
@@ -2406,7 +2144,7 @@ func (d *detailState) styleLineBody(line string, detail detailLine, first bool) 
 	if detail.role == detailRow && detail.subagentSession != nil {
 		return d.styleSubagentLine(line, detail)
 	}
-	if detail.role == detailHeader && d.tab == tabSubagents {
+	if detail.subagentHeader {
 		markerWidth := min(2, ansi.StringWidth(line))
 		marker := ansi.Cut(line, 0, markerWidth)
 		header := subagentHeader(d.visibleSubagentColumns(), d.subagentSort, d.subagentColumnFocus, d.styles)

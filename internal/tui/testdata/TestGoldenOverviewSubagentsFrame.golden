@@ -3,7 +3,18 @@
 │claude │ starship (/workspace/starship) │ opus-4.8                                      │
 │branch orbit/alpha │ Jan 02 05:44→Jan 02 06:04 │ total ~$1.72                           │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-╭─ Timeline  [Subagents (5)]  Info ──────────────────────────────────────────────────────╮
+╭─ Timeline  [Overview] ─────────────────────────────────────────────────────────────────╮
+│  Activity     TURNS TOKENS    COST                                                     │
+│  own              0   128k   $0.84                                                     │
+│  subagents       33    64k  ~$0.88                                                     │
+│  total           33   192k  ~$1.72                                                     │
+│                                                                                        │
+│  Own model costs                                                                       │
+│  claude-opus-4-8                                                                       │
+│    input        120k · price unavailable                                               │
+│    output       8000 · price unavailable                                               │
+│                                                                                        │
+│  Subagents (5)                                                                         │
 │  AGENT  TITLE                                          MODEL         TURNS    COST  AGE│
 │› codex  Ship the expedition                            gpt-5.6           6   $0.20   1m│
 │  claude Scout the ridge                                opus-4.8         27  ~$0.68  12m│
@@ -11,8 +22,5 @@
 │  claude │  └─ Inspect the cave map                     sonnet-4-7        5  ~$0.08   2m│
 │  codex  └─ Review the findings                         gpt-5.6           3  ~$0.16   4m│
 │                                                                                        │
-│                                                                                        │
-│                                                                                        │
-│                                                                                        │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
-j/k scroll   ←/→ column   ⇧O sort   ↵ open   tab switch   T time   esc back   q quit
+←/→ column   ⇧O sort   ↵ open   tab switch   w nowrap   T time   esc back   q quit
