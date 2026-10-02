@@ -379,8 +379,6 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 				}
 			case "server_tool_use":
 				// The ID check keeps a re-logged block from adding a second row.
-				// An advisor block follows the reasoning of its turn, so the head
-				// usage below never lands on this row.
 				if record.Type != "assistant" || block.Name != "advisor" {
 					continue
 				}
@@ -407,14 +405,20 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 			if usage, ok := claudeRequestUsage(record.Message.Model, record.Message.Usage); ok {
 				key := record.Message.ID + "\x00" + record.RequestID
 				dedupe := record.Message.ID != ""
+				// An advisor row gets the advisor usage after the pass, which
+				// would replace the executor usage, so the head skips it.
+				head := turnStart
+				for head < len(session.Events) && session.Events[head].Kind == model.EventAdvisor {
+					head++
+				}
 				if index, seen := headOf[key]; dedupe && seen {
 					if usage.TotalTokens() > session.Events[index].Usage.TotalTokens() {
 						p.setEventUsage(&session.Events[index], usage)
 					}
-				} else if len(session.Events) > turnStart {
-					p.setEventUsage(&session.Events[turnStart], usage)
+				} else if head < len(session.Events) {
+					p.setEventUsage(&session.Events[head], usage)
 					if dedupe {
-						headOf[key] = turnStart
+						headOf[key] = head
 					}
 				}
 			}

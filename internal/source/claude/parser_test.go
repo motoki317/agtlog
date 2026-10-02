@@ -2110,3 +2110,37 @@ func TestLoadEventsCostsAdvisorSubInference(t *testing.T) {
 		t.Fatalf("advisor row cost = %v (priced=%v), want 3500", got.Cost.Total(), got.Priced)
 	}
 }
+
+// Claude Code often logs a thinking block with empty text, and the timeline
+// drops it. The advisor block can then be the first row of its request.
+func TestLoadEventsKeepsExecutorUsageOffAdvisorRow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-advisor-first.jsonl")
+	line := func(content, iterations string) string {
+		return `{"type":"assistant","requestId":"req1","message":{"id":"msg1","model":"claude-opus-4-8","content":[` +
+			content + `],"usage":{"input_tokens":100,"output_tokens":50,"iterations":[` + iterations + `]}}}`
+	}
+	executor := `{"type":"message","input_tokens":100,"output_tokens":50}`
+	advisor := `{"type":"advisor_message","model":"claude-fable-5","input_tokens":1000,"output_tokens":500}`
+	content := strings.Join([]string{
+		line(`{"type":"thinking","thinking":"","signature":"sig"}`, executor),
+		line(`{"type":"server_tool_use","id":"srv1","name":"advisor","input":{}}`, executor),
+		line(`{"type":"text","text":"done"}`, executor+","+advisor),
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentClaude}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	var total model.Usage
+	for _, event := range session.Events {
+		if event.Usage != nil {
+			total = total.Add(*event.Usage)
+		}
+	}
+	if total.InputTokens != 1100 || total.OutputTokens != 550 {
+		t.Fatalf("timeline usage = %d/%d, want executor plus advisor 1100/550", total.InputTokens, total.OutputTokens)
+	}
+}
