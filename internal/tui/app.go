@@ -23,33 +23,37 @@ type detailScreen interface {
 }
 
 type Model struct {
-	registry            *source.Registry
-	sessions            []*model.Session
-	visible             []*model.Session
-	visibleProjects     int
-	visibleCost         model.Cost
-	filter              textinput.Model
-	filtering           bool
-	sortState           sortState
-	columnFocus         listColumnKind
-	agent               agentFilter
-	screen              screen
-	detail              detailScreen
-	detailStack         []detailScreen
-	cursor              int
-	listOffset          int
-	filterSelection     string
-	width               int
-	height              int
-	keys                keyMap
-	helpOpen            bool
-	status              string
-	watchingRoots       int
-	theme               Theme
-	styles              styles
-	absoluteTime        bool
-	now                 func() time.Time
-	ctx                 context.Context
+	registry        *source.Registry
+	sessions        []*model.Session
+	visible         []*model.Session
+	visibleProjects int
+	visibleCost     model.Cost
+	filter          textinput.Model
+	filtering       bool
+	sortState       sortState
+	columnFocus     listColumnKind
+	agent           agentFilter
+	screen          screen
+	detail          detailScreen
+	detailStack     []detailScreen
+	cursor          int
+	listOffset      int
+	// filterSelection identifies the row to restore once the filter stops hiding it.
+	// It does not follow the cursor while the filter input is open.
+	filterSelection string
+	width           int
+	height          int
+	keys            keyMap
+	helpOpen        bool
+	status          string
+	watchingRoots   int
+	theme           Theme
+	styles          styles
+	absoluteTime    bool
+	now             func() time.Time
+	ctx             context.Context
+	// Generation counters tag async commands. A result applies only where its
+	// generation still matches, so a superseded command cannot apply stale data.
 	refreshGeneration   uint64
 	detailGeneration    uint64
 	childGeneration     uint64
@@ -59,8 +63,11 @@ type Model struct {
 	discoveryCompleted  int
 	discoveryTotal      int
 	discoveryTotalKnown bool
-	discoveryTouched    map[string]bool
-	discoveryErr        error
+	// discoveryTouched holds the paths that watcher updates changed during
+	// initial discovery. The follower parses changes only after discovery
+	// returns, so these updates are newer than the discovery result.
+	discoveryTouched map[string]bool
+	discoveryErr     error
 }
 
 type screen int
@@ -120,6 +127,9 @@ func (m Model) WithWatchingRoots(count int) Model {
 	return m
 }
 
+// WithDiscoveryProgress shows the loading state until a SessionUpdate with
+// DiscoveryComplete arrives. The update loop polls progress while discovery
+// runs on another goroutine, so progress must be safe for concurrent use.
 func (m Model) WithDiscoveryProgress(progress func() (completed, total int, known bool)) Model {
 	m.discoveryLoading = true
 	m.discoveryProgress = progress
@@ -155,6 +165,9 @@ func (m *Model) readDiscoveryProgress() {
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Update has a value receiver, but detail screens are pointers. Clone the
+	// active screen before any change so that the caller's Model stays intact.
+	// A wheel event moves only the viewport, so a shallow copy is enough.
 	if mouse, ok := msg.(tea.MouseMsg); ok {
 		if m.helpOpen || (!isMouseWheel(mouse) && !isLeftMouseRelease(mouse)) {
 			return m, nil
@@ -219,6 +232,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.failLoadingChildDetails(loaded.err)
 				return m, nil
 			}
+			// Live updates can reattribute ownership while the load runs, so
+			// the list's current attribution replaces the loaded copy's.
 			for _, current := range m.sessions {
 				if sessionIdentity(current) == loaded.identity {
 					copyOwnershipAttribution(loaded.session, current)
@@ -274,6 +289,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.discoveryErr = update.DiscoveryErr
 			if update.DiscoveryErr != nil {
 				m.status = "discovery: " + terminalText(update.DiscoveryErr.Error(), 160)
+				// No watcher runs after initial discovery fails.
 				m.watchingRoots = 0
 			}
 		}
@@ -942,6 +958,8 @@ func refreshSessions(ctx context.Context, registry *source.Registry, generation 
 }
 
 func (m *Model) applySessionUpdate(update source.SessionUpdate) {
+	// Without earlier watcher updates, the discovery result is the whole list,
+	// and discovery has already attributed ownership across it.
 	if update.DiscoveryComplete && len(m.discoveryTouched) == 0 && len(m.sessions) == 0 && len(update.RemovedPaths) == 0 {
 		m.sessions = append([]*model.Session(nil), update.Sessions...)
 		m.rebuildList()
@@ -959,7 +977,7 @@ func (m *Model) applySessionUpdate(update source.SessionUpdate) {
 	}
 	m.sessions = kept
 	// Rows merge by path, not identity: a transcript holds one top-level
-	// session, and its parsed ID can change while the file is still being written.
+	// session, and its parsed ID can change while the agent appends to the file.
 	indices := make(map[string]int, len(m.sessions))
 	for index, session := range m.sessions {
 		indices[session.Path] = index
@@ -1020,6 +1038,9 @@ func (a ownershipAttribution) equalSession(session *model.Session) bool {
 	return true
 }
 
+// refreshOpenOwnership copies replay attribution into the open root detail.
+// Ownership spans every session, so an update to another session can change
+// the open session's share.
 func (m *Model) refreshOpenOwnership(identity string, previous ownershipAttribution) {
 	var summary *model.Session
 	for _, session := range m.sessions {
@@ -1138,6 +1159,8 @@ func (m *Model) applyChildDetailLoaded(loaded childDetailLoadedMsg) (Model, tea.
 	return *m, nil
 }
 
+// loadDetail loads into a copy because the command runs off the update
+// goroutine while the list keeps reading the original.
 func loadDetail(ctx context.Context, registry *source.Registry, session *model.Session, generation uint64) tea.Cmd {
 	identity := sessionIdentity(session)
 	copy := cloneSession(session)
@@ -1166,6 +1189,8 @@ func cloneSession(session *model.Session) *model.Session {
 	return cloneSessionGraph(session, make(map[*model.Session]*model.Session))
 }
 
+// cloneSessionGraph maps each original node to one copy, so an event's
+// Subagent and the matching Subagents entry stay one node in the copy.
 func cloneSessionGraph(session *model.Session, cloned map[*model.Session]*model.Session) *model.Session {
 	if copy := cloned[session]; copy != nil {
 		return copy
@@ -1319,11 +1344,13 @@ func (m Model) View() string {
 	return m.listView()
 }
 
+// StaticView renders every visible row for output that is not a terminal.
 func (m Model) StaticView() string {
 	contextHeight := 3
 	if m.filtering {
 		contextHeight++
 	}
+	// Four rows hold the session panel borders, its header, and the key bar.
 	m.height = max(m.height, len(m.visible)+contextHeight+4)
 	return m.listView()
 }

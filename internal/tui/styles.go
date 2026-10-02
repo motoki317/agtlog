@@ -87,6 +87,9 @@ type promptFallback struct {
 	systemANSI    string
 }
 
+// promptFallbacks hold hand-picked 256-color and 16-color prompt backgrounds.
+// They keep the base, prompt, and selection backgrounds distinct after color
+// conversion.
 var promptFallbacks = map[string]promptFallback{
 	"default": {userANSI256: "233", systemANSI256: "234", userANSI: "4", systemANSI: "5"},
 	"nord":    {userANSI256: "24", systemANSI256: "60", userANSI: "4", systemANSI: "5"},

@@ -91,6 +91,8 @@ func newListLayout(height int, filtering bool) listLayout {
 	if filtering {
 		contextHeight++
 	}
+	// A full layout needs the context panel, the key bar, and a session panel
+	// that holds two borders, a header, and one row.
 	if height < contextHeight+5 {
 		keyBarHeight := 1
 		if height == 3 {
@@ -418,6 +420,9 @@ func compactDollars(usd float64, maxWidth int) string {
 	return strings.Repeat("9", max(1, maxWidth))
 }
 
+// terminalText makes log text safe to print. Control and format characters
+// become spaces, so log content cannot inject escape sequences or
+// bidirectional overrides.
 func terminalText(value string, maxRunes int) string {
 	var output strings.Builder
 	count := 0
@@ -497,6 +502,8 @@ func (m Model) filterInputLine(width int) string {
 		return ""
 	}
 	runes := []rune(m.filter.Value())
+	// Replace rather than drop, so the filter position, a rune index, still
+	// points at the same rune.
 	for index, r := range runes {
 		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
 			runes[index] = ' '
@@ -716,6 +723,9 @@ func (m Model) watchedRootCount() int {
 	return m.watchingRoots
 }
 
+// panelLine pairs a row's plain text with its styled rendering. A panel uses
+// styled only when plain already fills the inner width exactly. Otherwise it
+// renders the fitted plain text in the row style.
 type panelLine struct {
 	plain  string
 	styled string
