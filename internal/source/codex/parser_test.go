@@ -158,6 +158,59 @@ func TestLoadNodeEventsDoesNotOpenSeparateDescendants(t *testing.T) {
 	}
 }
 
+func parsePlaceholderScout(t *testing.T) (root, scout *model.Session) {
+	t.Helper()
+	rootPath := filepath.Join(t.TempDir(), "rollout-thread-root.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:00:00Z","type":"session_meta","payload":{"id":"thread-root","cwd":"/workspace/starship"}}`,
+		`{"timestamp":"2026-01-02T03:00:01Z","type":"event_msg","payload":{"type":"user_message","message":"Chart the ridge"}}`,
+		`{"timestamp":"2026-01-02T03:00:02Z","type":"event_msg","payload":{"type":"agent_message","message":"Sending a scout"}}`,
+		`{"timestamp":"2026-01-02T03:00:03Z","type":"event_msg","payload":{"type":"sub_agent_activity","agent_thread_id":"thread-scout","agent_path":"/root/scout","kind":"started"}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(rootPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := testParser().Parse(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(root.Subagents) != 1 || root.Subagents[0].Path != rootPath+"#scout" {
+		t.Fatalf("subagents = %#v, want one placeholder without a sidecar", root.Subagents)
+	}
+	return root, root.Subagents[0]
+}
+
+func TestLoadEventsReadsNothingForPlaceholderSubagent(t *testing.T) {
+	_, scout := parsePlaceholderScout(t)
+	parser := testParser()
+	for name, load := range map[string]func(context.Context, *model.Session) error{
+		"LoadNodeEvents": parser.LoadNodeEvents,
+		"LoadEvents":     parser.LoadEvents,
+	} {
+		if err := load(context.Background(), scout); err != nil || len(scout.Events) != 0 {
+			t.Fatalf("%s() events = %#v, error = %v; want no events from the parent file", name, scout.Events, err)
+		}
+	}
+}
+
+func TestLoadEventsReadsSidecarBelowPlaceholderSubagent(t *testing.T) {
+	root, scout := parsePlaceholderScout(t)
+	mapperPath := filepath.Join(t.TempDir(), "rollout-thread-mapper.jsonl")
+	content := `{"timestamp":"2026-01-02T03:00:04Z","type":"event_msg","payload":{"type":"agent_message","message":"Ridge mapped"}}` + "\n"
+	if err := os.WriteFile(mapperPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mapper := &model.Session{ID: "thread-mapper", Title: "mapper", Agent: model.AgentCodex, Path: mapperPath, AgentPath: "/root/scout/mapper"}
+	scout.Subagents = append(scout.Subagents, mapper)
+
+	if err := testParser().LoadEvents(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	if len(mapper.Events) != 1 || mapper.Events[0].Text != "Ridge mapped" {
+		t.Fatalf("mapper events = %#v, want its own sidecar timeline", mapper.Events)
+	}
+}
+
 func TestLoadEventsPricesUsageFromStringSummaryTurnContextModel(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout-string-summary.jsonl")
 	lines := strings.Join([]string{

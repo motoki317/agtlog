@@ -42,7 +42,12 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 	if depth > maxAgentDepth {
 		return fmt.Errorf("subagent nesting exceeds %d levels", maxAgentDepth)
 	}
-	path := strings.SplitN(session.Path, "#", 2)[0]
+	// A "<file>#<agent path>" placeholder has no sidecar, and the file before
+	// "#" is its parent's, whose records describe the parent.
+	if strings.Contains(session.Path, "#") {
+		return p.loadSubagentEvents(ctx, session, depth, visited, recursive)
+	}
+	path := session.Path
 	if visited[path] {
 		return fmt.Errorf("subagent event cycle at %q", path)
 	}
@@ -340,14 +345,19 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 			}, request.Usage)
 		}
 	}
-	if recursive {
-		for _, subagent := range session.Subagents {
-			if subagent.Path == "" || strings.Contains(subagent.Path, "#") {
-				continue
-			}
-			if err := p.loadEventsRecursive(ctx, subagent, depth+1, visited, true); err != nil {
-				return err
-			}
+	return p.loadSubagentEvents(ctx, session, depth, visited, recursive)
+}
+
+func (p Parser) loadSubagentEvents(ctx context.Context, session *model.Session, depth int, visited map[string]bool, recursive bool) error {
+	if !recursive {
+		return nil
+	}
+	for _, subagent := range session.Subagents {
+		if subagent.Path == "" {
+			continue
+		}
+		if err := p.loadEventsRecursive(ctx, subagent, depth+1, visited, true); err != nil {
+			return err
 		}
 	}
 	return nil
