@@ -393,9 +393,9 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 	return nil
 }
 
-// switchTab saves a tail-following Timeline as an empty focus key. rebuild
-// resolves an empty key to the newest event, so a Timeline that followed the
-// tail resumes following on return, also after a live update replaced the state.
+// switchTab stores an empty Timeline focus key while the Timeline follows the
+// tail. rebuild resolves an empty key to the newest event, so the Timeline
+// resumes following on return, also after a live update replaces the state.
 func (d *detailState) switchTab() {
 	leaving := d.focusKey()
 	if d.followingTail() {
@@ -416,10 +416,10 @@ func (d *detailState) pinnedToBottom() bool {
 	return d.viewport.AtBottom() || d.viewport.YOffset == d.bottomAnchorOffset()
 }
 
-// followingTail reports whether the timeline should reveal newly appended events.
-// The viewport alone is not enough: the cursor moves inside the last screenful
-// without scrolling it, so a viewport-only test would drag the cursor to the
-// newest event while the reader is still reading an earlier one. G re-enables it.
+// followingTail reports whether the Timeline moves to newly appended events.
+// The cursor can move within the last screenful without a scroll. A test of the
+// viewport alone would then drag the cursor to the newest event while the
+// reader reads an earlier one. G resumes following.
 func (d *detailState) followingTail() bool {
 	if d.tab != tabTimeline || !d.pinnedToBottom() {
 		return false
@@ -471,9 +471,9 @@ func (d *detailState) moveFocus(direction int) {
 	d.updateSelection(oldLine, d.focusables[d.focus].line)
 }
 
-// selectRow only moves the cursor. A click never folds the row it lands on:
-// folding is reachable from the keyboard, and toggling under the pointer
-// rewrites the screen the reader was aiming at.
+// selectRow moves the cursor and never folds the clicked row. A fold under the
+// pointer rewrites the rows that the reader aimed at, and the keyboard already
+// folds.
 func (d *detailState) selectRow(index int) {
 	oldLine := d.selectedLine
 	d.focus = index
@@ -520,9 +520,9 @@ func (d *detailState) rebuildKeeping(key string) {
 	}
 }
 
-// setAllExpanded moves the default rather than stamping every row present now.
-// A live session keeps appending rows, and a row the reader has never seen must
-// follow the last bulk choice instead of reverting to the opening default.
+// setAllExpanded changes the default instead of writing an override per row, so
+// rows that a live session appends later follow the last bulk choice
+// (docs/ADR/20260723-bulk-fold-default.md).
 func (d *detailState) setAllExpanded(expanded bool) {
 	key := ""
 	if len(d.focusables) > 0 {
@@ -640,8 +640,8 @@ func overviewLine(text string, role detailRole) detailLine {
 	return detailLine{text: detailPlainText(text), role: role}
 }
 
-// modelCostMarkers indexes the session's pricing caveats by logged model so a
-// per-model line carries its own ~ and ! markers rather than the session-wide flag.
+// modelCostMarkers indexes the pricing caveats by logged model, so each model
+// line carries its own ~ and ! markers instead of the session-wide flag.
 func modelCostMarkers(cost model.Cost) (missing map[string]bool, estimatedRates map[string]string) {
 	missing = make(map[string]bool, len(cost.MissingPricingModels))
 	for _, name := range cost.MissingPricingModels {
@@ -824,7 +824,8 @@ type costRateGroup struct {
 }
 
 func costRateGroups(breakdown model.CostBreakdown) []costRateGroup {
-	// Same order as the ↑read/write/input ↓output flow summary.
+	// The order matches formatTokenFlow. ownModelCosts indexes its token totals
+	// by this order.
 	return []costRateGroup{
 		{label: "cache read", buckets: breakdown.CacheRead},
 		{label: "cache write", buckets: breakdown.CacheWrite},
@@ -1115,8 +1116,8 @@ func (d *detailState) rebuildRendered() {
 		}
 	}
 	d.viewport.SetContent(strings.Join(content, "\n"))
-	// SetContent clamps only an offset past the last row, so shrunk content would
-	// leave blank rows below the bottom.
+	// SetContent clamps only an offset past the last row. Shrunk content otherwise
+	// leaves blank rows below the bottom.
 	d.viewport.SetYOffset(d.viewport.YOffset)
 	selectedRow := d.firstRenderedRow(d.selectedLine)
 	if selectedRow < 0 {
@@ -1213,10 +1214,6 @@ func (d *detailState) firstRenderedRow(detailIndex int) int {
 	return d.renderedStarts[detailIndex]
 }
 
-// sessionLines renders the session as one flat chronological list: a session is
-// one continuous log, so every event is a sibling row carrying its own request's
-// figures. Nesting is reserved for what a row contains — a tool's output, a
-// prompt's full text — and for subagents, which open as their own screen.
 func (d *detailState) sessionLines(session *model.Session, path string) []detailLine {
 	var lines []detailLine
 	for index, event := range session.Events {
@@ -1232,10 +1229,10 @@ func (d *detailState) sessionLines(session *model.Session, path string) []detail
 	return lines
 }
 
-// nextRequestContext is the window the request a prompt triggered was sent with.
-// A user message is not billed and no log counts its tokens, so the prompt row
-// borrows the figure from the request that first carried it, and reports nothing
-// when the prompt triggered none.
+// nextRequestContext returns the prompt tokens of the first billed request after
+// a user prompt. It returns 0 if another prompt or the end of the log comes
+// first. No log counts the tokens of a user message, so the prompt row shows the
+// context of the request that it triggered.
 func nextRequestContext(events []model.Event, userIndex int) int64 {
 	for _, event := range events[userIndex+1:] {
 		if event.Kind == model.EventUser {
@@ -1248,8 +1245,6 @@ func nextRequestContext(events []model.Event, userIndex int) int64 {
 	return 0
 }
 
-// contextPart renders a positive context-token figure. Request rows pass their
-// post-output total; prompt rows pass the next request's starting context.
 func contextPart(tokens int64) (string, bool) {
 	if tokens <= 0 {
 		return "", false
@@ -1257,8 +1252,8 @@ func contextPart(tokens int64) (string, bool) {
 	return "ctx " + humanTokens(tokens), true
 }
 
-// costPart renders a cost figure only when priced and at least a cent, so sub-cent
-// output costs do not clutter every row.
+// costPart omits a cost that rounds to $0.00, so that sub-cent costs do not fill
+// every row.
 func costPart(usd float64, priced, estimated bool) (string, bool) {
 	if !priced || usd < 0.005 {
 		return "", false
@@ -1266,9 +1261,6 @@ func costPart(usd float64, priced, estimated bool) (string, bool) {
 	return formatCost(model.Cost{USD: usd, Estimated: estimated}), true
 }
 
-// eventMetricParts renders one billed request's own figures for the event that
-// carries its usage: the input/output breakdown, priced cost, and the context
-// after its output.
 func eventMetricParts(event model.Event) []string {
 	if event.Usage == nil {
 		return nil
@@ -1278,15 +1270,16 @@ func eventMetricParts(event model.Event) []string {
 	if part, ok := costPart(event.Cost.Total(), event.Priced, event.CostEstimated); ok {
 		parts = append(parts, part)
 	}
+	// A request row reports its context after the output, so ctx includes the
+	// output tokens.
 	if part, ok := contextPart(usage.TotalTokens()); ok {
 		parts = append(parts, part)
 	}
 	return parts
 }
 
-// foldMarker is the single source of the ▸/▾ fold indicator. Every row obtains
-// its marker here so the glyph can never appear on a row that is not wired to
-// expand — the mismatch that made user prompts look foldable but do nothing.
+// foldMarker is the only source of the fold glyph for timeline rows, so the
+// glyph appears only on a row that can fold.
 func foldMarker(expandable, expanded bool) string {
 	switch {
 	case !expandable:
@@ -1302,15 +1295,12 @@ func timelineUserKey(path string, index int) string {
 	return fmt.Sprintf("%s/user/%d", path, index)
 }
 
-// timelinePreviewCap is the display width past which a single-line message is
-// treated as foldable, so a long reply that the header truncates can still reveal
-// its full text in the body.
+// timelinePreviewCap is the display width above which a single-line message can
+// fold. Its body then shows the full text that the row header truncates.
 const timelinePreviewCap = 80
 
-// textExpandable reports whether a message carries more than the single truncated
-// line the collapsed row shows — multiple non-empty lines, or one line long
-// enough that the header truncates it — so the fold marker only appears when
-// expanding reveals more of the text.
+// textExpandable reports whether the body shows more than the collapsed row: a
+// second non-blank line, or one line wider than timelinePreviewCap.
 func textExpandable(text string) bool {
 	seen := false
 	for _, line := range strings.Split(text, "\n") {
@@ -1325,11 +1315,6 @@ func textExpandable(text string) bool {
 	return ansi.StringWidth(strings.TrimSpace(text)) > timelinePreviewCap
 }
 
-// userPromptLines renders a user prompt: a header row with a truncated preview
-// and, when expanded, the full prompt beneath it, so the timeline can show what
-// the model was prompted with without leaving for the item view. context is the
-// window the request this prompt triggered was sent with; the prompt bills no
-// tokens of its own.
 func (d *detailState) userPromptLines(event model.Event, key string, context int64) []detailLine {
 	expandable := textExpandable(event.Text)
 	expanded := expandable && d.isExpanded(key)
@@ -1360,16 +1345,13 @@ func (d *detailState) userPromptLines(event model.Event, key string, context int
 	return lines
 }
 
-// metricsText joins the metric parts into a " · "-separated block placed
-// flush-right on the row, or "" when there are none.
 func metricsText(parts []string) string {
 	return strings.Join(parts, " · ")
 }
 
-// composeMetricRow lays out a header row as left content and a right-aligned
-// metrics block so every row's tokens/cost/context line up in a column. The left
-// side truncates first; when the row is too narrow to hold both, the metrics win
-// the space because they are the aligned column the eye scans.
+// composeMetricRow right-aligns the metrics so that they form one column across
+// rows. If the row cannot hold both parts, the left text yields, because readers
+// scan the metrics column.
 func composeMetricRow(left, metrics string, width int) string {
 	if width <= 0 {
 		return ""
@@ -1551,10 +1533,6 @@ func detailHasBody(event model.Event) bool {
 	return detail != nil && (detail.Diff != "" || detail.Output != "" || detailInputBody(event) != "" && strings.Contains(detail.Input, "\n"))
 }
 
-// assistantTextLines renders an assistant reply as one collapsible row: a preview
-// carrying the reply's own request metrics on the right, foldable to reveal the
-// full text below. This keeps every timeline entry a single row when collapsed,
-// consistent with tool rows.
 func (d *detailState) assistantTextLines(event model.Event, key string, agent model.AgentKind) []detailLine {
 	label := terminalText(string(agent), 32) + ":"
 	expandable := textExpandable(event.Text)
@@ -1578,12 +1556,12 @@ func (d *detailState) assistantTextLines(event model.Event, key string, agent mo
 func toolLine(event model.Event, expanded bool) string {
 	name := toolDisplayName(event.ToolName)
 	line := glyphTool + " " + name
-	// An expanded row renders the input and output in the body below, so drop
-	// the header's inline preview and result summary to avoid showing them twice.
-	if input := firstLine(event.ToolInput); input != "" && !(expanded && detailInputBody(event) != "") {
+	bodyShowsInput := expanded && detailInputBody(event) != ""
+	bodyShowsOutput := expanded && event.Detail != nil && event.Detail.Output != ""
+	if input := firstLine(event.ToolInput); input != "" && !bodyShowsInput {
 		line += "(" + input + ")"
 	}
-	if event.ResultSummary != "" && !(expanded && event.Detail != nil && event.Detail.Output != "") {
+	if event.ResultSummary != "" && !bodyShowsOutput {
 		line += " → " + firstLine(event.ResultSummary)
 	}
 	if event.Duration > 0 {
@@ -2038,9 +2016,8 @@ func (d *detailState) panelTitle(name string) string {
 	return ansi.Truncate(terminalText(title, 256), max(1, d.width-5), "…")
 }
 
-// headerFieldSep divides the distinct metadata fields on the header's agent and
-// usage lines. A spaced vertical bar reads as a column boundary where a middle
-// dot blurred the fields together.
+// headerFieldSep is a spaced vertical bar, which reads as a column boundary. A
+// middle dot blurs adjacent header fields together.
 const headerFieldSep = " │ "
 
 func (d *detailState) headerPanelLines() []panelLine {
@@ -2147,10 +2124,8 @@ func (d *detailState) styleLine(line string, detail detailLine, selected, first 
 	return d.styleLineBody(line, detail, first)
 }
 
-// styleLineBody colors only the log-type token (the label) and mutes the trailing
-// metrics, leaving the content between them in the row's plain foreground. Keeping
-// emphasis to the type and metrics — a small fraction of each row — is what makes a
-// long timeline scannable instead of a wall of one color.
+// styleLineBody colors only the label and mutes the metrics. The rest of the row
+// keeps the role's base style, so a long timeline does not become one color.
 func (d *detailState) styleLineBody(line string, detail detailLine, first bool) string {
 	if detail.role == detailRow && detail.subagentSession != nil {
 		return d.styleSubagentLine(line, detail)
@@ -2189,9 +2164,9 @@ type styleCell struct {
 	style lipgloss.Style
 }
 
-// renderStyleCells paints the sorted, non-overlapping cells with their own styles
-// and every gap between them with base, so a row can highlight a few tokens while
-// the rest keeps one continuous background.
+// renderStyleCells renders each cell with its own style and every gap with base.
+// Cells hold byte offsets into line and must be sorted by start. A cell that
+// overlaps an earlier cell or ends past the line is skipped.
 func renderStyleCells(line string, base lipgloss.Style, cells []styleCell) string {
 	var styled strings.Builder
 	position := 0
@@ -2207,9 +2182,8 @@ func renderStyleCells(line string, base lipgloss.Style, cells []styleCell) strin
 	return styled.String()
 }
 
-// roleBaseStyle is the unemphasized foreground a row's non-highlighted text uses.
-// Tool and Task rows base on the plain row style, not accent, so only their type
-// token carries color.
+// roleBaseStyle gives tool and Task rows the plain row style instead of accent,
+// so only their label carries color.
 func (d *detailState) roleBaseStyle(role detailRole) lipgloss.Style {
 	switch role {
 	case detailHeader:
@@ -2233,11 +2207,8 @@ func (d *detailState) roleBaseStyle(role detailRole) lipgloss.Style {
 	}
 }
 
-// labelStyle colors the type token with its role's identity so the timeline is
-// scannable by who acted: the agent's own color for a reply, green for a human
-// prompt, purple for a tool call, muted for a harness-injected turn, and accent
-// for a Task or advisor. Each keeps its row's background tint. Reusing the key-hint
-// and header hues avoids widening the theme for two more label colors.
+// labelStyle reuses the key-hint and header hues for prompt and tool labels
+// instead of adding two theme colors.
 func (d *detailState) labelStyle(detail detailLine) lipgloss.Style {
 	base := d.roleBaseStyle(detail.role)
 	switch detail.role {
