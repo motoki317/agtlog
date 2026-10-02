@@ -546,16 +546,24 @@ func (w *Watcher) run() {
 	pending := make(map[string]bool)
 	var timer *time.Timer
 	var timerC <-chan time.Time
+	// Without a deadline, a file written more often than the debounce would
+	// never flush. The rescan already leaves a missed event unseen for up to
+	// RescanInterval, so a burst may delay a flush that long and no longer.
+	var deadline time.Time
 	rescan := time.NewTicker(w.options.RescanInterval)
 	defer rescan.Stop()
 	queue := func(path string) {
 		if filepath.Ext(path) != ".jsonl" {
 			return
 		}
+		if len(pending) == 0 {
+			deadline = time.Now().Add(w.options.RescanInterval)
+		}
 		_, statErr := os.Stat(path)
 		pending[path] = errors.Is(statErr, os.ErrNotExist)
+		wait := min(w.options.Debounce, time.Until(deadline))
 		if timer == nil {
-			timer = time.NewTimer(w.options.Debounce)
+			timer = time.NewTimer(wait)
 		} else {
 			if !timer.Stop() {
 				select {
@@ -563,7 +571,7 @@ func (w *Watcher) run() {
 				default:
 				}
 			}
-			timer.Reset(w.options.Debounce)
+			timer.Reset(wait)
 		}
 		if fingerprint, err := fileFingerprint(path); err == nil {
 			w.known[path] = fingerprint

@@ -337,6 +337,58 @@ func TestWatcherEmitsDebouncedAppend(t *testing.T) {
 	}
 }
 
+func TestWatcherFlushesDuringSustainedWrites(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const debounce = 100 * time.Millisecond
+	watcher, err := newWatcher(context.Background(), []string{root}, WatchOptions{Debounce: debounce, RescanInterval: 3 * debounce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = watcher.Close() }()
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	writerDone := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(debounce / 10)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				writerDone <- nil
+				return
+			case <-ticker.C:
+				if _, err := file.WriteString("{}\n"); err != nil {
+					writerDone <- err
+					return
+				}
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		if err := <-writerDone; err != nil {
+			t.Error(err)
+		}
+		_ = file.Close()
+	}()
+
+	select {
+	case change := <-watcher.Events():
+		if !reflect.DeepEqual(change.Paths, []string{path}) {
+			t.Fatalf("change paths = %v, want %v", change.Paths, []string{path})
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no change while writes continued faster than the debounce")
+	}
+}
+
 func TestNewWatcherStopsInitialScanForCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
