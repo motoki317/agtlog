@@ -106,8 +106,8 @@ func CleanTimelineText(value string) string {
 			break
 		}
 		offset = start + end + len(closeTag)
-		// A block that owned its whole line leaves that line's newline behind.
-		// Dropping it keeps the removal from reading as a paragraph break.
+		// If the block filled its whole line, drop the newline after it too.
+		// Otherwise the removal reads as a paragraph break.
 		if indent := len(bytes.TrimRight(stripped, " \t")); (indent == 0 || stripped[indent-1] == '\n') && offset < len(value) && value[offset] == '\n' {
 			stripped, offset = stripped[:indent], offset+1
 		}
@@ -116,15 +116,15 @@ func CleanTimelineText(value string) string {
 	lines := strings.Split(value, "\n")
 	cleaned := lines[:0]
 	for _, line := range lines {
-		// Keep indentation so code blocks and nested lists survive; only the
-		// blank lines that separate paragraphs are normalized.
+		// Trim only trailing space. Code blocks and nested lists need their
+		// indentation.
 		line = strings.TrimRightFunc(line, unicode.IsSpace)
 		if strings.EqualFold(strings.TrimSpace(line), "warmup") {
 			continue
 		}
 		if line == "" && (len(cleaned) == 0 || cleaned[len(cleaned)-1] == "") {
-			// Removing a noise block leaves the blank lines that surrounded it,
-			// so collapse runs into the single blank line a paragraph break needs.
+			// A removed noise block leaves the blank lines around it. Keep one
+			// blank line per run as the paragraph break.
 			continue
 		}
 		cleaned = append(cleaned, line)
@@ -179,22 +179,22 @@ func BoundedDetailText(value string, limits ...int) string {
 
 func ElideEncrypted(text string) string {
 	const (
-		prefix    = "gAAAA"
-		minLength = 64
+		fernetPrefix = "gAAAA"
+		minLength    = 64
 	)
 	var elided strings.Builder
 	searchFrom, writeFrom := 0, 0
 	for searchFrom < len(text) {
-		offset := strings.Index(text[searchFrom:], prefix)
+		offset := strings.Index(text[searchFrom:], fernetPrefix)
 		if offset < 0 {
 			break
 		}
 		start := searchFrom + offset
 		if start > 0 && encryptedTokenChar(text[start-1]) {
-			searchFrom = start + len(prefix)
+			searchFrom = start + len(fernetPrefix)
 			continue
 		}
-		end := start + len(prefix)
+		end := start + len(fernetPrefix)
 		for end < len(text) && encryptedTokenChar(text[end]) {
 			end++
 		}
@@ -202,7 +202,7 @@ func ElideEncrypted(text string) string {
 			end++
 		}
 		if end-start < minLength {
-			searchFrom = start + len(prefix)
+			searchFrom = start + len(fernetPrefix)
 			continue
 		}
 		if elided.Len() == 0 {

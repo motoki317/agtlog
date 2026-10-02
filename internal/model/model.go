@@ -13,12 +13,15 @@ const (
 )
 
 type Usage struct {
-	Model                  string
-	InputTokens            int64
-	OutputTokens           int64
-	CacheCreation5mTokens  int64
-	CacheCreation1hTokens  int64
-	CacheReadTokens        int64
+	Model                 string
+	InputTokens           int64
+	OutputTokens          int64
+	CacheCreation5mTokens int64
+	CacheCreation1hTokens int64
+	CacheReadTokens       int64
+	// InputIncludesCacheRead is true when InputTokens already counts
+	// CacheReadTokens. Codex reports usage this way. Claude reports cache reads
+	// apart from input.
 	InputIncludesCacheRead bool
 	Speed                  string
 	CostUSD                *float64
@@ -27,8 +30,9 @@ type Usage struct {
 type RequestUsage struct {
 	MessageID string
 	RequestID string
-	// Offset locates the source record when an adapter has one. Codex uses a
-	// negative offset for an authoritative aggregate with no physical record.
+	// Offset is the byte offset of the source record when the adapter records
+	// one. Codex uses a negative offset for an authoritative aggregate, which has
+	// no physical record.
 	Offset int64
 	Usage  Usage
 	USD    float64 `json:"-"`
@@ -55,11 +59,9 @@ func (u Usage) TotalTokens() int64 {
 	return total
 }
 
-// PromptTokens is the size of the request prompt. Because the API is stateless
-// the whole conversation is re-sent each request, so this equals the context
-// window occupied at that request. Cache reads are part of the prompt: input
-// already counts them when the source folds them in (Codex) and does not when it
-// keeps them separate (Claude); cache writes are prompt tokens either way.
+// PromptTokens is the prompt size of one request. The API is stateless, so each
+// request re-sends the whole conversation, and the prompt size equals the
+// context window in use at that request.
 func (u Usage) PromptTokens() int64 {
 	prompt := u.InputTokens
 	if !u.InputIncludesCacheRead {
@@ -70,9 +72,9 @@ func (u Usage) PromptTokens() int64 {
 	return prompt
 }
 
-// FlowTokens is the new tokens a request adds: freshly written input plus all
-// output, excluding context re-read from cache. It answers "what did this turn
-// add", the per-turn counterpart to the cumulative PromptTokens.
+// FlowTokens counts the tokens that one request adds: uncached input, cache
+// writes, and output. Cache reads re-send earlier context, so FlowTokens
+// excludes them. PromptTokens counts the whole context instead.
 func (u Usage) FlowTokens() int64 {
 	input := u.InputTokens
 	if u.InputIncludesCacheRead {
@@ -101,8 +103,8 @@ type Cost struct {
 	MissingPricingModels []string
 }
 
-// EstimatedRate records a logged model priced at another model's published rate.
-// Naming the stand-in is what makes an estimate reviewable.
+// EstimatedRate records a logged Model that agtlog priced at the published rate
+// of PricingModel. The name of the stand-in lets a reader review the estimate.
 type EstimatedRate struct {
 	Model        string
 	PricingModel string
@@ -211,14 +213,14 @@ const (
 	EventUsage         EventKind = "usage"
 )
 
-// ToolDetail is the full tool payload shown when a tool call is expanded.
+// ToolDetail is the full tool payload that an expanded tool call shows.
 type ToolDetail struct {
-	Input  string // Full invocation; newlines preserved.
-	Diff   string // Unified-diff body for edits, writes, and patches.
-	Output string // Full result; newlines preserved.
+	Input  string // Full invocation with its newlines.
+	Diff   string // Unified diff body for edits, writes, and patches.
+	Output string // Full result with its newlines.
 }
 
-// RecordRef locates the physical JSONL line an event came from.
+// RecordRef locates the physical JSONL line that produced an event.
 type RecordRef struct {
 	Path   string
 	Offset int64
@@ -240,28 +242,29 @@ type Event struct {
 	Duration      time.Duration
 	AgentID       string
 	Subagent      *Session
-	// Usage is the API request usage the log attributes to this event, set on the
-	// single event that a billed request (Claude assistant line, Codex token_count)
-	// produces so a turn can sum FlowTokens and read the last PromptTokens without
-	// double counting. Nil for events without their own request.
+	// Usage comes from the billed request that produced this event: a Claude
+	// assistant line or a Codex token_count. Only one event per request
+	// carries it, so a turn can sum FlowTokens and read PromptTokens from its
+	// last request without double counting. Usage is nil for an event without
+	// its own request.
 	Usage *Usage
-	// Cost is the priced breakdown of that same request, kept beside Usage so the
-	// timeline can split input-side from output-side cost. Empty when Priced is
-	// false. CostEstimated marks a substituted rate; PricingModel names the
-	// published stand-in and is empty when Model has its own rate.
+	// Cost is the priced breakdown of the same request. The timeline uses it to
+	// split input-side cost from output-side cost. Cost is empty when Priced is
+	// false. CostEstimated marks a substituted rate. PricingModel names the
+	// published stand-in, and it is empty when Model has its own rate.
 	Cost          CostBreakdown
 	Priced        bool
 	CostEstimated bool
 	PricingModel  string `json:"-"`
-	// Harness marks a user-role record the agent harness injected rather than a
-	// human typing: skill bodies, task notifications, compaction summaries, and
-	// slash-command echoes. Both agents log these as user turns, so the timeline
-	// needs the flag to label them apart.
+	// Harness marks a user-role record that the agent harness injected, not text
+	// that a person typed: skill bodies, task notifications, compaction
+	// summaries, and slash-command echoes. Both agents log these records as user
+	// turns, so the timeline needs the flag to label them.
 	Harness bool
-	// CompactTrigger and CompactPostTokens describe an EventCompact boundary: how
-	// the compaction was invoked ("manual" or "auto") and the context token count
-	// that survived it. The summarization request itself is unbilled and unlogged,
-	// so a compaction carries no Usage. Empty and zero for every other event.
+	// CompactTrigger ("manual" or "auto") and CompactPostTokens, the context size
+	// in tokens after the compaction, describe an EventCompact boundary. The log
+	// has no usage for the summarization request, so a compaction carries no
+	// Usage. Both fields keep their zero values for every other event.
 	CompactTrigger    string
 	CompactPostTokens int64
 }
@@ -277,8 +280,8 @@ type Session struct {
 	ID    string
 	Agent AgentKind
 	Path  string
-	// SourceSize bounds detail loading to the snapshot consumed by summary
-	// parsing. Zero means the bound is unavailable.
+	// SourceSize is the byte length that summary parsing read. Detail loading
+	// reads no further. Zero means that the bound is unknown.
 	SourceSize int64
 	CWD        string
 	Project    string
@@ -293,8 +296,9 @@ type Session struct {
 	Messages   int
 	ToolCalls  int
 	Usage      []Usage
-	// Requests is the serialized billed ledger. Codex stores per-request entries
-	// for clean partitions and authoritative per-model aggregates otherwise.
+	// Requests is the billed-request ledger that the summary cache stores. Codex
+	// stores one entry per request for a clean partition. Otherwise it stores one
+	// authoritative aggregate per model.
 	Requests            []RequestUsage
 	ModelCosts          map[string]float64       `json:"-"`
 	ModelCostBreakdowns map[string]CostBreakdown `json:"-"`

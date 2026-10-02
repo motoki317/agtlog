@@ -125,16 +125,16 @@ func TestUsagePromptAndFlowTokens(t *testing.T) {
 		wantFlow   int64
 	}{
 		{
-			// Claude keeps cache reads separate: input excludes them, so the prompt
-			// adds them back and the flow leaves them out.
+			// Claude input excludes cache reads, so the prompt adds them and the
+			// flow omits them.
 			name:       "claude separate cache read",
 			usage:      Usage{InputTokens: 3_000, OutputTokens: 4_000, CacheCreation5mTokens: 500, CacheReadTokens: 37_000},
 			wantPrompt: 40_500,
 			wantFlow:   7_500,
 		},
 		{
-			// Codex folds cache reads into input, so the prompt is input as-is and the
-			// flow subtracts the cached portion.
+			// Codex input includes cache reads, so the prompt is the input and the
+			// flow subtracts the cache reads.
 			name:       "codex inclusive cache read",
 			usage:      Usage{InputTokens: 45_000, OutputTokens: 4_000, CacheReadTokens: 37_000, InputIncludesCacheRead: true},
 			wantPrompt: 45_000,
