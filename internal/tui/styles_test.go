@@ -66,6 +66,19 @@ func TestResolveThemeForcesMonoWhenNoColorIsSet(t *testing.T) {
 	}
 }
 
+func TestResolveThemeIgnoresEmptyNoColor(t *testing.T) {
+	unsetEnv(t, "AGTLOG_THEME")
+	t.Setenv("NO_COLOR", "")
+
+	theme, err := ResolveTheme("nord")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if theme.Name != "nord" {
+		t.Fatalf("ResolveTheme() = %q, want nord because an empty NO_COLOR does not disable color", theme.Name)
+	}
+}
+
 func TestResolveThemeRejectsUnknownName(t *testing.T) {
 	unsetEnv(t, "NO_COLOR")
 

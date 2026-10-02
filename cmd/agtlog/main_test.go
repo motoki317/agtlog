@@ -718,7 +718,7 @@ func TestRunHelpPrintsUsageAndSucceeds(t *testing.T) {
 	if !strings.Contains(output.String(), "overrides AGTLOG_CLAUDE_DIRS") || !strings.Contains(output.String(), "same list separator as PATH") {
 		t.Fatalf("run() help does not explain directory environment precedence: %q", output.String())
 	}
-	if !strings.Contains(output.String(), "--theme > AGTLOG_THEME > default; NO_COLOR forces mono") {
+	if !strings.Contains(output.String(), "--theme > AGTLOG_THEME > default\n") || !strings.Contains(output.String(), "a non-empty NO_COLOR forces mono\n") {
 		t.Fatalf("run() help does not explain theme precedence: %q", output.String())
 	}
 }

@@ -109,7 +109,8 @@ func cycleTheme(current Theme) Theme {
 }
 
 func ResolveTheme(selected string) (Theme, error) {
-	if _, disabled := os.LookupEnv("NO_COLOR"); disabled {
+	// The no-color.org convention ignores a NO_COLOR that is present but empty.
+	if os.Getenv("NO_COLOR") != "" {
 		return Theme{Name: "mono"}, nil
 	}
 	if selected == "" {

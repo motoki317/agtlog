@@ -337,7 +337,8 @@ func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 		_, _ = fmt.Fprintln(output, "  --offline         skip pricing refresh")
 		_, _ = fmt.Fprintln(output, "  --refresh-prices  refresh cached prices before starting")
 		_, _ = fmt.Fprintln(output, "  --theme           color theme: default, nord, or dracula")
-		_, _ = fmt.Fprintln(output, "                    precedence: --theme > AGTLOG_THEME > default; NO_COLOR forces mono")
+		_, _ = fmt.Fprintln(output, "                    precedence: --theme > AGTLOG_THEME > default")
+		_, _ = fmt.Fprintln(output, "                    a non-empty NO_COLOR forces mono")
 		_, _ = fmt.Fprintln(output, "  --version         print version")
 	}
 	if err := flags.Parse(args); err != nil {
