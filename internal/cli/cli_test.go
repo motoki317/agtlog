@@ -90,8 +90,8 @@ func TestValidateAgentDirs(t *testing.T) {
 		codexDirs  []string
 		want       string
 	}{
-		{name: "missing Claude home", claudeDirs: []string{missing}, want: "claude directory does not exist: " + missing},
-		{name: "Codex home is file", codexDirs: []string{regularFile}, want: "codex directory is not a directory: " + regularFile},
+		{name: "missing Claude home", claudeDirs: []string{missing}, want: "claude home does not exist: " + missing},
+		{name: "Codex home is file", codexDirs: []string{regularFile}, want: "codex home is not a directory: " + regularFile},
 		{name: "fresh homes", claudeDirs: []string{home}, codexDirs: []string{home}},
 		{name: "Claude filter ignores Codex", agent: "claude", claudeDirs: []string{home}, codexDirs: []string{missing}},
 		{name: "Codex filter ignores Claude", agent: "codex", claudeDirs: []string{missing}, codexDirs: []string{home}},

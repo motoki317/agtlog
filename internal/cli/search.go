@@ -118,19 +118,19 @@ func parseSearchOptions(args []string, help io.Writer) (searchOptions, string, e
 	options := searchOptions{limit: 30, snippet: 200}
 	flags := newFlagSet("agtlog search", help, searchUsage)
 	addCommonFlags(flags, &options.common)
-	flags.StringVar(&options.project, "project", "", "match the project basename")
-	flags.StringVar(&options.cwd, "cwd", "", "match a working directory and its descendants")
-	flags.StringVar(&options.since, "since", "", "minimum update time: RFC3339, local date, or duration")
-	flags.StringVar(&options.until, "until", "", "maximum update time: RFC3339, local date, or duration")
-	flags.StringVar(&options.kind, "kind", "", "comma-separated event kinds")
-	flags.StringVar(&options.session, "session", "", "search one session and its descendants")
+	flags.StringVar(&options.project, "project", "", "keep sessions whose project basename is this name")
+	flags.StringVar(&options.cwd, "cwd", "", "keep sessions whose working directory is this path or below it")
+	flags.StringVar(&options.since, "since", "", "keep sessions updated at or after this time: RFC 3339, YYYY-MM-DD, or a duration such as 7d")
+	flags.StringVar(&options.until, "until", "", "keep sessions updated at or before this time: RFC 3339, YYYY-MM-DD, or a duration such as 7d")
+	flags.StringVar(&options.kind, "kind", "", "keep only these comma-separated event kinds")
+	flags.StringVar(&options.session, "session", "", "search only this selector's session and its descendants")
 	flags.BoolVar(&options.regex, "regex", false, "interpret the pattern as an RE2 expression")
 	flags.BoolVar(&options.caseSensitive, "case-sensitive", false, "match case exactly")
 	flags.IntVar(&options.limit, "limit", 30, "maximum hits to return")
 	flags.IntVar(&options.offset, "offset", 0, "ordered hits to skip")
-	flags.BoolVar(&options.all, "all", false, "return every hit")
-	flags.IntVar(&options.snippet, "snippet", 200, "runes of context around the first match")
-	operands, err := parseFlexible(flags, args, 1)
+	flags.BoolVar(&options.all, "all", false, "remove the hit count limit (the 256 KiB response limit still applies)")
+	flags.IntVar(&options.snippet, "snippet", 200, "runes of context on each side of the first match")
+	operands, err := parseFlexible(flags, args, "search pattern")
 	if err != nil {
 		return searchOptions{}, "", err
 	}
@@ -165,8 +165,9 @@ func parseSearchOptions(args []string, help io.Writer) (searchOptions, string, e
 
 func searchUsage(output io.Writer) {
 	_, _ = fmt.Fprintln(output, "Usage: agtlog search <pattern> [flags]")
-	_, _ = fmt.Fprintln(output, "Searches cleaned session timelines as indented JSON by default.")
-	_, _ = fmt.Fprintln(output, "Use -- before a pattern that begins with '-'.")
+	_, _ = fmt.Fprintln(output, "Searches cleaned session timelines and prints hits as indented JSON by default.")
+	_, _ = fmt.Fprintln(output, "Flags can appear before or after <pattern>.")
+	_, _ = fmt.Fprintln(output, "Put a pattern that begins with '-' after --.")
 }
 
 func searchCandidates(roots []*model.Session, allNodes []graphNode, nodesBySession map[*model.Session]graphNode, diagnostics []commandDiagnostic, options searchOptions) ([]searchCandidate, bool, error) {
@@ -446,7 +447,7 @@ func scanCandidate(ctx context.Context, registry Registry, candidate searchCandi
 			result.err = err
 			result.complete = false
 			failedPaths[path] = true
-			result.warnings = append(result.warnings, Warning{Code: "unreadable_session", Message: "could not read session: " + err.Error(), Ref: node.ref})
+			result.warnings = append(result.warnings, Warning{Code: "unreadable_session", Message: fmt.Sprintf("could not read %s session: %v", node.session.Agent, err), Ref: node.ref})
 			continue
 		}
 	}

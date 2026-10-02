@@ -111,13 +111,13 @@ func validateDirs(agent string, dirs []string) error {
 	for _, dir := range dirs {
 		info, err := os.Stat(dir)
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("%s directory does not exist: %s", agent, dir)
+			return fmt.Errorf("%s home does not exist: %s", agent, dir)
 		}
 		if err != nil {
-			return fmt.Errorf("inspect %s directory %s: %w", agent, dir, err)
+			return fmt.Errorf("inspect %s home %s: %w", agent, dir, err)
 		}
 		if !info.IsDir() {
-			return fmt.Errorf("%s directory is not a directory: %s", agent, dir)
+			return fmt.Errorf("%s home is not a directory: %s", agent, dir)
 		}
 	}
 	return nil
@@ -190,7 +190,7 @@ func Execute(ctx context.Context, args []string, stdout, stderr io.Writer, facto
 }
 
 func addCommonFlags(flags *flag.FlagSet, options *commonOptions) {
-	flags.BoolVar(&options.offline, "offline", false, "skip pricing refresh")
+	flags.BoolVar(&options.offline, "offline", false, "use only cached and embedded prices (the subcommand default)")
 	flags.BoolVar(&options.refreshPrices, "refresh-prices", false, "refresh cached prices before running")
 	flags.StringVar(&options.agent, "agent", "", "limit sessions to claude or codex")
 	flags.StringVar(&options.format, "format", "json", "output format: json or text")
@@ -203,7 +203,7 @@ func (options commonOptions) validate() error {
 		return usageError("--offline and --refresh-prices cannot be used together")
 	}
 	if options.agent != "" && options.agent != string(model.AgentClaude) && options.agent != string(model.AgentCodex) {
-		return usageError(fmt.Sprintf("invalid agent %q", options.agent))
+		return usageError(fmt.Sprintf("invalid agent %q: use claude or codex", options.agent))
 	}
 	claudeDirs := ResolveDirs(options.claudeDirs, os.Getenv("AGTLOG_CLAUDE_DIRS"))
 	codexDirs := ResolveDirs(options.codexDirs, os.Getenv("AGTLOG_CODEX_DIRS"))
@@ -211,7 +211,7 @@ func (options commonOptions) validate() error {
 		return usageError(err.Error())
 	}
 	if options.format != "json" && options.format != "text" {
-		return usageError(fmt.Sprintf("invalid format %q", options.format))
+		return usageError(fmt.Sprintf("invalid format %q: use json or text", options.format))
 	}
 	return nil
 }
@@ -226,7 +226,11 @@ func (options commonOptions) registryOptions() Options {
 	}
 }
 
-func parseFlexible(flags *flag.FlagSet, args []string, operands int) ([]string, error) {
+func parseFlexible(flags *flag.FlagSet, args []string, operand string) ([]string, error) {
+	operands := 0
+	if operand != "" {
+		operands = 1
+	}
 	flagArgs := make([]string, 0, len(args))
 	positionals := make([]string, 0, operands)
 	parsing := true
@@ -270,7 +274,7 @@ func parseFlexible(flags *flag.FlagSet, args []string, operands int) ([]string, 
 	}
 	if len(positionals) != operands {
 		if len(positionals) < operands {
-			return nil, usageError("missing operand")
+			return nil, usageError("missing " + operand)
 		}
 		return nil, usageError(fmt.Sprintf("unexpected argument %q", positionals[operands]))
 	}
@@ -336,7 +340,7 @@ func parseTimeFilter(value string, now time.Time, location *time.Location) (time
 	}
 	duration, err := relativeDuration(value)
 	if err != nil {
-		return time.Time{}, usageError(fmt.Sprintf("invalid time %q", value))
+		return time.Time{}, usageError(fmt.Sprintf("invalid time %q: use an RFC 3339 timestamp, a YYYY-MM-DD date, or a duration such as 7d or 24h", value))
 	}
 	return now.Add(-duration), nil
 }

@@ -79,7 +79,7 @@ func defaultRegistry(ctx context.Context, options cliOptions) (*source.Registry,
 		cacheDir = resolved
 	} else {
 		if options.refreshPrices {
-			return nil, fmt.Errorf("cannot refresh prices: cache directory could not be safely resolved outside agent log and configuration directories; set XDG_CACHE_HOME to a separate location")
+			return nil, errors.New("cannot refresh prices: the cache directory overlaps an agent log or configuration directory, or could not be resolved: set XDG_CACHE_HOME to a separate directory")
 		}
 		cacheDir = ""
 	}
@@ -316,7 +316,7 @@ func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 	flags := flag.NewFlagSet("agtlog", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	showVersion := flags.Bool("version", false, "print version")
-	offline := flags.Bool("offline", false, "skip pricing refresh")
+	offline := flags.Bool("offline", false, "skip the background price refresh")
 	refreshPrices := flags.Bool("refresh-prices", false, "refresh cached prices before starting")
 	noWatch := flags.Bool("no-watch", false, "disable live session following")
 	agent := flags.String("agent", "", "limit sessions to claude or codex")
@@ -327,14 +327,15 @@ func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 	flags.Usage = func() {
 		_, _ = fmt.Fprintln(output, "Usage: agtlog [--offline] [--refresh-prices] [--no-watch] [--agent claude|codex] [--claude-dir PATH] [--codex-dir PATH] [--theme default|nord|dracula] [--version]")
 		_, _ = fmt.Fprintln(output, "       agtlog list [flags]")
-		_, _ = fmt.Fprintln(output, "       agtlog show <ref> [flags]")
+		_, _ = fmt.Fprintln(output, "       agtlog show <selector> [flags]")
 		_, _ = fmt.Fprintln(output, "       agtlog search <pattern> [flags]")
+		_, _ = fmt.Fprintln(output, "       agtlog <command> --help")
 		_, _ = fmt.Fprintln(output, "  --agent           limit sessions to claude or codex")
 		_, _ = fmt.Fprintln(output, "  --claude-dir      additional Claude home (repeatable, overrides AGTLOG_CLAUDE_DIRS)")
 		_, _ = fmt.Fprintln(output, "  --codex-dir       additional Codex home (repeatable, overrides AGTLOG_CODEX_DIRS)")
 		_, _ = fmt.Fprintln(output, "                    AGTLOG_*_DIRS values use the same list separator as PATH")
 		_, _ = fmt.Fprintln(output, "  --no-watch        disable live session following")
-		_, _ = fmt.Fprintln(output, "  --offline         skip pricing refresh")
+		_, _ = fmt.Fprintln(output, "  --offline         skip the background price refresh")
 		_, _ = fmt.Fprintln(output, "  --refresh-prices  refresh cached prices before starting")
 		_, _ = fmt.Fprintln(output, "  --theme           color theme: default, nord, or dracula")
 		_, _ = fmt.Fprintln(output, "                    precedence: --theme > AGTLOG_THEME > default")
@@ -357,7 +358,7 @@ func parseOptions(args []string, output io.Writer) (cliOptions, error) {
 	}
 	if *agent != "" && *agent != string(model.AgentClaude) && *agent != string(model.AgentCodex) {
 		flags.Usage()
-		return cliOptions{}, fmt.Errorf("invalid agent %q", *agent)
+		return cliOptions{}, fmt.Errorf("invalid agent %q: use claude or codex", *agent)
 	}
 	resolvedClaudeDirs := machinecli.ResolveDirs(claudeDirs, os.Getenv("AGTLOG_CLAUDE_DIRS"))
 	resolvedCodexDirs := machinecli.ResolveDirs(codexDirs, os.Getenv("AGTLOG_CODEX_DIRS"))

@@ -82,15 +82,15 @@ func parseShowOptions(args []string, help io.Writer) (showOptions, string, error
 	options := showOptions{limit: 200, maxText: 2000}
 	flags := newFlagSet("agtlog show", help, showUsage)
 	addCommonFlags(flags, &options.common)
-	flags.StringVar(&options.kind, "kind", "", "comma-separated event kinds")
+	flags.StringVar(&options.kind, "kind", "", "keep only these comma-separated event kinds")
 	flags.IntVar(&options.limit, "limit", 200, "maximum events to return")
 	flags.IntVar(&options.offset, "offset", 0, "full-timeline index to start at")
-	flags.BoolVar(&options.all, "all", false, "return every matching event")
-	flags.IntVar(&options.maxText, "max-text", 2000, "maximum runes per text field; zero is unbounded")
-	flags.BoolVar(&options.full, "full", false, "do not bound individual text fields")
-	flags.BoolVar(&options.noEvents, "no-events", false, "return only the session summary")
-	flags.IntVar(&options.raw, "raw", 0, "return the source record for an event index")
-	operands, err := parseFlexible(flags, args, 1)
+	flags.BoolVar(&options.all, "all", false, "remove the event count limit (the 256 KiB response limit still applies)")
+	flags.IntVar(&options.maxText, "max-text", 2000, "maximum runes per text field, or 0 for no limit")
+	flags.BoolVar(&options.full, "full", false, "same as --max-text 0")
+	flags.BoolVar(&options.noEvents, "no-events", false, "return the summary, subagent refs, and totals without reading the timeline")
+	flags.IntVar(&options.raw, "raw", 0, "return the exact source line of the event at this index")
+	operands, err := parseFlexible(flags, args, "session selector")
 	if err != nil {
 		return showOptions{}, "", err
 	}
@@ -126,9 +126,10 @@ func parseShowOptions(args []string, help io.Writer) (showOptions, string, error
 }
 
 func showUsage(output io.Writer) {
-	_, _ = fmt.Fprintln(output, "Usage: agtlog show <ref> [flags]")
-	_, _ = fmt.Fprintln(output, "Shows one session timeline as indented JSON by default.")
-	_, _ = fmt.Fprintln(output, "Flags can appear before or after <ref>.")
+	_, _ = fmt.Fprintln(output, "Usage: agtlog show <selector> [flags]")
+	_, _ = fmt.Fprintln(output, "Shows one session node and its event timeline as indented JSON by default.")
+	_, _ = fmt.Fprintln(output, "<selector> is a canonical ref, a session ID, a unique ID prefix of at least 6 characters, or an absolute log path.")
+	_, _ = fmt.Fprintln(output, "Flags can appear before or after <selector>.")
 }
 
 func parseKinds(value string) (map[model.EventKind]bool, error) {
@@ -139,7 +140,7 @@ func parseKinds(value string) (map[model.EventKind]bool, error) {
 	for _, name := range strings.Split(value, ",") {
 		kind := model.EventKind(name)
 		if _, valid := wireEventKind(kind); !valid {
-			return nil, usageError(fmt.Sprintf("invalid event kind %q", name))
+			return nil, usageError(fmt.Sprintf("invalid event kind %q: use one of %s", name, wireEventKindList()))
 		}
 		result[kind] = true
 	}
@@ -374,16 +375,16 @@ func showTotals(session *model.Session) ShowTotals {
 
 func rawResponse(ctx context.Context, session *model.Session, index int) (RawResponse, error) {
 	if index < 0 || index >= len(session.Events) {
-		return RawResponse{}, resolutionError("not_found", "no event exists at the requested index", nil)
+		return RawResponse{}, resolutionError("not_found", fmt.Sprintf("no event exists at index %d: the timeline has %d events", index, len(session.Events)), nil)
 	}
 	ref := session.Events[index].RecordRef
 	if ref.Path == "" || ref.Length <= 0 {
-		return RawResponse{}, runtimeError("record_unavailable", "the event has no source record")
+		return RawResponse{}, runtimeError("record_unavailable", fmt.Sprintf("event %d has no source record", index))
 	}
 	raw, err := source.ReadRecord(ctx, ref)
 	if err != nil {
 		if errors.Is(err, source.ErrRecordChanged) || errors.Is(err, source.ErrRecordRead) {
-			return RawResponse{}, runtimeError("record_changed", "the source record changed after discovery")
+			return RawResponse{}, runtimeError("record_changed", fmt.Sprintf("the source record of event %d changed after discovery: run the command again", index))
 		}
 		return RawResponse{}, runtimeError("internal", err.Error())
 	}

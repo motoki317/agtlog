@@ -14,6 +14,8 @@ import (
 	"github.com/sahilm/fuzzy"
 )
 
+var listSortFields = []string{"updated", "started", "tokens", "cost", "turns", "messages"}
+
 type listOptions struct {
 	common  commonOptions
 	project string
@@ -83,27 +85,27 @@ func parseListOptions(args []string, help io.Writer) (listOptions, error) {
 	options := listOptions{sort: "updated", order: "desc", limit: 50}
 	flags := newFlagSet("agtlog list", help, listUsage)
 	addCommonFlags(flags, &options.common)
-	flags.StringVar(&options.project, "project", "", "match the project basename")
-	flags.StringVar(&options.cwd, "cwd", "", "match a working directory and its descendants")
+	flags.StringVar(&options.project, "project", "", "keep sessions whose project basename is this name")
+	flags.StringVar(&options.cwd, "cwd", "", "keep sessions whose working directory is this path or below it")
 	flags.StringVar(&options.query, "query", "", "fuzzy-match agent, project, and title")
-	flags.StringVar(&options.since, "since", "", "minimum update time: RFC3339, local date, or duration")
-	flags.StringVar(&options.until, "until", "", "maximum update time: RFC3339, local date, or duration")
+	flags.StringVar(&options.since, "since", "", "keep sessions updated at or after this time: RFC 3339, YYYY-MM-DD, or a duration such as 7d")
+	flags.StringVar(&options.until, "until", "", "keep sessions updated at or before this time: RFC 3339, YYYY-MM-DD, or a duration such as 7d")
 	flags.StringVar(&options.sort, "sort", "updated", "sort by updated, started, tokens, cost, turns, or messages")
 	flags.StringVar(&options.order, "order", "desc", "sort order: asc or desc")
 	flags.IntVar(&options.limit, "limit", 50, "maximum sessions to return")
 	flags.IntVar(&options.offset, "offset", 0, "sessions to skip")
 	flags.BoolVar(&options.all, "all", false, "return every matching session")
-	if _, err := parseFlexible(flags, args, 0); err != nil {
+	if _, err := parseFlexible(flags, args, ""); err != nil {
 		return listOptions{}, err
 	}
 	if err := options.common.validate(); err != nil {
 		return listOptions{}, err
 	}
-	if !slices.Contains([]string{"updated", "started", "tokens", "cost", "turns", "messages"}, options.sort) {
-		return listOptions{}, usageError(fmt.Sprintf("invalid sort %q", options.sort))
+	if !slices.Contains(listSortFields, options.sort) {
+		return listOptions{}, usageError(fmt.Sprintf("invalid sort %q: use one of %s", options.sort, strings.Join(listSortFields, ", ")))
 	}
 	if options.order != "asc" && options.order != "desc" {
-		return listOptions{}, usageError(fmt.Sprintf("invalid order %q", options.order))
+		return listOptions{}, usageError(fmt.Sprintf("invalid order %q: use asc or desc", options.order))
 	}
 	if options.limit <= 0 {
 		return listOptions{}, usageError("--limit must be greater than zero")

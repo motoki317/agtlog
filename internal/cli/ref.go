@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"fmt"
 	"net/url"
 	"path/filepath"
 	"slices"
@@ -36,7 +37,7 @@ func addressableGraph(roots []*model.Session, diagnostics []commandDiagnostic) (
 	invalid := make(map[*model.Session]string)
 	for _, root := range roots {
 		if root.ID == "" {
-			invalid[root] = "session has no stable id"
+			invalid[root] = "session has no stable ID"
 		}
 	}
 	nodes := indexSessionGraphs(roots)
@@ -159,7 +160,7 @@ func resolveSelector(selector string, nodes []graphNode, diagnostics []commandDi
 				return graphNode{}, runtimeError("unaddressable_session", "the selected session cannot be addressed: "+diagnostic.err.Error())
 			}
 			if diagnostic.code == "unreadable_session" {
-				return graphNode{}, runtimeError("unreadable_session", "the selected session could not be read")
+				return graphNode{}, runtimeError("unreadable_session", fmt.Sprintf("the selected session could not be read: %v", diagnostic.err))
 			}
 		}
 	}
@@ -170,7 +171,7 @@ func resolveSelector(selector string, nodes []graphNode, diagnostics []commandDi
 		return uniqueSelector(selector, exact)
 	}
 	if len([]rune(selector)) < 6 {
-		return graphNode{}, usageError("a session id prefix must contain at least 6 characters")
+		return graphNode{}, usageError(fmt.Sprintf("selector %q matches no session ID, and an ID prefix needs at least 6 characters", selector))
 	}
 	prefix := matchNodes(nodes, func(node graphNode) bool {
 		return selectorEligible(node) && strings.HasPrefix(node.session.ID, selector)
@@ -217,7 +218,7 @@ func uniqueSelector(selector string, nodes []graphNode) (graphNode, error) {
 		})
 	}
 	slices.SortFunc(candidates, func(left, right ErrorCandidate) int { return strings.Compare(left.Ref, right.Ref) })
-	return graphNode{}, resolutionError("ambiguous_ref", "the selector matches more than one session: "+selector, candidates)
+	return graphNode{}, resolutionError("ambiguous_ref", fmt.Sprintf("selector %q matches more than one session: choose a ref from candidates", selector), candidates)
 }
 
 func refForSession(nodes []graphNode, session *model.Session) string {

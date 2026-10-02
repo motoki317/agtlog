@@ -513,7 +513,7 @@ func TestDefaultRegistryRefreshFailsWhenCacheResolutionIsUnsafe(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", xdgRoot)
 
 	_, err := defaultRegistry(context.Background(), cliOptions{refreshPrices: true})
-	if err == nil || !strings.Contains(err.Error(), "safely resolved outside agent") {
+	if err == nil || !strings.Contains(err.Error(), "overlaps an agent log or configuration directory") {
 		t.Fatalf("defaultRegistry() error = %v, want unsafe cache refresh error", err)
 	}
 }
@@ -532,7 +532,7 @@ func TestDefaultRegistryRefreshRejectsCacheInsideConfigRoot(t *testing.T) {
 	cancel()
 
 	_, err := defaultRegistry(ctx, cliOptions{refreshPrices: true})
-	if err == nil || !strings.Contains(err.Error(), "safely resolved outside agent") {
+	if err == nil || !strings.Contains(err.Error(), "overlaps an agent log or configuration directory") {
 		t.Fatalf("defaultRegistry() error = %v, want unsafe config-root cache error", err)
 	}
 	if _, err := os.Stat(filepath.Join(codexRoot, "agtlog")); !errors.Is(err, os.ErrNotExist) {
@@ -551,7 +551,7 @@ func TestDefaultRegistryConfiguredRootKeepsCacheSafety(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", xdgRoot)
 
 	_, err := defaultRegistry(context.Background(), cliOptions{refreshPrices: true, codexDirs: []string{configuredHome}})
-	if err == nil || !strings.Contains(err.Error(), "safely resolved outside agent") {
+	if err == nil || !strings.Contains(err.Error(), "overlaps an agent log or configuration directory") {
 		t.Fatalf("defaultRegistry() error = %v, want unsafe configured-root cache error", err)
 	}
 	if entries, readErr := os.ReadDir(configuredHome); readErr != nil || len(entries) != 0 {
@@ -812,7 +812,7 @@ func TestExecuteApplicationReportsMissingMachineDirectoryAsUsage(t *testing.T) {
 		func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error { return nil },
 	)
 	status, ok := machinecli.ExitStatus(err)
-	if !ok || status != 2 || called || output.Len() != 0 || !strings.Contains(diagnostics.String(), `"code": "usage"`) || !strings.Contains(diagnostics.String(), "claude directory does not exist: "+missing) || strings.Contains(diagnostics.String(), `"code": "internal"`) {
+	if !ok || status != 2 || called || output.Len() != 0 || !strings.Contains(diagnostics.String(), `"code": "usage"`) || !strings.Contains(diagnostics.String(), "claude home does not exist: "+missing) || strings.Contains(diagnostics.String(), `"code": "internal"`) {
 		t.Fatalf("error = %v, status = %d, called = %v, stdout = %q, stderr = %q", err, status, called, output.String(), diagnostics.String())
 	}
 }
@@ -832,7 +832,7 @@ func TestExecuteApplicationValidatesDirectoryEnvironmentAsUsage(t *testing.T) {
 		func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error { return nil },
 	)
 	status, ok := machinecli.ExitStatus(err)
-	if !ok || status != 2 || !strings.Contains(diagnostics.String(), "codex directory does not exist: "+missing) {
+	if !ok || status != 2 || !strings.Contains(diagnostics.String(), "codex home does not exist: "+missing) {
 		t.Fatalf("error = %v, status = %d, stderr = %q", err, status, diagnostics.String())
 	}
 }
@@ -852,7 +852,7 @@ func TestExecuteApplicationRejectsMissingTUIDirectoryBeforeFactory(t *testing.T)
 		},
 		func(context.Context, io.Reader, io.Writer, tui.Model, <-chan source.SessionUpdate) error { return nil },
 	)
-	if err == nil || err.Error() != "claude directory does not exist: "+missing || called || !strings.Contains(diagnostics.String(), "Usage: agtlog") {
+	if err == nil || err.Error() != "claude home does not exist: "+missing || called || !strings.Contains(diagnostics.String(), "Usage: agtlog") {
 		t.Fatalf("error = %v, called = %v, diagnostics = %q", err, called, diagnostics.String())
 	}
 }
@@ -875,7 +875,7 @@ func TestExecuteApplicationRejectsMissingTUIEnvironmentDirectoryBeforeFactory(t 
 			return nil
 		},
 	)
-	if err == nil || err.Error() != "codex directory does not exist: "+missing || called || !strings.Contains(diagnostics.String(), "Usage: agtlog") {
+	if err == nil || err.Error() != "codex home does not exist: "+missing || called || !strings.Contains(diagnostics.String(), "Usage: agtlog") {
 		t.Fatalf("error = %v, called = %v, diagnostics = %q", err, called, diagnostics.String())
 	}
 }

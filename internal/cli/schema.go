@@ -3,6 +3,7 @@ package cli
 import (
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/motoki317/agtlog/internal/model"
@@ -29,6 +30,14 @@ var wireEventKinds = []model.EventKind{
 	model.EventSystem,
 	model.EventCompact,
 	model.EventUsage,
+}
+
+func wireEventKindList() string {
+	names := make([]string, len(wireEventKinds))
+	for index, kind := range wireEventKinds {
+		names[index] = string(kind)
+	}
+	return strings.Join(names, ", ")
 }
 
 func wireEventKind(kind model.EventKind) (string, bool) {
