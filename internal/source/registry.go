@@ -41,7 +41,7 @@ func ReadRecord(ctx context.Context, ref model.RecordRef) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrRecordRead, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	openedInfo, err := file.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrRecordRead, err)

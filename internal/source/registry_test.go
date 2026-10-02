@@ -120,7 +120,7 @@ func TestReadRecordSurvivesAppendAfterReferencedLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := file.WriteString("{\"message\":\"later\"}\n"); err != nil {
-		file.Close()
+		_ = file.Close()
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
@@ -423,7 +423,7 @@ func TestRegistryInvalidatesClaudeCacheForSubagentChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := file.WriteString(second); err != nil {
-		file.Close()
+		_ = file.Close()
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {

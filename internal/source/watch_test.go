@@ -313,14 +313,14 @@ func TestWatcherEmitsDebouncedAppend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := file.WriteString("{}\n"); err != nil {
-		file.Close()
+		_ = file.Close()
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
@@ -405,7 +405,7 @@ func TestWatcherRescanFindsMissedAppend(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 	if err := watcher.watcher.Remove(root); err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +415,7 @@ func TestWatcherRescanFindsMissedAppend(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := file.WriteString("{}\n"); err != nil {
-		file.Close()
+		_ = file.Close()
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
@@ -444,14 +444,14 @@ func TestFollowerReparsesChangedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer follower.Close()
+	defer func() { _ = follower.Close() }()
 
 	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := file.WriteString("{}\n"); err != nil {
-		file.Close()
+		_ = file.Close()
 		t.Fatal(err)
 	}
 	if err := file.Close(); err != nil {
@@ -918,7 +918,7 @@ func TestFollowerDropsResumableCheckpointWhenPathIsRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer follower.Close()
+	defer func() { _ = follower.Close() }()
 
 	appendFollowLog(t, path)
 	_ = nextFollowerUpdate(t, follower)
@@ -968,7 +968,7 @@ func TestFollowerReusesIndexedSessionsForCodexSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer follower.Close()
+	defer func() { _ = follower.Close() }()
 
 	appendFollowLog(t, parentPath)
 	update := nextFollowerUpdate(t, follower)
@@ -1063,7 +1063,7 @@ func TestFollowerRetriesFailedInitialIndexPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer follower.Close()
+	defer func() { _ = follower.Close() }()
 
 	appendFollowLog(t, parentPath)
 	first := nextFollowerUpdate(t, follower)
@@ -1106,7 +1106,7 @@ func TestFollowerRetriesFailedRefreshBeforeInitialIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer follower.Close()
+	defer func() { _ = follower.Close() }()
 
 	follower.watcher.events <- Change{Paths: []string{codexPath}}
 	follower.watcher.events <- Change{Paths: []string{claudePath}}
@@ -1148,7 +1148,7 @@ func TestFollowerInitialDiscoverySupersedesRefreshFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer follower.Close()
+	defer func() { _ = follower.Close() }()
 
 	follower.watcher.events <- Change{Paths: []string{failedPath, changedPath}}
 	first := nextFollowerUpdate(t, follower)
@@ -1317,7 +1317,7 @@ func TestWatcherEmitsRemovedSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
@@ -1344,7 +1344,7 @@ func TestFollowerDeliversRemovalOnlyUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer follower.Close()
+	defer func() { _ = follower.Close() }()
 
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
