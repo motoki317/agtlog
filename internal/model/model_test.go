@@ -463,6 +463,21 @@ func TestCleanTimelineTextKeepsParagraphsAndIndentation(t *testing.T) {
 			value: "\n   \n\t\n",
 			want:  "",
 		},
+		{
+			name:  "uppercase tag",
+			value: "Before <SYSTEM-REMINDER>hidden</System-Reminder> after",
+			want:  "Before  after",
+		},
+		{
+			name:  "letters with shorter lowercase forms",
+			value: "İstanbul 5 Ω <system-reminder>hidden</system-reminder> after",
+			want:  "İstanbul 5 Ω  after",
+		},
+		{
+			name:  "letters with longer lowercase forms",
+			value: strings.Repeat("Ⱥ", 50) + "<system-reminder>hidden</system-reminder> after",
+			want:  strings.Repeat("Ⱥ", 50) + " after",
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {

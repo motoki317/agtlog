@@ -90,7 +90,7 @@ func IsHardNoise(value string) bool {
 
 func CleanTimelineText(value string) string {
 	tags := []string{"system-reminder", "permission-preamble", "local-command-caveat"}
-	lower := strings.ToLower(value)
+	lower := asciiLower(value)
 	stripped := make([]byte, 0, len(value))
 	for offset := 0; offset < len(value); {
 		start, matchedTag := len(value), ""
@@ -137,6 +137,19 @@ func CleanTimelineText(value string) string {
 		cleaned = cleaned[:len(cleaned)-1]
 	}
 	return strings.Join(cleaned, "\n")
+}
+
+// asciiLower folds only ASCII letters, so a byte offset in the result is the
+// same offset in s. strings.ToLower changes the UTF-8 length of letters such
+// as "İ" and "Ⱥ".
+func asciiLower(s string) string {
+	folded := []byte(s)
+	for index, char := range folded {
+		if 'A' <= char && char <= 'Z' {
+			folded[index] = char + ('a' - 'A')
+		}
+	}
+	return string(folded)
 }
 
 func BoundedDetailText(value string, limits ...int) string {
