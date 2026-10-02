@@ -54,6 +54,7 @@ type mirroredFollowSource struct {
 type resumableFollowSource struct {
 	root       string
 	path       string
+	mu         sync.Mutex
 	inputs     []any
 	failNext   bool
 	nilNext    bool
@@ -71,6 +72,8 @@ func (s *resumableFollowSource) Discover(context.Context) ([]string, error) {
 	return []string{s.path}, nil
 }
 func (s *resumableFollowSource) ParseContext(context.Context, string) (*model.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.fullParses++
 	return &model.Session{ID: "full", Agent: model.AgentCodex, Path: s.path}, nil
 }
@@ -78,6 +81,8 @@ func (s *resumableFollowSource) ParseResumableContext(ctx context.Context, path 
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.inputs = append(s.inputs, checkpoint)
 	if s.failNext {
 		s.failNext = false
@@ -91,6 +96,14 @@ func (s *resumableFollowSource) ParseResumableContext(ctx context.Context, path 
 	return &model.Session{ID: fmt.Sprintf("resume-%d", next.generation), Agent: model.AgentCodex, Path: path}, next, nil
 }
 func (s *resumableFollowSource) Reprice(*model.Session) {}
+func (s *resumableFollowSource) lastInput() (any, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.inputs) == 0 {
+		return nil, false
+	}
+	return s.inputs[len(s.inputs)-1], true
+}
 
 func (s *indexedFollowSource) Agent() model.AgentKind   { return model.AgentCodex }
 func (s *indexedFollowSource) Roots() []string          { return []string{s.root} }
@@ -854,8 +867,8 @@ func TestFollowerDropsResumableCheckpointWhenPathIsRemoved(t *testing.T) {
 
 	appendFollowLog(t, path)
 	_ = nextFollowerUpdate(t, follower)
-	if len(adapter.inputs) == 0 || adapter.inputs[len(adapter.inputs)-1] != nil {
-		t.Fatalf("first refresh checkpoint input = %#v, want nil", adapter.inputs)
+	if input, parsed := adapter.lastInput(); !parsed || input != nil {
+		t.Fatalf("first refresh checkpoint input = %#v (parsed %t), want nil", input, parsed)
 	}
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
@@ -868,8 +881,8 @@ func TestFollowerDropsResumableCheckpointWhenPathIsRemoved(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = nextFollowerUpdate(t, follower)
-	if adapter.inputs[len(adapter.inputs)-1] != nil {
-		t.Fatalf("recreated path received stale checkpoint %#v", adapter.inputs[len(adapter.inputs)-1])
+	if input, _ := adapter.lastInput(); input != nil {
+		t.Fatalf("recreated path received stale checkpoint %#v", input)
 	}
 }
 
