@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -50,7 +51,7 @@ func TestOverviewActivityDropsTokens(t *testing.T) {
 	}
 }
 
-func TestOverviewAlwaysShowsFullModelBlocksAndFocusesOnlySubagents(t *testing.T) {
+func TestOverviewAlwaysShowsFullModelBlocks(t *testing.T) {
 	root := &model.Session{Usage: []model.Usage{{Model: "claude-opus-4-8", InputTokens: 100}}, ModelCosts: map[string]float64{"claude-opus-4-8": 1}, ModelCostBreakdowns: map[string]model.CostBreakdown{"claude-opus-4-8": {Input: model.CostBuckets{{Tokens: 100, RatePerToken: 0.01}}}}, Subagents: []*model.Session{{ID: "child"}}}
 	detail := newDetailState(root, 100, 30, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
@@ -65,18 +66,18 @@ func TestOverviewAlwaysShowsFullModelBlocksAndFocusesOnlySubagents(t *testing.T)
 	}
 	for _, msg := range []tea.KeyMsg{{Type: tea.KeyUp}, {Type: tea.KeySpace}, {Type: tea.KeyEnter}} {
 		detail.update(msg)
-		if detail.focusedSubagent() != root.Subagents[0] || strings.Join(timelineLineTexts(detail.lines), "\n") != text || len(detail.expanded) != 0 {
-			t.Fatal("Overview keys changed plain model blocks or subagent-only selection")
+		if detail.focusedSubagent() != nil || strings.Join(timelineLineTexts(detail.lines), "\n") != text || len(detail.expanded) != 0 {
+			t.Fatal("Overview keys changed plain model blocks or activated a subagent above the table")
 		}
 	}
 	detail.resize(100, 12)
 	detail.update(tea.KeyMsg{Type: tea.KeyHome})
 	detail.update(tea.KeyMsg{Type: tea.KeyPgDown})
-	if detail.viewport.YOffset == 0 || detail.focusedSubagent() != root.Subagents[0] {
-		t.Fatal("page scrolling must expose model blocks independently of subagent selection")
+	if detail.viewport.YOffset == 0 || detail.selectedLine != 0 {
+		t.Fatal("page scrolling must expose model blocks independently of the cursor")
 	}
 	detail.update(tea.KeyMsg{Type: tea.KeyPgUp})
-	if detail.viewport.YOffset != 0 || detail.focusedSubagent() != root.Subagents[0] {
+	if detail.viewport.YOffset != 0 || detail.selectedLine != 0 {
 		t.Fatal("page scrolling did not restore top without changing selection")
 	}
 
@@ -134,20 +135,16 @@ func TestOverviewFullModelBlocksRefreshWithoutFocus(t *testing.T) {
 	}
 }
 
-func TestOverviewMouseSelectsOnlySubagents(t *testing.T) {
+func TestOverviewMouseSelectsAllLines(t *testing.T) {
 	root := &model.Session{Usage: []model.Usage{{Model: "model-a", InputTokens: 10}, {Model: "model-b", InputTokens: 20}}, Subagents: []*model.Session{{ID: "child"}}}
 	detail := newDetailState(root, 100, 40, newStyles())
 	detail.update(tea.KeyMsg{Type: tea.KeyTab})
 	layout := newDetailLayout(detail.height)
-	for index, line := range detail.lines {
+	for index := range detail.lines {
 		y := layout.contentY + detail.firstRenderedRow(index) - detail.viewport.YOffset
-		focus, ok := detail.rowAtY(y)
-		if line.subagent {
-			if !ok || focus != 0 {
-				t.Fatalf("subagent click = %d/%t", focus, ok)
-			}
-		} else if ok {
-			t.Fatalf("plain row %q is focusable", line.text)
+		clickedLine, ok := detail.rowAtY(y)
+		if !ok || clickedLine != index {
+			t.Fatalf("click = %d/%t, want line %d", clickedLine, ok, index)
 		}
 	}
 }
@@ -158,6 +155,72 @@ func TestOverviewActivityFitsNarrowWidths(t *testing.T) {
 			if got := ansi.StringWidth(line.text); got > width {
 				t.Fatalf("width %d rendered %d: %q", width, got, line.text)
 			}
+		}
+	}
+}
+
+func TestOverviewLineKeysMoveThroughDetailLines(t *testing.T) {
+	root := &model.Session{
+		Usage:     []model.Usage{{Model: "model-a", InputTokens: 100}, {Model: "model-b", InputTokens: 200}, {Model: "model-c", InputTokens: 300}},
+		Subagents: []*model.Session{{ID: "scout-a"}, {ID: "scout-b"}, {ID: "scout-c"}},
+	}
+	for _, width := range []int{80, 28} {
+		for _, keys := range []struct{ up, down tea.KeyMsg }{
+			{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}},
+			{tea.KeyMsg{Type: tea.KeyUp}, tea.KeyMsg{Type: tea.KeyDown}},
+		} {
+			t.Run(fmt.Sprintf("%d/%s", width, keys.up.String()), func(t *testing.T) {
+				detail := newDetailState(root, width, 14, newStyles())
+				detail.update(tea.KeyMsg{Type: tea.KeyTab})
+				if detail.focus != 0 || detail.selectedLine != detail.focusables[0].line || detail.viewport.YOffset == 0 {
+					t.Fatal("entry must select the first subagent below the first screenful")
+				}
+				assertLine := func(want int) {
+					t.Helper()
+					if detail.selectedLine != want || detail.focus < 0 || detail.focus >= len(detail.focusables) {
+						t.Fatalf("line=%d focus=%d, want line %d with valid focus", detail.selectedLine, detail.focus, want)
+					}
+					first := detail.firstRenderedRow(want)
+					end := len(detail.rendered)
+					if want+1 < len(detail.lines) {
+						end = detail.firstRenderedRow(want + 1)
+					}
+					if first < detail.viewport.YOffset || end > detail.viewport.YOffset+detail.viewport.Height {
+						t.Fatalf("line %d rows [%d,%d) not visible at offset %d", want, first, end, detail.viewport.YOffset)
+					}
+					current, total := detail.rowCounter()
+					wantCurrent := max(0, want-detail.focusables[0].line+1)
+					if current != wantCurrent || total != 3 || (detail.focusedSubagent() == nil) != (current == 0) {
+						t.Fatalf("line %d counter %d/%d, want %d/3 with matching activation", want, current, total, wantCurrent)
+					}
+				}
+				for line := detail.selectedLine - 1; line >= 0; line-- {
+					detail.update(keys.up)
+					assertLine(line)
+				}
+				for range 2 {
+					detail.update(keys.up)
+					assertLine(0)
+				}
+				if !strings.Contains(ansi.Strip(detail.view()), "Activity") {
+					t.Fatal("Activity is unreachable")
+				}
+				for line := 1; line < len(detail.lines); line++ {
+					detail.update(keys.down)
+					assertLine(line)
+				}
+				for range 2 {
+					detail.update(keys.down)
+					assertLine(len(detail.lines) - 1)
+				}
+				if !detail.viewport.AtBottom() {
+					t.Fatal("last subagent is not at the viewport bottom")
+				}
+				for line := len(detail.lines) - 2; line >= 0; line-- {
+					detail.update(keys.up)
+					assertLine(line)
+				}
+			})
 		}
 	}
 }

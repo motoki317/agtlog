@@ -22,8 +22,10 @@ or forked session replays from an earlier session. A session without subagents s
 when the model has a price or a replayed amount. The blocks can push the Subagents table below the
 viewport, so reaching it can take a scroll.
 
-Only subagent rows take the selection, and Overview selects the first subagent on entry. A session
-without subagents has no selection, and `j`/`k` scroll its viewport. Column focus and sorting from
+We originally limited selection to subagent rows and selected the first subagent on entry.
+A session without subagents had no selection, and `j`/`k` scrolled its viewport.
+[Detail line cursor](./20261002-detail-line-cursor.md) replaces the subagent-only selection rule.
+It retains first-subagent entry and viewport scrolling without subagents. Column focus and sorting from
 [Table sorting](./20260722-table-sorting.md) act only on the Subagents table.
 
 The Subagents table replaces the cost tree. To inspect a nested subagent's own and delegated cost,

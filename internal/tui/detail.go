@@ -13,6 +13,8 @@ import (
 	"github.com/motoki317/agtlog/internal/model"
 )
 
+// Row actions index focusables, so focus stays valid above Overview's table.
+// Only selectedLine determines whether a subagent row is selected.
 type detailState struct {
 	session             *model.Session
 	crumbs              []string
@@ -95,18 +97,10 @@ func (d *detailState) rowAtY(y int) (int, bool) {
 		return 0, false
 	}
 	detailIndex := d.rendered[renderedIndex].detailIndex
-	focus := -1
-	for index, item := range d.focusables {
-		if item.line > detailIndex {
-			break
-		}
-		if d.tab != tabOverview || item.line == detailIndex {
-			focus = index
-		} else {
-			focus = -1
-		}
+	if len(d.focusables) == 0 {
+		return 0, false
 	}
-	return focus, focus >= 0
+	return detailIndex, true
 }
 
 type detailFocus struct {
@@ -144,6 +138,8 @@ type detailRestoreState struct {
 	viewportOffset      int
 	pinned              bool
 	focusKey            string
+	lineOffset          int
+	selectedLine        int
 	defaultExpanded     bool
 	focus               int
 	wrap                bool
@@ -365,9 +361,7 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		d.moveFocus(-1)
 	case "g", "home":
 		if len(d.focusables) > 0 {
-			oldLine := d.selectedLine
-			d.focus = 0
-			d.updateSelection(oldLine, d.focusables[0].line)
+			d.selectRow(0)
 		}
 		d.viewport.GotoTop()
 	case "G", "end":
@@ -443,19 +437,22 @@ func (d *detailState) snapTopToLineStart() {
 func (d *detailState) anchorBottom() {
 	d.viewport.GotoBottom()
 	d.snapTopToLineStart()
+	// A wrapped line above the tail can otherwise push the final cursor off screen.
+	if d.selectedLine >= 0 && d.selectedLine == len(d.lines)-1 {
+		d.updateSelection(-1, d.selectedLine)
+	}
 }
 
 func (d *detailState) gotoBottom() {
 	if len(d.focusables) > 0 {
-		oldLine := d.selectedLine
-		d.focus = len(d.focusables) - 1
-		d.updateSelection(oldLine, d.focusables[d.focus].line)
+		d.selectRow(len(d.lines) - 1)
 	}
 	d.anchorBottom()
 }
 
 func (d *detailState) moveFocus(direction int) {
-	if len(d.focusables) == 0 {
+	next := d.selectedLine + direction
+	if len(d.focusables) == 0 || next < 0 || next >= len(d.lines) {
 		if direction > 0 {
 			d.viewport.ScrollDown(1)
 		} else {
@@ -463,13 +460,7 @@ func (d *detailState) moveFocus(direction int) {
 		}
 		return
 	}
-	next := d.focus + direction
-	if next < 0 || next >= len(d.focusables) {
-		return
-	}
-	oldLine := d.focusables[d.focus].line
-	d.focus = next
-	d.updateSelection(oldLine, d.focusables[d.focus].line)
+	d.selectRow(next)
 }
 
 // selectRow moves the cursor and never folds the clicked row. A fold under the
@@ -477,8 +468,33 @@ func (d *detailState) moveFocus(direction int) {
 // folds.
 func (d *detailState) selectRow(index int) {
 	oldLine := d.selectedLine
-	d.focus = index
-	d.updateSelection(oldLine, d.focusables[index].line)
+	d.focus = max(0, d.focusForLine(index))
+	d.updateSelection(oldLine, index)
+}
+
+func (d *detailState) focusForLine(line int) int {
+	return sort.Search(len(d.focusables), func(index int) bool {
+		return d.focusables[index].line > line
+	}) - 1
+}
+
+func (d *detailState) selectedLineOffset() int {
+	if d.tab != tabTimeline || d.focus < 0 || d.focus >= len(d.focusables) {
+		return 0
+	}
+	return max(0, d.selectedLine-d.focusables[d.focus].line)
+}
+
+func (d *detailState) focusedLine(offset int) int {
+	start := d.focusables[d.focus].line
+	if d.tab != tabTimeline {
+		return start
+	}
+	end := len(d.lines)
+	if d.focus+1 < len(d.focusables) {
+		end = d.focusables[d.focus+1].line
+	}
+	return min(start+max(0, offset), end-1)
 }
 
 func (d *detailState) selectedExpandable() bool {
@@ -510,12 +526,13 @@ func (d *detailState) expandFocused() {
 }
 
 func (d *detailState) rebuildKeeping(key string) {
+	offset := d.selectedLineOffset()
 	d.rebuild()
 	for index, item := range d.focusables {
 		if item.key == key {
 			oldLine := d.selectedLine
 			d.focus = index
-			d.updateSelection(oldLine, item.line)
+			d.updateSelection(oldLine, d.focusedLine(offset))
 			return
 		}
 	}
@@ -536,6 +553,9 @@ func (d *detailState) setAllExpanded(expanded bool) {
 
 func (d *detailState) focusKey() string {
 	if d.focus >= 0 && d.focus < len(d.focusables) {
+		if d.tab == tabOverview && d.selectedLine != d.focusables[d.focus].line {
+			return ""
+		}
 		return d.focusables[d.focus].key
 	}
 	return ""
@@ -555,7 +575,12 @@ func (d *detailState) rebuild() {
 	// toggle reaches the detail only through a rebuild, so the focus snaps here.
 	d.subagentColumnFocus = snapColumnFocus(d.subagentColumnFocus, d.visibleSubagentColumns(), subagentColumnOrder)
 	selected := d.focusKey()
-	if selected == "" {
+	offset := d.selectedLineOffset()
+	metadataLine := -1
+	if d.tab == tabOverview && len(d.focusables) > 0 && selected == "" {
+		metadataLine = d.selectedLine
+	}
+	if selected == "" && metadataLine < 0 {
 		selected = d.tabFocusKeys[d.tab]
 	}
 	var lines []detailLine
@@ -597,6 +622,13 @@ func (d *detailState) rebuild() {
 	d.selectedLine = -1
 	if len(d.focusables) > 0 {
 		d.selectedLine = d.focusables[d.focus].line
+		if metadataLine >= 0 {
+			d.selectedLine = min(metadataLine, d.focusables[0].line-1)
+		} else if d.tab == tabTimeline && selected == "" {
+			d.selectedLine = len(d.lines) - 1
+		} else if found {
+			d.selectedLine = d.focusedLine(offset)
+		}
 	}
 	d.rebuildRendered()
 }
@@ -605,11 +637,18 @@ func (d *detailState) updateSelection(oldLine, newLine int) {
 	d.updateSelectionMarker(oldLine, false)
 	d.selectedLine = newLine
 	d.updateSelectionMarker(newLine, true)
-	selectedRow := d.firstRenderedRow(newLine)
-	if selectedRow < d.viewport.YOffset {
-		d.viewport.SetYOffset(selectedRow)
-	} else if selectedRow >= d.viewport.YOffset+d.viewport.Height {
-		d.viewport.SetYOffset(selectedRow - d.viewport.Height + 1)
+	first := d.firstRenderedRow(newLine)
+	if first < 0 {
+		return
+	}
+	last := len(d.rendered) - 1
+	if newLine+1 < len(d.renderedStarts) {
+		last = d.renderedStarts[newLine+1] - 1
+	}
+	if first < d.viewport.YOffset {
+		d.viewport.SetYOffset(first)
+	} else if last >= d.viewport.YOffset+d.viewport.Height {
+		d.viewport.SetYOffset(min(first, last-d.viewport.Height+1))
 	}
 }
 
@@ -665,15 +704,7 @@ func (d *detailState) rebuildRendered() {
 	// SetContent clamps only an offset past the last row. Shrunk content otherwise
 	// leaves blank rows below the bottom.
 	d.viewport.SetYOffset(d.viewport.YOffset)
-	selectedRow := d.firstRenderedRow(d.selectedLine)
-	if selectedRow < 0 {
-		return
-	}
-	if selectedRow < d.viewport.YOffset {
-		d.viewport.SetYOffset(selectedRow)
-	} else if selectedRow >= d.viewport.YOffset+d.viewport.Height {
-		d.viewport.SetYOffset(selectedRow - d.viewport.Height + 1)
-	}
+	d.updateSelection(-1, d.selectedLine)
 }
 
 func wordWrapRows(value string, width int) []string {
@@ -761,7 +792,7 @@ func (d *detailState) firstRenderedRow(detailIndex int) int {
 }
 
 func (d *detailState) focusedSubagent() *model.Session {
-	if len(d.focusables) == 0 {
+	if len(d.focusables) == 0 || d.tab == tabOverview && d.selectedLine != d.focusables[d.focus].line {
 		return nil
 	}
 	return d.focusables[d.focus].subagentSession
@@ -789,6 +820,9 @@ func (d *detailState) eventForKey(key string) (model.Event, bool) {
 
 func (d *detailState) rowCounter() (current, total int) {
 	if len(d.focusables) > 0 {
+		if d.tab == tabOverview && d.selectedLine != d.focusables[d.focus].line {
+			return 0, len(d.focusables)
+		}
 		return min(d.focus+1, len(d.focusables)), len(d.focusables)
 	}
 	return min(len(d.rendered), d.viewport.YOffset+1), len(d.rendered)

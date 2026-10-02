@@ -54,7 +54,7 @@ If the terminal is too short for the stacked regions, list and detail switch to 
 plus a key line when it fits. The compact panel keeps both borders and the highest-value lines
 instead of slicing a rendered panel. The list keeps the filter input, the summary, and one row. The
 detail keeps the title line, the branch-and-cost line, and the agent line, in that order, and then
-as many timeline rows as fit.
+as many rows from the active tab as fit.
 
 Every view recomputes its panel, viewport, and column geometry after a resize. This includes the
 screens stored beneath a drilled child, so a new drill-down screen implements the `detailScreen`
@@ -198,12 +198,17 @@ result summary while the body shows the output. Past `detailPreviewLineCap` line
 `… N lines hidden …` row. Thinking, compaction, system, and usage
 rows have no body. The item view shows each event's complete text.
 
-`space` toggles the focused row, and `←` and `→` fold and unfold it. `E` and `C` replace every
+`space` toggles the selected line's event, and `←` and `→` fold and unfold it. `E` and `C` replace every
 individual fold choice and set the state for the existing rows and for the rows that arrive later.
+If a fold removes the selected line, the cursor moves to the event's header. Rebuilds preserve the
+cursor's line offset within its event, clamped to the event's remaining lines.
+Tab switches retain only the event selection. Returning to Timeline selects that event's header,
+or the final line when tail following resumes.
 
 `w` switches body, compaction, and system rows between hard wrapping and truncation. Each wrapped
-row keeps the role of its logical row, and the selection
-highlights every wrapped row of the selected item.
+row keeps the role of its logical row, and the selection highlights every wrapped row of the
+selected text line. A left click selects the clicked text line, including a wrapped continuation,
+without folding its event.
 
 A subagent never expands inline. `enter` or `l` on its row stores the current detail screen and
 opens the child on its Timeline tab. `esc` or `h` restores the nearest stored screen, and the same
@@ -235,18 +240,24 @@ session list, `T` switches `AGE` to `TIME`.
 With sorting cleared, siblings sort within each parent by update time, newest first, as in the
 session list. Zero timestamps sort last, and ties use session identity. Column sorts also reorder
 siblings within each parent, so descendants stay beneath their parent. Running siblings can move
-during live refreshes, and the selection follows session identity.
+during live refreshes, and a selected subagent follows session identity.
 
 Under width pressure, `AGE` disappears first, then `TURNS`. Next, `TITLE` and `MODEL` shrink to
 their minimum widths, and then `MODEL` disappears. Further pressure shrinks `TITLE`, `AGENT`, and
 `COST` to one cell each. Columns then disappear from the right until the row fits.
 
-Only subagent rows take the selection. On first entry, Overview selects the first subagent. Line
-keys, edge keys, and clicks move the selection. Page keys and the mouse wheel scroll the viewport
-without moving the selection. `enter` or `l` opens the selected subagent on its Timeline, and back
-restores the parent's selection. Column focus and sort keys act on the Subagents table while
-Overview is active. A session without subagents has no selection, its line keys scroll the
-viewport, and its table shows `No subagents`.
+With subagents present, the cursor moves through every Overview line, including Activity, cost
+blocks, headings, and blank separators. A left click selects its text line, including a wrapped
+continuation, without opening a child. `enter` or `l` opens a child only on its subagent row. Back
+restores the parent's selection. Column focus and sort keys act on the Subagents table wherever
+the cursor is. Page keys and the mouse wheel scroll without moving the cursor.
+
+On first entry, Overview selects the first subagent. A tab return remembers a subagent by key only
+if the cursor left from its row. Otherwise, the return selects the first subagent. Rebuilds and
+live updates preserve a subagent selection by key. Above the table, they preserve the text-line
+index, clamped to stay above the first subagent row. The position counter shows `N/total` on a
+subagent row and `0/total` above the table. A session without subagents has no cursor, its line keys
+scroll the viewport, and its table shows `No subagents`.
 
 ### Item view
 
@@ -273,6 +284,18 @@ Each binding is one keystroke, never a sequence, and follows terminal and Vim co
 session detail screens, `h` mirrors `esc` and `l` mirrors `enter`. The item view takes `h` for back,
 and the session list binds neither. `←` and `→` act on the focused structure: column focus in a
 table, and folding on the Timeline.
+
+On both detail tabs, `j`/`down` and `k`/`up` move the cursor one text line, and a wrapped line is
+one step. Movement reveals the whole selected line when it fits, or its first screen row when it
+exceeds the viewport. `g` selects the first line, and `G` selects the last. At either end, another
+outward press scrolls the viewport one screen row without moving the cursor, clamped at the content
+edge. Overview without subagents has no cursor. Its `j`/`k` keys scroll one screen row, and `g`/`G`
+scroll to the viewport edges.
+
+On Timeline, fold and open keys act on the event that contains the selected line, and the position
+counter counts events. `G` also resumes tail following. The Timeline follows live updates while
+its viewport is anchored at the bottom and the cursor belongs to the last event. A followed update
+selects the final line.
 
 A new action on a column or row reuses the focus and an existing key where it can, as `⇧O` sorts
 the focused column. `⇧A` and `⇧N` are the only direct sort shortcuts, for `AGE`
