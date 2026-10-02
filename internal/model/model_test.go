@@ -201,6 +201,25 @@ func TestSessionTotalCostIncludesNestedSubagents(t *testing.T) {
 	}
 }
 
+func TestSessionTotalCostDoesNotShareFlagsWithSession(t *testing.T) {
+	missing := make([]string, 1, 2)
+	missing[0] = "unknown-root"
+	child := &Session{Cost: Cost{MissingPricingModels: []string{"unknown-first"}}}
+	session := Session{Cost: Cost{MissingPricingModels: missing}, Subagents: []*Session{child}}
+
+	first := session.TotalCost()
+	child.Cost.MissingPricingModels = []string{"unknown-second"}
+	session.TotalCost()
+
+	want := []string{"unknown-root", "unknown-first"}
+	if !reflect.DeepEqual(first.MissingPricingModels, want) {
+		t.Fatalf("first TotalCost().MissingPricingModels = %q after a later call, want %q", first.MissingPricingModels, want)
+	}
+	if !reflect.DeepEqual(session.Cost.MissingPricingModels, []string{"unknown-root"}) {
+		t.Fatalf("session MissingPricingModels = %q, want unchanged", session.Cost.MissingPricingModels)
+	}
+}
+
 func TestSessionOwnedCostEqualsGrossWithoutDuplicates(t *testing.T) {
 	session := Session{
 		Cost: Cost{USD: 1, MissingPricingModels: []string{"unknown-a"}},

@@ -370,54 +370,27 @@ func (s Session) OwnedDescendantUsage() Usage {
 }
 
 func (s Session) TotalCost() Cost {
-	total := s.Cost
-	total.EstimatedRates = append([]EstimatedRate(nil), s.Cost.EstimatedRates...)
-	estimated := make(map[EstimatedRate]bool, len(total.EstimatedRates))
-	for _, rate := range total.EstimatedRates {
-		estimated[rate] = true
-	}
-	seen := make(map[string]bool, len(total.MissingPricingModels))
-	for _, name := range total.MissingPricingModels {
-		seen[name] = true
-	}
-	for _, subagent := range s.Subagents {
-		subtotal := subagent.TotalCost()
-		total.USD += subtotal.USD
-		total.Estimated = total.Estimated || subtotal.Estimated
-		for _, rate := range subtotal.EstimatedRates {
-			if !estimated[rate] {
-				total.EstimatedRates = append(total.EstimatedRates, rate)
-				estimated[rate] = true
-			}
-		}
-		for _, name := range subtotal.MissingPricingModels {
-			if !seen[name] {
-				total.MissingPricingModels = append(total.MissingPricingModels, name)
-				seen[name] = true
-			}
-		}
-	}
-	return total
+	return addSubagentCosts(s.Cost, s.Subagents, (*Session).TotalCost)
 }
 
 func (s Session) OwnedCost() Cost {
-	total := s.OwnedSelfCost()
-	return addOwnedCosts(total, s.Subagents)
+	return addSubagentCosts(s.OwnedSelfCost(), s.Subagents, (*Session).OwnedCost)
 }
 
 func (s Session) OwnedSelfCost() Cost {
-	total := s.Cost
-	total.EstimatedRates = append([]EstimatedRate(nil), s.Cost.EstimatedRates...)
-	total.MissingPricingModels = append([]string(nil), s.Cost.MissingPricingModels...)
+	total := s.Cost.clone()
 	total.USD -= s.DuplicatedUSD
 	return total
 }
 
 func (s Session) OwnedDescendantCost() Cost {
-	return addOwnedCosts(Cost{}, s.Subagents)
+	return addSubagentCosts(Cost{}, s.Subagents, (*Session).OwnedCost)
 }
 
-func addOwnedCosts(total Cost, subagents []*Session) Cost {
+// addSubagentCosts appends to a copy of the flag slices in base, so the result
+// never shares a backing array with a session.
+func addSubagentCosts(base Cost, subagents []*Session, subtotalOf func(*Session) Cost) Cost {
+	total := base.clone()
 	estimated := make(map[EstimatedRate]bool, len(total.EstimatedRates))
 	for _, rate := range total.EstimatedRates {
 		estimated[rate] = true
@@ -427,7 +400,7 @@ func addOwnedCosts(total Cost, subagents []*Session) Cost {
 		seen[name] = true
 	}
 	for _, subagent := range subagents {
-		subtotal := subagent.OwnedCost()
+		subtotal := subtotalOf(subagent)
 		total.USD += subtotal.USD
 		total.Estimated = total.Estimated || subtotal.Estimated
 		for _, rate := range subtotal.EstimatedRates {
@@ -444,4 +417,10 @@ func addOwnedCosts(total Cost, subagents []*Session) Cost {
 		}
 	}
 	return total
+}
+
+func (c Cost) clone() Cost {
+	c.EstimatedRates = append([]EstimatedRate(nil), c.EstimatedRates...)
+	c.MissingPricingModels = append([]string(nil), c.MissingPricingModels...)
+	return c
 }
