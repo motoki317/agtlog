@@ -6,73 +6,51 @@ status: "accepted"
 
 # Context
 
-The Sessions and Subagents tables expose more sortable columns than a single key can represent.
-Assigning one shifted letter to every column is ambiguous: AGENT collides with AGE, MODEL collides
-with MSGS, and `shift+T` already toggles the time format.
+The Sessions and Subagents tables expose more sortable columns than a single key can represent. One
+shifted letter per column is ambiguous: `AGENT` and `AGE` share a first letter, as do `TITLE` and
+`TURNS`, and `T` already toggles the time format.
 
-Subagents add two ordering constraints. Their indentation describes parent-child structure, so a
-global sort of flattened rows would separate children from their parents. Their update timestamps
-also advance while work runs and propagate from active descendants, which would make a default
-order based on `UpdatedAt` move sibling rows during live refreshes.
+The Subagents table indents rows by depth to show parent-child structure. A global sort of the
+flattened rows would separate children from their parents.
 
 # Decision
 
-Each table keeps a visible column focus separate from its independent sort state. `←` and `→` move
-focus among visible columns, and `shift+O` cycles the focused column through its preferred
-direction, the reverse direction, and cleared sorting. `shift+A` and `shift+N` provide direct AGE
-and TITLE access. A sorted header uses its existing final cell for `↑` or `↓`, so sorting does not
-change responsive column layout.
+Each table keeps a column focus, which its header highlights, separate from its sort state. `←` and
+`→` move focus among the visible columns. `⇧O` cycles the focused column through its first
+direction, the reverse direction, and no sort. Count and cost columns start largest first, and every
+other column starts ascending, so `AGE` starts oldest first. `⇧A` and `⇧N` reach `AGE` and `TITLE`
+directly. A sorted header puts `↑` or `↓` inside the column's existing width, so sorting does not
+change the responsive column layout.
+
+Sort choices stay in memory, and we add no configuration or persistence for them. The Sessions sort
+lasts until agtlog exits. A session opened from the list starts with an unsorted Subagents table. A
+drilled child starts with a copy of its parent's Subagents sort and column focus.
+
+Focus and sort are independent, so a sorted column can leave the screen on a narrow resize and stay
+the active sort. Every current and future visible column is reachable without another letter.
 
 The Subagents table sorts copied sibling slices within each parent and then traverses the tree in
-pre-order. It never sorts the flattened result or mutates `Session.Subagents`.
+pre-order. It never sorts the flattened result and never mutates `Session.Subagents`, so children
+stay beneath their parents under every sort. The `AGE` column sorts by `UpdatedAt`, the timestamp
+behind both its relative age and the clock time that `T` shows. The Sessions list sorts by
+`UpdatedAt`, newest first, when no sort is active.
 
-Cleared Subagents order uses `StartedAt` ascending because it is fixed when the session begins.
-The AGE column uses `UpdatedAt` because that is the value rendered in the cell. The Sessions list
-retains its cleared `UpdatedAt` descending order.
-
-# Consequences
-
-- One key scheme reaches every current and future visible column without consuming another letter
-  per column.
-- Column focus can diverge from the active sort, and a hidden sorted column remains active across
-  narrow resizes.
-- Subagent indentation remains positional and children stay beneath their parents under every
-  sort.
-- Running subagents remain stable in cleared order, while an explicit AGE sort can still move as
-  displayed update times change.
-- Sort choices last only for the current view; no configuration or persistence surface is added.
+We first ordered unsorted Subagents rows by `StartedAt`, oldest first.
+[Subagent age order](./20261001-subagent-age-order.md) replaced that choice with the Sessions order.
 
 # Impact
 
-The decision affects input handling, responsive header rendering, list rebuilding, and Subagents
-tree traversal in `internal/tui`. It does not change the normalized session model, parsers, cost
-calculation, or source ordering.
-
-Tests must cover the three-state cycle, displayed-value comparators, unknown timestamps, invalid
-costs, responsive focus, selection identity, graph immutability, live replacement, drill-down,
-help text, and representative golden frames.
+Tests must cover the three-state cycle, comparison by each column's displayed value, zero
+timestamps, and non-finite and negative costs. They must cover focus across a resize, selection by
+session identity, and an unmutated session graph. They must also cover a sort that survives a live
+update and a drill-down, help text, and representative golden frames.
 
 # Alternatives
 
-**One shifted letter per column** was rejected because current names already collide and the time
-toggle consumes another obvious mnemonic.
-
-**Sorting the flattened Subagents rows** was rejected because indentation would no longer express
-the actual tree.
-
-**Using `UpdatedAt` for cleared Subagents order** was rejected because live descendants propagate
-updates upward and would repeatedly move sibling branches.
-
-**Keeping parser order** was rejected because Claude subagent files are discovered by UUID-shaped
-paths, which provides no useful chronology.
+We rejected **parser order** for unsorted Subagents rows, because Claude subagent files are
+discovered by UUID-shaped paths, which carry no useful chronology.
 
 # Notes
 
-[Subagent age order](./20261001-subagent-age-order.md) supersedes the Decision sentence that chooses
-`StartedAt` for cleared order, the Context argument against `UpdatedAt`, and the rejected
-“Using `UpdatedAt` for cleared Subagents order” alternative. Its moving-siblings consequence also
-replaces the stationary-siblings consequence here.
-
-The focused-column interaction follows the k9s table pattern.
-[Overview tab](./20261001-overview-tab.md) replaces Info and the separate Subagents
-tab. Only the Subagents table within Overview supports column sorting.
+The focused-column interaction follows the k9s table pattern. The Subagents table is part of the
+[Overview tab](./20261001-overview-tab.md), and only that table supports column sorting in detail.
