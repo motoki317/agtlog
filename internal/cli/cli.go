@@ -255,12 +255,15 @@ func parseFlexible(flags *flag.FlagSet, args []string, operands int) ([]string, 
 		}
 		positionals = append(positionals, argument)
 	}
+	// FlagSet.Parse prints usage on every parse error, and usage goes to stdout,
+	// which only a response or requested help may use.
 	usage := flags.Usage
 	flags.Usage = func() {}
 	err := flags.Parse(flagArgs)
 	flags.Usage = usage
 	if err != nil {
 		if errors.Is(err, flag.ErrHelp) {
+			usage()
 			return nil, flag.ErrHelp
 		}
 		return nil, usageError(err.Error())

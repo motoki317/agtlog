@@ -350,12 +350,16 @@ func TestListRejectsInvalidFlagsAndLimits(t *testing.T) {
 }
 
 func TestSubcommandHelpWritesOnlyStdout(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-	err := Execute(context.Background(), []string{"list", "--help"}, &stdout, &stderr, func(context.Context, Options) (Registry, error) {
-		t.Fatal("factory called for help")
-		return nil, nil
-	})
-	if err != nil || !strings.Contains(stdout.String(), "Usage: agtlog list") || !strings.Contains(stdout.String(), "-limit") || !strings.Contains(stdout.String(), "overrides AGTLOG_CLAUDE_DIRS") || stderr.Len() != 0 {
-		t.Fatalf("error = %v, stdout = %q, stderr = %q", err, stdout.String(), stderr.String())
+	for _, help := range []string{"-h", "--help", "-help", "--help=true", "-h=1"} {
+		t.Run(help, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := Execute(context.Background(), []string{"list", help}, &stdout, &stderr, func(context.Context, Options) (Registry, error) {
+				t.Fatal("factory called for help")
+				return nil, nil
+			})
+			if err != nil || !strings.Contains(stdout.String(), "Usage: agtlog list") || !strings.Contains(stdout.String(), "-limit") || !strings.Contains(stdout.String(), "overrides AGTLOG_CLAUDE_DIRS") || stderr.Len() != 0 {
+				t.Fatalf("error = %v, stdout = %q, stderr = %q", err, stdout.String(), stderr.String())
+			}
+		})
 	}
 }
