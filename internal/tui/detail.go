@@ -218,7 +218,7 @@ func newDetailState(session *model.Session, width, height int, styles styles) *d
 }
 
 func newDetailStateBase(session *model.Session, width, height int, styles styles) *detailState {
-	state := &detailState{session: session, expanded: make(map[string]bool), defaultExpanded: true, loadStatus: detailStatusLoaded, styles: styles, wrap: true, subagentTotal: subagentCount(session)}
+	state := &detailState{session: session, expanded: make(map[string]bool), defaultExpanded: false, loadStatus: detailStatusLoaded, styles: styles, wrap: true, subagentTotal: subagentCount(session)}
 	if project := model.TerminalLine(session.Project, 96); project != "" {
 		state.crumbs = []string{project}
 	}

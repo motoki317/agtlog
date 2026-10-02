@@ -806,6 +806,7 @@ func TestFullFidelityCompactionSummaryAcrossParserTimelineAndItem(t *testing.T) 
 	}
 	bounded := string([]rune(summary)[:detailPreviewRuneCap-1]) + "…"
 	detail := newDetailState(session, 80, 12, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 	foundBounded := false
 	for _, timelineLine := range detail.lines {
 		foundBounded = foundBounded || strings.Contains(timelineLine.text, bounded)

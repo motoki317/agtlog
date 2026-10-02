@@ -52,3 +52,4 @@ links to the later record, and the later record names what it replaces.
 | 2026-10-01 | [Recursive turn counts](./20261001-recursive-turn-counts.md) | Count messages and tool calls across the session tree and keep `messages` per node |
 | 2026-10-01 | [Subagent age order](./20261001-subagent-age-order.md) | Order unsorted Subagents rows by newest update within each parent, like Sessions |
 | 2026-10-01 | [Overview tab](./20261001-overview-tab.md) | Combine own and delegated activity, model costs, and the Subagents table in one tab |
+| 2026-10-02 | [Collapsed Timeline start](./20261002-collapsed-timeline-start.md) | Start Timeline rows collapsed so readers can scan events before opening bodies |

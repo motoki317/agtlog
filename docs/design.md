@@ -16,8 +16,8 @@ exact values:
 ## Terseness rules
 
 1. Each screen answers one question without opening another view.
-2. Timeline rows with a body start expanded and fold in place. `enter` opens the focused row as its
-   own screen.
+2. When opened from the list, Timeline rows with a body start collapsed and unfold in place.
+   `enter` opens the focused row as its own screen.
 3. Lists use human-scale numbers and relative time, not raw counters or timestamps.
 4. Parent rows show recursive totals. Detail shows the breakdown.
 5. `internal/model` strips `system-reminder`, `permission-preamble`, and `local-command-caveat`
