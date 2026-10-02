@@ -281,7 +281,6 @@ func (d *detailState) resize(width, height int) {
 	layout := newDetailLayout(d.height)
 	d.viewport.Width = max(1, d.width-2)
 	d.viewport.Height = max(1, layout.contentHeight)
-	d.subagentColumnFocus = snapColumnFocus(d.subagentColumnFocus, d.visibleSubagentColumns(), subagentColumnOrder)
 	d.rebuild()
 	if pinned {
 		d.anchorBottom()
@@ -535,6 +534,9 @@ func (d *detailState) toggleFocused() {
 }
 
 func (d *detailState) rebuild() {
+	// A resize and the T toggle both change which Subagents columns fit. The
+	// toggle reaches the detail only through a rebuild, so the focus snaps here.
+	d.subagentColumnFocus = snapColumnFocus(d.subagentColumnFocus, d.visibleSubagentColumns(), subagentColumnOrder)
 	selected := d.focusKey()
 	if selected == "" {
 		selected = d.tabFocusKeys[d.tab]

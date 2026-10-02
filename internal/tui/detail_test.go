@@ -1772,7 +1772,7 @@ func TestSubagentColumnsDropAgeThenTurns(t *testing.T) {
 	}{
 		{60, true, true}, {59, false, true}, {55, false, true}, {54, false, false},
 	} {
-		columns := subagentColumns(test.width)
+		columns := subagentColumns(test.width, false)
 		if columnVisible(columnAge, columns) != test.age || columnVisible(columnTurns, columns) != test.turns {
 			t.Errorf("width %d columns = %#v, want age %t, turns %t", test.width, columns, test.age, test.turns)
 		}
@@ -1783,7 +1783,7 @@ func TestSubagentColumnsDropAgeThenTurns(t *testing.T) {
 }
 
 func TestSubagentColumnsAllocateRemainingWidthToTitle(t *testing.T) {
-	columns := subagentColumns(86)
+	columns := subagentColumns(86, false)
 	var titles []string
 	for _, column := range columns {
 		titles = append(titles, column.title)
@@ -1872,7 +1872,7 @@ func TestSubagentColumnsStayAlignedAtNarrowWidths(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(strconv.Itoa(test.width), func(t *testing.T) {
-			columns := subagentColumns(test.width)
+			columns := subagentColumns(test.width, false)
 			if !slices.Equal(columns, test.want) {
 				t.Fatalf("columns = %#v, want %#v", columns, test.want)
 			}
@@ -1978,7 +1978,7 @@ func TestDeepSubagentRowKeepsAgentIdentity(t *testing.T) {
 		{ID: "deep-last", Agent: model.AgentCodex, Title: "Inspect fictional last depth"},
 	}
 	items := flattenSubagents(root, sortState{})
-	columns := subagentColumns(95)
+	columns := subagentColumns(95, false)
 	titleStart := columns[0].width + 1
 	depthElevenRow := subagentRow(
 		items[11],
@@ -4649,6 +4649,68 @@ func TestTimeToggleUpdatesListAndTimelineTogether(t *testing.T) {
 	if !strings.Contains(view, "TIME") || !strings.Contains(view, "11:55:00") {
 		t.Fatalf("list did not share absolute time mode:\n%s", view)
 	}
+}
+
+func TestTimeToggleSwitchesSubagentsAgeToTime(t *testing.T) {
+	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout the ridge", StartedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-7 * time.Minute)}
+	root := &model.Session{
+		ID: "route", Agent: model.AgentClaude, Title: "Chart route", StartedAt: now.Add(-time.Hour), UpdatedAt: now.Add(-5 * time.Minute),
+		Events:    []model.Event{{Timestamp: now.Add(-5 * time.Minute), Kind: model.EventUser, Text: "Survey the crater"}},
+		Subagents: []*model.Session{child},
+	}
+	m := newModelWithClock([]*model.Session{root}, nil, func() time.Time { return now })
+	for _, msg := range []tea.Msg{tea.WindowSizeMsg{Width: 100, Height: 30}, tea.KeyMsg{Type: tea.KeyEnter}, tea.KeyMsg{Type: tea.KeyTab}} {
+		updated, _ := m.Update(msg)
+		m = updated.(Model)
+	}
+	// lastCells returns the last header and row cells of the Subagents table.
+	lastCells := func() (string, string, string) {
+		_, table, _ := strings.Cut(ansi.Strip(m.View()), "Subagents (1)")
+		var cells []string
+		for _, line := range strings.Split(table, "\n") {
+			if fields := strings.Fields(strings.Trim(line, "│ ")); len(fields) > 1 {
+				cells = append(cells, fields[len(fields)-1])
+			}
+		}
+		if len(cells) < 2 {
+			t.Fatalf("Subagents table has no header and row:\n%s", table)
+		}
+		return cells[0], cells[1], table
+	}
+	if header, cell, table := lastCells(); header != "AGE" || cell != "7m" {
+		t.Fatalf("relative Subagents last column = %q/%q, want AGE/7m:\n%s", header, cell, table)
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{rune(timeFormatKey[0])}})
+	m = updated.(Model)
+	if header, cell, table := lastCells(); header != "TIME" || cell != "11:53:00" {
+		t.Fatalf("absolute Subagents last column = %q/%q, want TIME/11:53:00:\n%s", header, cell, table)
+	}
+}
+
+func TestTimeToggleMovesSubagentFocusOffAHiddenTimeColumn(t *testing.T) {
+	session := &model.Session{ID: "route", Agent: model.AgentClaude, Subagents: []*model.Session{{ID: "scout", Agent: model.AgentClaude, Title: "Scout"}}}
+	for width := 20; width < 200; width++ {
+		detail := newDetailState(session, width, 30, newStyles())
+		ageVisible := columnVisible(columnAge, detail.visibleSubagentColumns())
+		detail.absoluteTime = true
+		if !ageVisible || columnVisible(columnAge, detail.visibleSubagentColumns()) {
+			continue
+		}
+		detail.absoluteTime = false
+		detail.tab = tabOverview
+		detail.subagentColumnFocus = columnAge
+		detail.rebuild()
+
+		detail.absoluteTime = true
+		detail.rebuildPreservingViewport()
+		if !columnVisible(detail.subagentColumnFocus, detail.visibleSubagentColumns()) {
+			t.Fatalf("width %d: focus stayed on hidden column %v", width, detail.subagentColumnFocus)
+		}
+		return
+	}
+	t.Fatal("no width shows AGE but hides the wider TIME column")
 }
 
 func TestTimeRefreshPreservesScrolledViewportAwayFromFocus(t *testing.T) {

@@ -100,7 +100,7 @@ func (d *detailState) overviewLines() []detailLine {
 	if len(d.subagents) == 0 {
 		return append(lines, overviewLine("No subagents", detailSecondary))
 	}
-	columns := subagentColumns(width)
+	columns := subagentColumns(width, d.absoluteTime)
 	lines = append(lines, detailLine{text: subagentHeader(columns, d.subagentSort, d.subagentColumnFocus, d.styles).plain, nowrap: true, role: detailHeader, subagentHeader: true})
 	for _, item := range d.subagents {
 		session := item.s
@@ -364,9 +364,13 @@ func (d *detailState) sortSubagents(kind listColumnKind) {
 	d.rebuild()
 }
 
-func subagentColumns(width int) []listColumn {
+func subagentColumns(width int, absoluteTime bool) []listColumn {
 	if width <= 0 {
 		return nil
+	}
+	timeTitle, timeWidth := "AGE", listAgeWidth
+	if absoluteTime {
+		timeTitle, timeWidth = "TIME", listTimeWidth
 	}
 	columns := []listColumn{
 		{kind: columnAgent, title: "AGENT", width: listAgentWidth},
@@ -374,7 +378,7 @@ func subagentColumns(width int) []listColumn {
 		{kind: columnModel, title: "MODEL", width: listModelWidth},
 		{kind: columnTurns, title: "TURNS", width: listTurnsWidth, right: true},
 		{kind: columnCost, title: "COST", width: listCostWidth, right: true},
-		{kind: columnAge, title: "AGE", width: listAgeWidth, right: true},
+		{kind: columnAge, title: timeTitle, width: timeWidth, right: true, absoluteTime: absoluteTime},
 	}
 	if listColumnsWidth(columns) > width {
 		columns = removeListColumn(columns, columnAge)
@@ -427,7 +431,7 @@ var subagentColumnOrder = []listColumnKind{
 }
 
 func (d *detailState) visibleSubagentColumns() []listColumn {
-	return subagentColumns(max(0, d.viewport.Width-2))
+	return subagentColumns(max(0, d.viewport.Width-2), d.absoluteTime)
 }
 
 func subagentHeader(columns []listColumn, state sortState, focus listColumnKind, styles styles) panelLine {
@@ -461,7 +465,9 @@ func subagentRow(item flattenedSubagent, now time.Time, columns []listColumn, mo
 		case columnCost:
 			value = cost
 		case columnAge:
-			if !now.IsZero() {
+			if column.absoluteTime {
+				value = formatDetailTime(session.UpdatedAt, sessionSpansMultipleDates(session))
+			} else if !now.IsZero() {
 				value = formatAge(now, session.UpdatedAt)
 			}
 		}
