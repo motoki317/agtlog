@@ -2353,10 +2353,7 @@ func TestEventRowsShowTheirOwnRequestMetrics(t *testing.T) {
 	}
 }
 
-// TestTurnSummaryOmitsTokensWithoutUsage keeps the affordance honest: a turn whose
-// events carry no usage shows neither figure, so the row is unchanged when a log
-// lacks token counts.
-func TestTurnSummaryOmitsTokensWithoutUsage(t *testing.T) {
+func TestRowsWithoutUsageShowNoMetrics(t *testing.T) {
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Chart the route"},
 		{Kind: model.EventAssistantText, Text: "Route ready"},
@@ -2364,8 +2361,8 @@ func TestTurnSummaryOmitsTokensWithoutUsage(t *testing.T) {
 	detail := newDetailState(session, 80, 40, newStyles())
 
 	for _, line := range detail.lines {
-		if strings.Contains(line.text, "claude: Route ready") && (strings.Contains(line.text, "ctx ") || strings.Contains(line.text, "+")) {
-			t.Fatalf("turn summary invented token figures without usage: %q", line.text)
+		if line.metrics != "" {
+			t.Fatalf("row %q shows metrics %q without usage", line.text, line.metrics)
 		}
 	}
 }
@@ -4436,12 +4433,14 @@ func TestSubagentsMouseClickNeverDrillsIntoSelectedRow(t *testing.T) {
 	m = updated.(Model)
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	m = updated.(Model)
-	detail := detailStateFromScreen(t, m.detail)
+	if entry := detailStateFromScreen(t, m.detail); entry.focus != 0 {
+		t.Fatalf("Overview entry selection = %d, want the first subagent", entry.focus)
+	}
 	y := viewLineY(t, m.View(), "Map crater", 0)
 	click := tea.MouseMsg{X: 2, Y: y, Action: tea.MouseActionRelease, Button: tea.MouseButtonLeft}
 	updated, _ = m.Update(click)
 	m = updated.(Model)
-	detail = detailStateFromScreen(t, m.detail)
+	detail := detailStateFromScreen(t, m.detail)
 	if detail.focus != 1 || detail.session != root || len(m.detailStack) != 0 {
 		t.Fatalf("first subagents click selection=%d session=%q stack=%d", detail.focus, detail.session.ID, len(m.detailStack))
 	}
