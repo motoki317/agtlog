@@ -35,7 +35,6 @@ type logRecord struct {
 	GitBranch         string          `json:"gitBranch"`
 	RequestID         string          `json:"requestId"`
 	IsSidechain       bool            `json:"isSidechain"`
-	Speed             string          `json:"speed"`
 	CostUSD           *float64        `json:"costUSD"`
 	ToolUseResult     json.RawMessage `json:"toolUseResult"`
 	Error             json.RawMessage `json:"error"`
@@ -50,10 +49,11 @@ type logRecord struct {
 }
 
 type claudeUsageJSON struct {
-	InputTokens              int64 `json:"input_tokens"`
-	OutputTokens             int64 `json:"output_tokens"`
-	CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+	InputTokens              int64  `json:"input_tokens"`
+	OutputTokens             int64  `json:"output_tokens"`
+	CacheCreationInputTokens int64  `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int64  `json:"cache_read_input_tokens"`
+	Speed                    string `json:"speed"`
 	CacheCreation            *struct {
 		Ephemeral1hInputTokens int64 `json:"ephemeral_1h_input_tokens"`
 		Ephemeral5mInputTokens int64 `json:"ephemeral_5m_input_tokens"`
@@ -89,14 +89,15 @@ func claudeAdvisorUsages(tokens claudeUsageJSON) []model.Usage {
 	return advisor
 }
 
-// claudeUsage maps a logged usage block to model.Usage. Callers that price the
-// record add Speed and CostUSD; the timeline only needs the token counts.
+// claudeUsage leaves CostUSD unset because the log records costUSD beside the
+// message, not in the usage block.
 func claudeUsage(modelName string, tokens claudeUsageJSON) model.Usage {
 	usage := model.Usage{
 		Model:           modelName,
 		InputTokens:     tokens.InputTokens,
 		OutputTokens:    tokens.OutputTokens,
 		CacheReadTokens: tokens.CacheReadInputTokens,
+		Speed:           tokens.Speed,
 	}
 	if tokens.CacheCreation != nil {
 		usage.CacheCreation1hTokens = tokens.CacheCreation.Ephemeral1hInputTokens
@@ -143,7 +144,7 @@ func NewParser(calculator cost.Calculator) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v19"
+	return "claude-parser-v20"
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
@@ -1365,7 +1366,6 @@ func (p Parser) parseFile(ctx context.Context, path string) (*model.Session, map
 		}
 		if record.Type == "assistant" && hasUsage && record.Message.Model != "" && record.Message.Model != "<synthetic>" {
 			usage := claudeUsage(record.Message.Model, record.Message.Usage)
-			usage.Speed = record.Speed
 			usage.CostUSD = record.CostUSD
 			if !validUsage(usage) {
 				return

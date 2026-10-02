@@ -148,8 +148,8 @@ func parseFlatSidecarBaseline(t *testing.T) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); got != "claude-parser-v19" {
-		t.Fatalf("CacheFingerprint() = %q, want tool-count v19 fingerprint", got)
+	if got := testParser().CacheFingerprint(); got != "claude-parser-v20" {
+		t.Fatalf("CacheFingerprint() = %q, want fast-mode v20 fingerprint", got)
 	}
 }
 
@@ -1390,6 +1390,32 @@ func TestParseSkipsNegativeUsageRecord(t *testing.T) {
 	}
 	if len(session.Usage) != 1 || session.Usage[0].InputTokens != 3 {
 		t.Fatalf("Parse().Usage = %#v, want only valid usage", session.Usage)
+	}
+}
+
+// Claude Code logs fast mode at message.usage.speed, the field the Messages API returns.
+func TestParseAndLoadEventsPriceFastModeFromMessageUsage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-fast.jsonl")
+	line := `{"type":"assistant","sessionId":"session-fast","requestId":"request-fast","message":{"id":"message-fast","model":"model-a","content":[{"type":"text","text":"Course plotted"}],"usage":{"input_tokens":2,"speed":"fast"}}}` + "\n"
+	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pricing := cost.Pricing{Input: 1}
+	pricing.ProviderSpecificEntry.Fast = 3
+	parser := NewParser(cost.NewCalculator(cost.Table{"model-a": pricing}))
+
+	session, err := parser.Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got := session.Cost.USD; got != 6 {
+		t.Fatalf("Parse().Cost.USD = %v, want 6 at the fast multiplier", got)
+	}
+	if err := parser.LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 1 || session.Events[0].Cost.Total() != 6 {
+		t.Fatalf("LoadEvents().Events = %#v, want one event costing 6", session.Events)
 	}
 }
 
