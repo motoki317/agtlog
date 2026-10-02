@@ -242,9 +242,9 @@ func TestRefreshTableGivesFetchThirtySecondDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("refreshTable() error = %v", err)
 	}
-	// started and requested bracket the moment refreshTable creates the fetch
-	// context, so the assertion needs no wall-clock tolerance. A tolerance would
-	// fail whenever the embedded table parse before that moment runs slowly.
+	// started and requested bracket the moment when refreshTable creates the
+	// fetch context, so the assertions need no wall-clock tolerance. A tolerance
+	// would fail whenever the embedded table parse before that moment runs slowly.
 	if deadline.After(requested.Add(30 * time.Second)) {
 		t.Fatalf("fetch deadline %v after the fetch call, want at most 30s", deadline.Sub(requested))
 	}

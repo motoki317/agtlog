@@ -37,6 +37,8 @@ func EmbeddedTable() (Table, error) {
 	return pricingTable(embeddedPricing)
 }
 
+// RuntimeTable can start a background fetch that replaces the cache file after
+// RuntimeTable returns. The returned table does not change.
 func RuntimeTable(cacheDir string, offline bool) (Table, error) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	return runtimeTable(runtimePricingOptions{
@@ -213,7 +215,8 @@ func decodePricingTable(data []byte, strict bool) (Table, error) {
 	}
 	table := make(Table, len(raw))
 	for name, entry := range raw {
-		// LiteLLM ships sample_spec as a documentation template with pricing-shaped keys, so it is not a model.
+		// LiteLLM's sample_spec is a documentation template with
+		// pricing-shaped keys, not a model.
 		if name == "sample_spec" {
 			continue
 		}
@@ -294,9 +297,9 @@ func (t Table) Resolve(modelName string) (string, Pricing, bool) {
 	return "", Pricing{}, false
 }
 
-// ResolveCodex reports the pricing entry to apply and whether it is the logged
-// model's own published rate. A substituted or default rate is an estimate.
-func (t Table) ResolveCodex(modelName, defaultModel string) (string, Pricing, bool, bool) {
+// ResolveCodex reports exact only for the logged model's own published rate. A
+// rate from a base model or from defaultModel is an estimate.
+func (t Table) ResolveCodex(modelName, defaultModel string) (key string, pricing Pricing, exact, ok bool) {
 	if key, pricing, ok := t.Resolve(modelName); ok {
 		return key, pricing, true, true
 	}
@@ -310,6 +313,6 @@ func (t Table) ResolveCodex(modelName, defaultModel string) (string, Pricing, bo
 			}
 		}
 	}
-	key, pricing, ok := t.Resolve(defaultModel)
+	key, pricing, ok = t.Resolve(defaultModel)
 	return key, pricing, false, ok
 }

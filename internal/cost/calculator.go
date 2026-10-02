@@ -158,9 +158,9 @@ func (c Calculator) Calculate(usage model.Usage) model.Cost {
 	return model.Cost{USD: rateCostsFor(usage, pricing).total()}
 }
 
-// Breakdown reports the actual token/rate buckets applied and ignores CostUSD.
-// No measured Claude usage row supplies a logged cost; if one does, this rate
-// estimate may differ from Calculate.
+// Breakdown prices usage from the rate table and ignores CostUSD. If a record
+// carries CostUSD, the breakdown total can differ from Calculate. No measured
+// Claude log carried one.
 func (c Calculator) Breakdown(usage model.Usage) model.CostBreakdown {
 	pricing, ok := c.resolvePricing(usage)
 	if !ok {
@@ -206,8 +206,6 @@ func rateCostsFor(usage model.Usage, pricing Pricing) rateCosts {
 	}
 	inputTokens := usage.InputTokens
 	if usage.InputIncludesCacheRead {
-		// OpenAI reports cached input as a subset of input; subtract it before
-		// applying the ordinary input rate to avoid billing those tokens twice.
 		inputTokens = max(0, inputTokens-usage.CacheReadTokens)
 	}
 	multiplier := 1.0
