@@ -1967,14 +1967,11 @@ func (d *detailState) tabLabel() panelLabel {
 	return panelLabel{plain: strings.Join(labels, "  "), styled: styles[0].Render(labels[0]) + d.styles.title.Render("  ") + styles[1].Render(labels[1])}
 }
 
-func (d *detailState) activeTabText() string { return "[" + d.tab.title() + "]" }
-
 func (d *detailState) activeTabLabel() panelLabel {
 	maxWidth := max(1, d.width-5)
-	text := strings.TrimSuffix(strings.TrimPrefix(d.activeTabText(), "["), "]")
 	plain := "…"
 	if maxWidth >= 2 {
-		plain = "[" + ansi.Truncate(text, maxWidth-2, "…") + "]"
+		plain = "[" + ansi.Truncate(d.tab.title(), maxWidth-2, "…") + "]"
 	}
 	return panelLabel{plain: plain, styled: d.styles.title.Render(plain)}
 }
@@ -1992,10 +1989,8 @@ func detailKeyText(width int, mono bool, tab detailTab, wrap bool) string {
 	hints := []string{"j/k scroll"}
 	if tab == tabTimeline {
 		hints = append(hints, "←/→ fold", "space toggle", bulkHint, enterHint, "tab switch", wrapHint)
-	} else if tab == tabOverview {
-		hints = append(hints, "←/→ column", "⇧"+sortColumnKey+" sort", enterHint, "tab switch", wrapHint)
 	} else {
-		hints = append(hints, "tab switch", wrapHint)
+		hints = append(hints, "←/→ column", "⇧"+sortColumnKey+" sort", enterHint, "tab switch", wrapHint)
 	}
 	hints = append(hints, timeFormatKey+" time")
 	mouseHint := "mouse scroll/click"
