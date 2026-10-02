@@ -1096,6 +1096,9 @@ func (d *detailState) rebuildRendered() {
 		}
 	}
 	d.viewport.SetContent(strings.Join(content, "\n"))
+	// SetContent clamps only an offset past the last row, so shrunk content would
+	// leave blank rows below the bottom.
+	d.viewport.SetYOffset(d.viewport.YOffset)
 	selectedRow := d.firstRenderedRow(d.selectedLine)
 	if selectedRow < 0 {
 		return

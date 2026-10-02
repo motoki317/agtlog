@@ -4649,6 +4649,33 @@ func TestSpaceCollapsesDefaultExpandedTool(t *testing.T) {
 	}
 }
 
+func TestShrinkingTimelineAtTheBottomKeepsTheViewportFilled(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		key  string
+	}{
+		{name: "collapse the focused row", key: " "},
+		{name: "turn wrapping off", key: "w"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			events := []model.Event{{Kind: model.EventUser, Text: "Survey the crater"}}
+			for index := range 20 {
+				events = append(events, model.Event{Kind: model.EventThinking, Text: fmt.Sprintf("Observation %02d", index)})
+			}
+			events = append(events, model.Event{Kind: model.EventAssistantText, Text: strings.Repeat("ridge telemetry ", 12) + "\nsecond line\nthird line"})
+			detail := newDetailState(&model.Session{ID: "lunar", Agent: model.AgentCodex, Events: events}, 60, 16, newStyles())
+			rowsBefore := len(detail.rendered)
+
+			detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(test.key)})
+
+			maxOffset := max(0, len(detail.rendered)-detail.viewport.Height)
+			if len(detail.rendered) >= rowsBefore || detail.viewport.YOffset > maxOffset {
+				t.Fatalf("rows %d -> %d, offset = %d, want shrunk content with offset <= %d", rowsBefore, len(detail.rendered), detail.viewport.YOffset, maxOffset)
+			}
+		})
+	}
+}
+
 func TestTimelineGutterShowsRelativeEventTime(t *testing.T) {
 	now := time.Date(2026, time.July, 20, 12, 0, 0, 0, time.UTC)
 	session := &model.Session{ID: "route", Agent: model.AgentClaude, Events: []model.Event{{
