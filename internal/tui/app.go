@@ -541,7 +541,7 @@ func (m *Model) activateDetailSelection() (bool, tea.Cmd) {
 		if m.registry == nil {
 			return true, nil
 		}
-		return true, m.startChildDetailLoad(child, child)
+		return true, m.startChildDetailLoad(child, nil)
 	}
 	if event, exists := detail.focusedEvent(); exists {
 		crumbs := append([]string(nil), detail.crumbs...)
@@ -560,14 +560,28 @@ func (m *Model) activateDetailSelection() (bool, tea.Cmd) {
 	return false, nil
 }
 
-func (m *Model) startChildDetailLoad(detail, restore *detailState) tea.Cmd {
-	loadRestore := captureDetailRestoreState(restore)
-	if restore.loadRestore != nil {
-		loadRestore = *restore.loadRestore
-	}
+// startChildDetailLoad marks detail as loading and returns the load command.
+// previous is the screen that detail replaces, or nil for a new screen.
+func (m *Model) startChildDetailLoad(detail, previous *detailState) tea.Cmd {
 	m.childGeneration++
-	detail.markLoading(m.childGeneration, &loadRestore)
-	detail.rebuild()
+	if previous != nil && previous.timelineSession() != nil {
+		// A live parent reloads its open child on every update, so the previous
+		// rows stay until the load arrives instead of flashing the placeholder.
+		// The reader can move on them, so the load keeps the live focus rather
+		// than a saved one.
+		detail.markLoading(m.childGeneration, nil, previous.timelineSession())
+		detail.restoreView(captureDetailRestoreState(previous), m.width, m.height)
+	} else {
+		if previous == nil {
+			previous = detail
+		}
+		loadRestore := captureDetailRestoreState(previous)
+		if previous.loadRestore != nil {
+			loadRestore = *previous.loadRestore
+		}
+		detail.markLoading(m.childGeneration, &loadRestore, nil)
+		detail.rebuild()
+	}
 	return loadChildDetail(m.ctx, m.registry, detail.session, m.detailGeneration, detail.loadGeneration)
 }
 
@@ -611,7 +625,7 @@ func (m *Model) openListSelection() tea.Cmd {
 	if m.registry == nil {
 		return nil
 	}
-	detail.markLoading(0, nil)
+	detail.markLoading(0, nil, nil)
 	detail.rebuild()
 	m.detailGeneration++
 	return loadDetail(m.ctx, m.registry, m.visible[index], m.detailGeneration)
@@ -846,34 +860,40 @@ func (m *Model) replacementDetailStateFromRestore(restore detailRestoreState, se
 	replacement.tab = restore.tab
 	replacement.subagentSort = restore.subagentSort
 	replacement.subagentColumnFocus = restore.subagentColumnFocus
-	replacement.tabFocusKeys = restore.tabFocusKeys
-	replacement.focus = restore.focus
-	if restore.pinned {
-		replacement.tabFocusKeys[tabTimeline] = ""
-		replacement.focus = -1
-	}
 	for key, expanded := range restore.expanded {
 		replacement.expanded[key] = expanded
 	}
-	replacement.resize(m.width, m.height)
+	replacement.restoreView(restore, m.width, m.height)
+	return replacement
+}
+
+// restoreView rebuilds the rows at the given size and returns the focus and the
+// scroll position to where restore recorded them.
+func (d *detailState) restoreView(restore detailRestoreState, width, height int) {
+	d.tabFocusKeys = restore.tabFocusKeys
+	d.focus = restore.focus
+	if restore.pinned {
+		d.tabFocusKeys[tabTimeline] = ""
+		d.focus = -1
+	}
+	d.resize(width, height)
 	if !restore.pinned {
-		replacement.viewport.SetYOffset(restore.viewportOffset)
-		for index, item := range replacement.focusables {
+		d.viewport.SetYOffset(restore.viewportOffset)
+		for index, item := range d.focusables {
 			if item.key == restore.focusKey {
-				oldLine := replacement.selectedLine
-				replacement.focus = index
-				replacement.updateSelection(oldLine, item.line)
+				oldLine := d.selectedLine
+				d.focus = index
+				d.updateSelection(oldLine, item.line)
 				break
 			}
 		}
 	}
 	if restore.pinned {
-		replacement.anchorBottom()
+		d.anchorBottom()
 	}
-	if replacement.tab == tabTimeline && !restore.pinned {
-		replacement.viewport.SetYOffset(restore.viewportOffset)
+	if d.tab == tabTimeline && !restore.pinned {
+		d.viewport.SetYOffset(restore.viewportOffset)
 	}
-	return replacement
 }
 
 func (m *Model) cycleTheme() {

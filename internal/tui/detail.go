@@ -29,6 +29,7 @@ type detailState struct {
 	loadStatus          detailLoadStatus
 	loadGeneration      uint64
 	loadRestore         *detailRestoreState
+	previousTimeline    *model.Session
 	err                 error
 	styles              styles
 	wrap                bool
@@ -250,10 +251,11 @@ func (d *detailState) scrollWheel(button tea.MouseButton) {
 	scrollViewport(&d.viewport, button)
 }
 
-func (d *detailState) markLoading(generation uint64, restore *detailRestoreState) {
+func (d *detailState) markLoading(generation uint64, restore *detailRestoreState, previousTimeline *model.Session) {
 	d.loadStatus = detailStatusLoading
 	d.loadGeneration = generation
 	d.loadRestore = restore
+	d.previousTimeline = previousTimeline
 	d.err = nil
 }
 
@@ -261,6 +263,7 @@ func (d *detailState) markLoaded() {
 	d.loadStatus = detailStatusLoaded
 	d.loadGeneration = 0
 	d.loadRestore = nil
+	d.previousTimeline = nil
 	d.err = nil
 }
 
@@ -268,7 +271,21 @@ func (d *detailState) markLoadFailed(err error) {
 	d.loadStatus = detailStatusFailed
 	d.loadGeneration = 0
 	d.loadRestore = nil
+	d.previousTimeline = nil
 	d.err = err
+}
+
+// timelineSession returns the session whose events the timeline shows, or nil
+// when no rows exist yet.
+func (d *detailState) timelineSession() *model.Session {
+	switch d.loadStatus {
+	case detailStatusLoaded:
+		return d.session
+	case detailStatusLoading:
+		return d.previousTimeline
+	default:
+		return nil
+	}
 }
 
 func (d *detailState) resize(width, height int) {
@@ -551,10 +568,10 @@ func (d *detailState) rebuild() {
 		lines = []detailLine{{text: "detail error: " + message, role: detailWarning}}
 	} else if d.tab == tabOverview {
 		lines = d.overviewLines()
-	} else if d.loadStatus == detailStatusLoading {
-		lines = []detailLine{{text: "Loading timeline…", role: detailSecondary}}
+	} else if timeline := d.timelineSession(); timeline != nil {
+		lines = d.sessionLines(timeline, sessionIdentity(d.session))
 	} else {
-		lines = d.sessionLines(d.session, sessionIdentity(d.session))
+		lines = []detailLine{{text: "Loading timeline…", role: detailSecondary}}
 	}
 	d.lines = lines
 	d.focusables = d.focusables[:0]

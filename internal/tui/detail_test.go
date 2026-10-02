@@ -3044,7 +3044,7 @@ func TestReplaceDetailTreeReloadsOpenChild(t *testing.T) {
 	}
 	updated, cmd := m.Update(rootCmd())
 	m = updated.(Model)
-	if cmd == nil || detailStateFromScreen(t, m.detail).loadStatus != detailStatusLoading || !strings.Contains(ansi.Strip(m.View()), "Loading timeline…") {
+	if cmd == nil || detailStateFromScreen(t, m.detail).loadStatus != detailStatusLoading || !strings.Contains(ansi.Strip(m.View()), "Old child event") {
 		t.Fatalf("tree replacement did not reload open child: cmd=%v\n%s", cmd != nil, ansi.Strip(m.View()))
 	}
 	updated, _ = m.Update(cmd())
@@ -3059,6 +3059,103 @@ func TestReplaceDetailTreeReloadsOpenChild(t *testing.T) {
 	if !strings.Contains(view, "Fresh child event") || strings.Contains(view, "Old child event") {
 		t.Fatalf("refreshed child timeline is stale:\n%s", view)
 	}
+}
+
+func TestReplaceDetailTreeKeepsChildRowsDuringReload(t *testing.T) {
+	childEvents := func(prefix string, count int) []model.Event {
+		events := make([]model.Event, count)
+		for index := range events {
+			events[index] = model.Event{Kind: model.EventAssistantText, Text: fmt.Sprintf("%s event %02d", prefix, index)}
+		}
+		return events
+	}
+	newModel := func(t *testing.T, freshCount int) Model {
+		t.Helper()
+		child := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/scout.jsonl", Events: childEvents("Old", 12)}
+		root := &model.Session{ID: "route", Agent: model.AgentClaude, Path: "/workspace/route.jsonl", Subagents: []*model.Session{child}}
+		registry := source.NewRegistry([]source.Source{detailTestSource{
+			session: root,
+			loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+				if loaded.ID == child.ID {
+					loaded.Events = childEvents("Fresh", freshCount)
+				}
+				return nil
+			},
+		}}, source.Options{})
+		m := NewModel([]*model.Session{root}, registry)
+		m.width, m.height = 80, 10
+		m.screen = screenDetail
+		m.detailStack = []detailScreen{newDetailState(root, m.width, m.height, m.styles)}
+		m.detail = newDetailState(child, m.width, m.height, m.styles)
+		m.detailGeneration = 2
+		return m
+	}
+	updateParent := func(t *testing.T, m Model) (Model, tea.Cmd) {
+		t.Helper()
+		replacement := cloneSession(detailStateFromScreen(t, m.detailStack[0]).session)
+		replacement.Subagents[0].Events = nil
+		updated, rootCmd := m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
+		m = updated.(Model)
+		updated, childCmd := m.Update(rootCmd())
+		m = updated.(Model)
+		view := ansi.Strip(m.View())
+		if detailStateFromScreen(t, m.detail).loadStatus != detailStatusLoading || childCmd == nil {
+			t.Fatal("parent update did not reload the open child")
+		}
+		if strings.Contains(view, "Loading timeline…") || !strings.Contains(view, "Old event") {
+			t.Fatalf("open child lost its rows while the reload runs:\n%s", view)
+		}
+		return m, childCmd
+	}
+	focusedKey := func(detail *detailState) string { return detail.focusables[detail.focus].key }
+
+	t.Run("focus and scroll", func(t *testing.T) {
+		m := newModel(t, 12)
+		detail := detailStateFromScreen(t, m.detail)
+		detail.focus = 3
+		detail.selectedLine = detail.focusables[3].line
+		detail.viewport.SetYOffset(2)
+		wantKey, wantOffset := focusedKey(detail), detail.viewport.YOffset
+
+		m, childCmd := updateParent(t, m)
+		detail = detailStateFromScreen(t, m.detail)
+		if focusedKey(detail) != wantKey || detail.viewport.YOffset != wantOffset {
+			t.Fatalf("reloading child: key=%q offset=%d, want key=%q offset=%d", focusedKey(detail), detail.viewport.YOffset, wantKey, wantOffset)
+		}
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = updated.(Model)
+		detail = detailStateFromScreen(t, m.detail)
+		wantKey, wantOffset = focusedKey(detail), detail.viewport.YOffset
+
+		updated, _ = m.Update(childCmd())
+		m = updated.(Model)
+		detail = detailStateFromScreen(t, m.detail)
+		view := ansi.Strip(m.View())
+		if detail.loadStatus != detailStatusLoaded || !strings.Contains(view, "Fresh event") || strings.Contains(view, "Old event") {
+			t.Fatalf("loaded rows did not replace the previous rows:\n%s", view)
+		}
+		if focusedKey(detail) != wantKey || detail.viewport.YOffset != wantOffset {
+			t.Fatalf("reloaded child: key=%q offset=%d, want key=%q offset=%d", focusedKey(detail), detail.viewport.YOffset, wantKey, wantOffset)
+		}
+	})
+
+	t.Run("tail follow", func(t *testing.T) {
+		m := newModel(t, 14)
+		if !detailStateFromScreen(t, m.detail).followingTail() {
+			t.Fatal("precondition: open child does not follow the tail")
+		}
+
+		m, childCmd := updateParent(t, m)
+		if detail := detailStateFromScreen(t, m.detail); !detail.followingTail() {
+			t.Fatalf("reloading child stopped following the tail: focus=%d of %d", detail.focus, len(detail.focusables))
+		}
+		updated, _ := m.Update(childCmd())
+		m = updated.(Model)
+		detail := detailStateFromScreen(t, m.detail)
+		if !detail.followingTail() || len(detail.focusables) != 14 || !strings.Contains(ansi.Strip(m.View()), "Fresh event 13") {
+			t.Fatalf("reloaded child did not follow the new tail: focus=%d of %d\n%s", detail.focus, len(detail.focusables), ansi.Strip(m.View()))
+		}
+	})
 }
 
 func TestReplaceDetailTreePreservesReloadedChildState(t *testing.T) {
