@@ -311,8 +311,12 @@ func (d *detailState) setWrap(wrap bool) {
 	d.wrap = wrap
 	if d.tab == tabOverview {
 		d.rebuildPreservingViewport()
-	} else {
-		d.rebuild()
+		return
+	}
+	pinned := d.followingTail()
+	d.rebuild()
+	if pinned {
+		d.anchorBottom()
 	}
 }
 

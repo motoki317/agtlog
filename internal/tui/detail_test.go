@@ -4665,6 +4665,22 @@ func TestPinnedDetailTimelineStaysPinnedAcrossResize(t *testing.T) {
 	}
 }
 
+func TestPinnedDetailTimelineStaysPinnedAcrossWrapToggles(t *testing.T) {
+	events := []model.Event{{Kind: model.EventUser, Text: "Survey the crater"}}
+	for index := range 20 {
+		events = append(events, model.Event{Kind: model.EventThinking, Text: fmt.Sprintf("Observation %02d", index)})
+	}
+	events = append(events, model.Event{Kind: model.EventAssistantText, Text: "Ridge report\n" + strings.Repeat("ridge telemetry ", 12) + "\n" + strings.Repeat("pass telemetry ", 12)})
+	detail := newDetailState(&model.Session{ID: "lunar", Agent: model.AgentCodex, Events: events}, 60, 16, newStyles())
+
+	for _, wrap := range []bool{false, true} {
+		detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+		if detail.wrap != wrap || !detail.followingTail() {
+			t.Fatalf("wrap=%t follow=%t offset=%d rows=%d, want wrap=%t still following", detail.wrap, detail.followingTail(), detail.viewport.YOffset, len(detail.rendered), wrap)
+		}
+	}
+}
+
 func TestSpaceCollapsesDefaultExpandedTool(t *testing.T) {
 	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Survey the crater"},
