@@ -54,8 +54,8 @@ func parseTieredSession(t *testing.T, events ...string) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); got != "codex-parser-v26" {
-		t.Fatalf("CacheFingerprint() = %q, want tool-count v26 fingerprint", got)
+	if got := testParser().CacheFingerprint(); got != "codex-parser-v27" {
+		t.Fatalf("CacheFingerprint() = %q, want zero-usage ledger v27 fingerprint", got)
 	}
 }
 
@@ -3011,6 +3011,8 @@ func TestParseCounterSegments(t *testing.T) {
 		{"invalid restart last", []string{segmentTokenLine("04:01", tokens(100), tokens(100)), segmentTokenLine("04:02", tokens(20), tokens(-1))}, 120, []int64{100, 20}, []bool{false, true}},
 		{"invalid field subtraction", []string{segmentTokenLine("04:01", tokens(100), tokens(100)), segmentTokenLine("04:02", tokens(20), &tokenUsage{InputTokens: 10, CachedInputTokens: 1, TotalTokens: 10})}, 120, []int64{100, 20}, []bool{false, true}},
 		{"replay then reset", []string{`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-child","thread_source":"subagent"}}`, segmentTokenLine("04:01.100", tokens(100), tokens(100)), segmentTokenLine("04:01.200", tokens(80), tokens(20)), segmentTokenLine("04:02", tokens(110), tokens(30)), segmentTokenLine("04:03", tokens(20), tokens(20))}, 50, []int64{30, 20}, nil},
+		{"replay only", []string{`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-child","thread_source":"subagent"}}`, segmentTokenLine("04:01.100", tokens(100), tokens(100)), segmentTokenLine("04:01.200", tokens(200), tokens(100))}, 0, nil, nil},
+		{"zero request", []string{segmentTokenLine("04:01", tokens(50), &tokenUsage{}), segmentTokenLine("04:02", tokens(100), tokens(100))}, 100, []int64{100}, nil},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			session := parseTieredSession(t, test.lines...)

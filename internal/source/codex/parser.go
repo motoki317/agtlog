@@ -27,7 +27,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v26"
+	return "codex-parser-v27"
 }
 
 type tokenUsage struct {
@@ -273,7 +273,9 @@ func (a *summaryAccumulator) ingest(line []byte, offset int64) {
 		cumulativeAdvanced = advanceTokenUsageMax(&a.runningMax, record.Payload.Info.Total)
 	}
 	if isTokenCount && record.Payload.Info.Last != nil {
-		if !validTokenUsage(record.Payload.Info.Last) || !cumulativeAdvanced {
+		// A request that bills no tokens stays out of the ledger. As an entry it
+		// claims a timeline row, and the prompt before it then shows no context.
+		if !validTokenUsage(record.Payload.Info.Last) || !cumulativeAdvanced || *record.Payload.Info.Last == (tokenUsage{}) {
 			return
 		}
 		usage := a.usageByModel[a.currentModel]
@@ -316,6 +318,12 @@ func (a *summaryAccumulator) segmentRecords() []tokenUsageRecord {
 	if !cleanPartition {
 		pricingRecords = make([]tokenUsageRecord, 0, len(usageOrder))
 		for _, usageModel := range usageOrder {
+			// A zero aggregate bills nothing, but it renders as an unattributed row
+			// that reports a failed reconciliation. A forked sidecar without its own
+			// requests has a zero own total.
+			if *usageByModel[usageModel] == (tokenUsage{}) {
+				continue
+			}
 			pricingRecords = append(pricingRecords, tokenUsageRecord{model: usageModel, usage: *usageByModel[usageModel], offset: -1})
 		}
 	}
