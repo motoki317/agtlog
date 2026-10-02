@@ -7,7 +7,7 @@ build:
     CGO_ENABLED=0 go build -o agtlog ./cmd/agtlog
 
 # Run all tests, including the leak guard.
-test:
+test: leakcheck
     go test ./...
 
 # Run tests under the race detector, which needs cgo.
@@ -20,12 +20,15 @@ check:
     go vet ./...
     golangci-lint run ./... || true
 
+# The guard reads files through git grep, which the Go test cache does not
+# track. Without -count=1, a cached pass hides a leak in an edited file.
+
 # Scan committable files for local identifiers.
 leakcheck:
-    go test ./internal/leakcheck/
+    go test -count=1 ./internal/leakcheck/
 
 # Run the commit gate installed by the flake dev shell.
-pre-commit: build
+pre-commit: build leakcheck
     @u="$(gofmt -l cmd internal)"; if [ -n "$u" ]; then echo "gofmt needed:"; echo "$u"; exit 1; fi
     go vet ./...
     go test ./...
