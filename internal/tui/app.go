@@ -89,12 +89,6 @@ func NewModel(sessions []*model.Session, registry *source.Registry) Model {
 	return newModelWithClock(sessions, registry, time.Now)
 }
 
-func NewModelWithContext(ctx context.Context, sessions []*model.Session, registry *source.Registry) Model {
-	m := newModelWithClock(sessions, registry, time.Now)
-	m.ctx = ctx
-	return m
-}
-
 func NewModelWithContextAndTheme(ctx context.Context, sessions []*model.Session, registry *source.Registry, theme Theme) Model {
 	m := newModelWithClockAndTheme(sessions, registry, time.Now, theme)
 	m.ctx = ctx

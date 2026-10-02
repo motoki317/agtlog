@@ -10,7 +10,6 @@ import (
 
 const (
 	glyphSubagent  = "⑃"
-	glyphWarning   = "!"
 	glyphCollapsed = "▸"
 	glyphExpanded  = "▾"
 	glyphTool      = "⚙"

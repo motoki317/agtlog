@@ -21,6 +21,14 @@ type refreshTestSource struct {
 	session *model.Session
 }
 
+func sessionCell(session *model.Session, now time.Time, column listColumn) string {
+	return sessionCellWithPresentation(session, newSessionPresentation(session), now, column)
+}
+
+func renderSessionRow(session *model.Session, now time.Time, columns []listColumn, width int, selected bool, styles styles) string {
+	return renderSessionPanelLine(session, now, columns, width, selected, styles).styled
+}
+
 func TestEmptyListExplainsWhereToFindSessions(t *testing.T) {
 	view := NewModel(nil, nil).View()
 	for _, text := range []string{"No sessions found", "~/.claude", "~/.codex", "press ? for keys"} {

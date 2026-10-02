@@ -224,10 +224,6 @@ func removeListColumn(columns []listColumn, kind listColumnKind) []listColumn {
 	return columns
 }
 
-func sessionCell(session *model.Session, now time.Time, column listColumn) string {
-	return sessionCellWithPresentation(session, newSessionPresentation(session), now, column)
-}
-
 func sessionCellWithPresentation(session *model.Session, presentation sessionPresentation, now time.Time, column listColumn) string {
 	switch column.kind {
 	case columnAgent:
@@ -613,10 +609,6 @@ func renderHeaderCell(column listColumn, state sortState, focused bool, styles s
 		style = styles.selected.Bold(true)
 	}
 	return panelLine{plain: plain, styled: style.Render(plain)}
-}
-
-func renderSessionRow(session *model.Session, now time.Time, columns []listColumn, width int, selected bool, styles styles) string {
-	return renderSessionPanelLine(session, now, columns, width, selected, styles).styled
 }
 
 func renderSessionPanelLine(session *model.Session, now time.Time, columns []listColumn, width int, selected bool, styles styles) panelLine {
