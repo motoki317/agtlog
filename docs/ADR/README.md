@@ -1,47 +1,54 @@
 # Architecture Decision Records (ADR)
 
-ADRs capture significant architectural decisions behind agtlog, including the
-trade-offs and alternatives that led to each choice.
+Each ADR records one design decision in agtlog, the context that required it, and the
+alternatives that we rejected.
 
 ## Creating an ADR
 
-1. Copy `_template.md`.
-2. Name it `YYYYMMDD-<title>.md`, matching the front-matter date.
-3. Fill every section: Context, Decision, Consequences, Impact, Alternatives,
-   and Notes.
+1. Copy `_template.md` to `YYYYMMDD-<title>.md`. The date matches the front-matter date.
+2. Write `# Context`, `# Decision`, and `# Alternatives`. Every ADR has these sections.
+3. Add `# Consequences`, `# Impact`, or `# Notes` only if the section states something that no
+   other section states.
+4. Name the actor of each decision in the first person plural: "We rejected X because Y", not
+   "X was rejected".
+5. Add a row to the index below.
 
 ## Status
 
 - **proposed**: under discussion.
 - **accepted**: binding.
-- **superseded**: replaced by a newer ADR; prefix the old filename with `_`
-  and cross-link both records.
+- **superseded**: replaced by a newer ADR. Prefix the old filename with `_`, and link the two
+  records to each other. Besides superseded records, only `_template.md` carries the prefix.
+
+A record that a later record replaces only in part stays `accepted`. At the replaced passage, it
+links to the later record, and the later record names what it replaces.
 
 ## Index
 
 | Date | ADR | Summary |
 | --- | --- | --- |
-| 2026-07-19 | [Coding-agent tool landscape](./20260719-tool-landscape.md) | Build a read-only Go TUI that unifies transcript browsing, cost, and recursive subagent rollup |
-| 2026-07-19 | [Architecture overview](./20260719-architecture-overview.md) | Normalize different log shapes into one recursive session pipeline |
-| 2026-07-19 | [Cost model](./20260719-cost-model.md) | Estimate usage with ccusage-compatible API rates and explicit uncertainty |
+| 2026-07-19 | [Coding-agent tool landscape](./20260719-tool-landscape.md) | Build a read-only Go TUI because no surveyed tool combines a terminal UI, transcript browsing, recursive subagent cost, and both agents |
+| 2026-07-19 | [Architecture overview](./20260719-architecture-overview.md) | Normalize each agent's logs into one recursive session model and one pipeline |
+| 2026-07-19 | [Cost model](./20260719-cost-model.md) | Price usage with ccusage-compatible API rates and mark estimated or unpriced totals |
 | 2026-07-19 | [Live-follow watching](./20260719-live-follow-watching.md) | Combine recursive fsnotify watches with a stat-based recovery scan |
-| 2026-07-19 | [TUI stack](./20260719-tui-stack.md) | Use Bubble Tea and Bubbles for a testable keyboard-first terminal UI |
-| 2026-07-22 | [Table sorting](./20260722-table-sorting.md) | Keep visible column focus separate from stable sort state |
-| 2026-07-23 | [Bulk fold default](./20260723-bulk-fold-default.md) | Apply bulk expansion state to current and later timeline rows |
-| 2026-07-23 | [Harness turn labels](./20260723-harness-turn-labels.md) | Distinguish harness-injected user turns without changing event kinds |
-| 2026-07-24 | [Advisor tool cost](./20260724-advisor-tool-cost.md) | Price and render each advisor iteration independently |
-| 2026-07-24 | [Cross-session cost deduplication](./20260724-cross-session-cost-dedup.md) | Assign replayed Claude requests to one deterministic owner |
-| 2026-07-25 | [Full-fidelity item view](./_2026-07-25-full-fidelity-item-view.md) | Superseded by always-present raw item records |
-| 2026-07-26 | [Codex timeline usage](./20260726-codex-timeline-usage.md) | Preserve polymorphic model context and treat reasoning as output detail |
-| 2026-07-26 | [Codex usage ledger](./20260726-codex-usage-ledger.md) | Reconcile request usage against a parser snapshot and explicit aggregates |
-| 2026-07-26 | [Always-present raw item records](./20260726-always-present-raw-item-records.md) | Load raw records on item open and present valid JSON as terminal-safe indented lines |
-| 2026-08-05 | [Machine-readable CLI](./20260805-machine-readable-cli.md) | Add versioned list, show, and deterministic search commands with stable refs |
-| 2026-08-15 | [Summary cache repricing](./20260815-summary-cache-repricing.md) | Cache billed usage without prices and apply current pricing on every cache hit |
-| 2026-08-15 | [Codex sidecar linking](./20260815-codex-sidecar-linking.md) | Link Codex sidecars from child parent IDs and decode wrapped message items |
-| 2026-08-22 | [Follow session index](./20260822-follow-session-index.md) | Rebuild live snapshots from copied, path-indexed parser output |
-| 2026-08-22 | [Codex summary checkpoints](./20260822-codex-summary-checkpoints.md) | Resume live Codex summaries after validated complete JSONL lines |
-| 2026-08-23 | [Extra agent home directories](./20260823-extra-agent-home-directories.md) | Add explicit homes without redirecting Claude Code or Codex writes |
-| 2026-09-05 | [Codex counter segments](./20260905-codex-counter-segments.md) | Reconcile cumulative-counter segments independently and show unattributed usage in Info |
-| 2026-10-01 | [Recursive turn counts](./20261001-recursive-turn-counts.md) | Count messages and tools across the session tree while preserving the messages contract |
-| 2026-10-01 | [Subagent age order](./20261001-subagent-age-order.md) | Match cleared Subagents order to Sessions by newest update within each parent |
-| 2026-10-01 | [Overview tab](./20261001-overview-tab.md) | Combine own and delegated activity, model costs, and the Subagents table |
+| 2026-07-19 | [TUI stack](./20260719-tui-stack.md) | Build a testable keyboard-first UI on Bubble Tea and Bubbles |
+| 2026-07-22 | [Table sorting](./20260722-table-sorting.md) | Keep the column focus separate from the sort state |
+| 2026-07-23 | [Bulk fold default](./20260723-bulk-fold-default.md) | Apply expand-all and collapse-all to current and later timeline rows |
+| 2026-07-23 | [Harness turn labels](./20260723-harness-turn-labels.md) | Label harness-injected user turns without a new event kind |
+| 2026-07-24 | [Advisor tool cost](./20260724-advisor-tool-cost.md) | Price and show each advisor iteration separately |
+| 2026-07-24 | [Cross-session cost deduplication](./20260724-cross-session-cost-dedup.md) | Assign each replayed Claude request to its earliest session |
+| 2026-07-25 | [Full-fidelity item view](./_20260725-full-fidelity-item-view.md) | Keep complete event fields and read raw records by reference. Superseded by always-present raw item records |
+| 2026-07-26 | [Codex timeline usage](./20260726-codex-timeline-usage.md) | Decode `summary` only in `reasoning` records, keep the model file-wide, and count reasoning tokens within output |
+| 2026-07-26 | [Codex usage ledger](./20260726-codex-usage-ledger.md) | Match timeline usage to a billed-request ledger recorded at parse time |
+| 2026-07-26 | [Always-present raw item records](./20260726-always-present-raw-item-records.md) | Load the raw record when an item opens and show valid JSON as indented, terminal-safe lines |
+| 2026-08-05 | [Machine-readable CLI](./20260805-machine-readable-cli.md) | Add versioned `list`, `show`, and `search` commands with stable refs |
+| 2026-08-05 | [Workflow subagent groups](./20260805-workflow-subagent-groups.md) | Group each Workflow run under one node and title siblings from their first unique prompt line |
+| 2026-08-15 | [Summary cache repricing](./20260815-summary-cache-repricing.md) | Cache usage without prices and reprice each cache hit |
+| 2026-08-15 | [Codex sidecar linking](./20260815-codex-sidecar-linking.md) | Link Codex sidecars by their parent IDs and decode wrapped message items |
+| 2026-08-22 | [Follow session index](./20260822-follow-session-index.md) | Build each live snapshot from a path-indexed copy of parser output |
+| 2026-08-22 | [Codex summary checkpoints](./20260822-codex-summary-checkpoints.md) | Resume Codex summaries after the last validated complete line |
+| 2026-08-23 | [Extra agent home directories](./20260823-extra-agent-home-directories.md) | Read extra agent homes without changing where Claude Code or Codex write |
+| 2026-09-05 | [Codex counter segments](./20260905-codex-counter-segments.md) | Reconcile each cumulative-counter segment separately and show unattributed usage |
+| 2026-10-01 | [Recursive turn counts](./20261001-recursive-turn-counts.md) | Count messages and tool calls across the session tree and keep `messages` per node |
+| 2026-10-01 | [Subagent age order](./20261001-subagent-age-order.md) | Order unsorted Subagents rows by newest update within each parent, like Sessions |
+| 2026-10-01 | [Overview tab](./20261001-overview-tab.md) | Combine own and delegated activity, model costs, and the Subagents table in one tab |

@@ -6,24 +6,25 @@ status: "proposed" # proposed | accepted | superseded
 
 # Context
 
-{What background or forces make this decision necessary?}
+{Which facts and constraints require a decision?}
 
 # Decision
 
-{What exactly did we decide to do?}
+{What did we decide? Name the actor: "We store X because Y".}
 
 # Consequences
 
-{What benefits do we expect from this decision?}
+{Optional. Delete this section unless it states a result that no other section states.}
 
 # Impact
 
-{What is the scope of impact, and what risks or constraints does it introduce?}
+{Optional. Delete this section unless it states a scope, risk, or constraint that no other section
+states.}
 
 # Alternatives
 
-{What other options were considered, and why were they not chosen?}
+{Which options did we reject, and why? "We rejected X because Y".}
 
 # Notes
 
-{Supplementary information that does not fit the categories above.}
+{Optional. Delete this section unless it states a fact that no other section states.}
