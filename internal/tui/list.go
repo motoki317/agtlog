@@ -638,13 +638,12 @@ func renderSessionPanelLine(session *model.Session, now time.Time, columns []lis
 func styleSessionCell(cell string, session *model.Session, presentation sessionPresentation, column listColumn, styles styles) string {
 	switch column.kind {
 	case columnAgent:
-		agentStyle := styles.row
-		if session.Agent == model.AgentClaude {
-			agentStyle = styles.claude
-		} else if session.Agent == model.AgentCodex {
-			agentStyle = styles.codex
+		switch session.Agent {
+		case model.AgentClaude:
+			return styles.claude.Render(cell)
+		case model.AgentCodex:
+			return styles.codex.Render(cell)
 		}
-		return agentStyle.Render(cell)
 	case columnAge, columnTurns:
 		return styles.muted.Render(cell)
 	case columnSubagents:
