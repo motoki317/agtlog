@@ -43,6 +43,14 @@ func TestShowRejectsRawTextFormat(t *testing.T) {
 	}
 }
 
+func TestShowRejectsNegativeRaw(t *testing.T) {
+	for _, value := range []string{"-1", "-2"} {
+		if _, _, err := parseShowOptions([]string{"session-a", "--raw", value}, io.Discard); exitCode(err) != 2 || errorCode(err) != "usage" {
+			t.Fatalf("--raw %s error = %#v, want usage", value, err)
+		}
+	}
+}
+
 func TestShowNoEventsDoesNotDescribeCachedTimeline(t *testing.T) {
 	session := &model.Session{
 		ID:     "session-a",

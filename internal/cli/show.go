@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"slices"
@@ -26,6 +27,7 @@ type showOptions struct {
 	full     bool
 	noEvents bool
 	raw      int
+	hasRaw   bool
 }
 
 func runShow(ctx context.Context, args []string, help io.Writer, factory RegistryFactory) (any, string, error) {
@@ -56,7 +58,7 @@ func runShow(ctx context.Context, args []string, help io.Writer, factory Registr
 	if err := loadNodeDetail(ctx, registry, selected.session); err != nil {
 		return nil, "", runtimeError("unreadable_session", "the selected session could not be read: "+err.Error())
 	}
-	if options.raw >= 0 {
+	if options.hasRaw {
 		response, err := rawResponse(ctx, selected.session, options.raw)
 		return response, options.common.format, err
 	}
@@ -77,7 +79,7 @@ func validateWireEventKinds(events []model.Event) error {
 }
 
 func parseShowOptions(args []string, help io.Writer) (showOptions, string, error) {
-	options := showOptions{limit: 200, maxText: 2000, raw: -1}
+	options := showOptions{limit: 200, maxText: 2000}
 	flags := newFlagSet("agtlog show", help, showUsage)
 	addCommonFlags(flags, &options.common)
 	flags.StringVar(&options.kind, "kind", "", "comma-separated event kinds")
@@ -87,11 +89,12 @@ func parseShowOptions(args []string, help io.Writer) (showOptions, string, error
 	flags.IntVar(&options.maxText, "max-text", 2000, "maximum runes per text field; zero is unbounded")
 	flags.BoolVar(&options.full, "full", false, "do not bound individual text fields")
 	flags.BoolVar(&options.noEvents, "no-events", false, "return only the session summary")
-	flags.IntVar(&options.raw, "raw", -1, "return the source record for an event index")
+	flags.IntVar(&options.raw, "raw", 0, "return the source record for an event index")
 	operands, err := parseFlexible(flags, args, 1)
 	if err != nil {
 		return showOptions{}, "", err
 	}
+	flags.Visit(func(set *flag.Flag) { options.hasRaw = options.hasRaw || set.Name == "raw" })
 	if err := options.common.validate(); err != nil {
 		return showOptions{}, "", err
 	}
@@ -104,13 +107,13 @@ func parseShowOptions(args []string, help io.Writer) (showOptions, string, error
 	if options.maxText < 0 {
 		return showOptions{}, "", usageError("--max-text must not be negative")
 	}
-	if options.raw < -1 {
+	if options.raw < 0 {
 		return showOptions{}, "", usageError("--raw must not be negative")
 	}
-	if options.raw >= 0 && options.common.format == "text" {
+	if options.hasRaw && options.common.format == "text" {
 		return showOptions{}, "", usageError("--raw requires --format json")
 	}
-	if options.noEvents && options.raw >= 0 {
+	if options.noEvents && options.hasRaw {
 		return showOptions{}, "", usageError("--no-events and --raw cannot be used together")
 	}
 	if options.full {
