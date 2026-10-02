@@ -211,6 +211,20 @@ func TerminalLine(value string, maxRunes int) string {
 	return strings.Join(strings.Fields(TerminalText(value)), " ")
 }
 
+// SessionFilterText returns the text that `list --query` and the terminal UI
+// filter match, so that one query selects the same sessions in both. It is the
+// agent, project, and title as the terminal shows them.
+func SessionFilterText(session *Session) string {
+	return strings.ToLower(strings.Join([]string{
+		TerminalLine(string(session.Agent), 0), TerminalLine(session.Project, 0), TerminalLine(session.Title, 0),
+	}, " "))
+}
+
+// SessionFilterQuery normalizes a query for matching against SessionFilterText.
+func SessionFilterQuery(query string) string {
+	return strings.ToLower(TerminalLine(query, 0))
+}
+
 func ElideEncrypted(text string) string {
 	const (
 		fernetPrefix = "gAAAA"

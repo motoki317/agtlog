@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -1329,7 +1328,7 @@ func (m *Model) applyFilter() {
 		}
 		candidates = append(candidates, session)
 	}
-	query := strings.ToLower(strings.TrimSpace(model.TerminalLine(m.filter.Value(), 128)))
+	query := model.SessionFilterQuery(m.filter.Value())
 	if query == "" {
 		m.visible = candidates
 		m.updateVisibleSummary()
@@ -1337,9 +1336,7 @@ func (m *Model) applyFilter() {
 	}
 	haystacks := make([]string, len(candidates))
 	for index, session := range candidates {
-		haystacks[index] = strings.ToLower(strings.Join([]string{
-			model.TerminalLine(string(session.Agent), 32), model.TerminalLine(session.Project, 96), model.TerminalLine(session.Title, 160),
-		}, " "))
+		haystacks[index] = model.SessionFilterText(session)
 	}
 	matches := fuzzy.FindNoSort(query, haystacks)
 	m.visible = make([]*model.Session, 0, len(matches))

@@ -1260,6 +1260,41 @@ func TestStaticFrameStripsEscapeSequencesFromTitle(t *testing.T) {
 	}
 }
 
+func TestListQueryMatchesLikeTheTUIFilter(t *testing.T) {
+	tests := []struct {
+		project, title, shown, query string
+		want                         bool
+	}{
+		{project: "harbor", title: "Plan\troute", shown: "Plan route", query: "plan route", want: true},
+		{project: "harbor", title: "\x1b[31mMap\x1b[0m craters", shown: "Map craters", query: "[31m", want: false},
+		{project: strings.Repeat("a", 96) + "-zeta", title: "Chart tides", shown: "Chart tides", query: "zeta", want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.query, func(t *testing.T) {
+			session := &model.Session{ID: "session-a", Agent: model.AgentClaude, Project: test.project, Title: test.title}
+			registry := source.NewRegistry([]source.Source{staticSource{session: session}}, source.Options{Workers: 1})
+			var output bytes.Buffer
+			if err := run(context.Background(), []string{"list", "--query", test.query}, &output, registry); err != nil {
+				t.Fatal(err)
+			}
+			var response machinecli.ListResponse
+			if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			cliMatched := len(response.Sessions) == 1
+
+			var m tea.Model = tui.NewModel([]*model.Session{session}, nil)
+			m, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+			m, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("/" + test.query)})
+			tuiMatched := strings.Contains(m.View(), test.shown)
+
+			if cliMatched != test.want || tuiMatched != test.want {
+				t.Fatalf("list --query %q matched = %t, TUI filter matched = %t, want %t", test.query, cliMatched, tuiMatched, test.want)
+			}
+		})
+	}
+}
+
 func TestBubbleTeaRunnerPrintsEverySessionOffTerminal(t *testing.T) {
 	sessions := make([]*model.Session, 20)
 	for index := range sessions {

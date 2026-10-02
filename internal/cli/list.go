@@ -139,13 +139,13 @@ func filterListSessions(sessions []*model.Session, options listOptions) []*model
 		}
 		candidates = append(candidates, session)
 	}
-	query := strings.ToLower(strings.TrimSpace(options.query))
+	query := model.SessionFilterQuery(options.query)
 	if query == "" {
 		return candidates
 	}
 	haystacks := make([]string, len(candidates))
 	for index, session := range candidates {
-		haystacks[index] = strings.ToLower(strings.Join([]string{string(session.Agent), session.Project, session.Title}, " "))
+		haystacks[index] = model.SessionFilterText(session)
 	}
 	matches := fuzzy.FindNoSort(query, haystacks)
 	result := make([]*model.Session, 0, len(matches))
