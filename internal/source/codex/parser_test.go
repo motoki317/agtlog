@@ -430,7 +430,7 @@ func TestLoadEventsNeverAttributesUsageToCompaction(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout-compact-usage.jsonl")
 	content := strings.Join([]string{
 		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
-		`{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"context_compacted"}}`,
+		codexCompactedRecord,
 		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
 	}, "\n") + "\n"
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
@@ -2853,19 +2853,29 @@ func TestLoadEventsDoesNotAttachCodexDetailWithoutCallID(t *testing.T) {
 	}
 }
 
-func TestLoadEventsKeepsCodexCompactionBoundary(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "rollout-compact.jsonl")
-	line := `{"timestamp":"2026-01-02T03:00:00Z","type":"event_msg","payload":{"type":"context_compacted"}}` + "\n"
-	if err := os.WriteFile(path, []byte(line), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	session := &model.Session{Path: path, Agent: model.AgentCodex}
+const codexCompactedRecord = `{"timestamp":"2026-01-02T03:04:01Z","type":"compacted","payload":{"message":"","replacement_history":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Chart the ridge"}]},{"type":"compaction","encrypted_content":"opaque"}],"latest_token_usage_record":null,"window_id":"window-2","previous_window_id":"window-1","first_window_id":"window-1","window_number":2}}`
 
-	if err := testParser().LoadEvents(context.Background(), session); err != nil {
-		t.Fatal(err)
-	}
-	if len(session.Events) != 1 || session.Events[0].Kind != model.EventCompact {
-		t.Fatalf("events = %#v, want compact boundary", session.Events)
+func TestLoadEventsRendersOneRowPerCodexCompaction(t *testing.T) {
+	// Legacy rollouts follow the compacted record with a context_compacted
+	// event, and paginated rollouts with a ContextCompaction item.
+	for name, companion := range map[string]string{
+		"legacy":    `{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"context_compacted"}}`,
+		"paginated": `{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"item_completed","thread_id":"thread-root","turn_id":"turn-1","item":{"type":"ContextCompaction","id":"item-1"}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "rollout-compact.jsonl")
+			if err := os.WriteFile(path, []byte(codexCompactedRecord+"\n"+companion+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+			if err := testParser().LoadEvents(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			if len(session.Events) != 1 || session.Events[0].Kind != model.EventCompact || session.Events[0].RecordRef.Offset != 0 {
+				t.Fatalf("events = %#v, want one compact boundary from the compacted record", session.Events)
+			}
+		})
 	}
 }
 

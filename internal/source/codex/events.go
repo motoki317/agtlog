@@ -147,6 +147,13 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 			currentModel = record.Payload.Model
 			return
 		}
+		// Codex writes a compacted record for every compaction. A legacy rollout
+		// repeats it as an event_msg context_compacted and a paginated rollout as a
+		// ContextCompaction item, so rendering either companion would double the row.
+		if record.Type == "compacted" {
+			session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: "context compacted", RecordRef: recordRef, Model: currentModel})
+			return
+		}
 		event := model.Event{Timestamp: timestamp, Model: currentModel, RecordRef: recordRef}
 		eventCount := len(session.Events)
 		preferredMessage := true
@@ -183,9 +190,6 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				default:
 					return
 				}
-			case "context_compacted":
-				session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: "context compacted", RecordRef: recordRef, Model: currentModel})
-				return
 			case "token_count":
 				if request, ok := requestsByOffset[offset]; ok {
 					delete(requestsByOffset, offset)
