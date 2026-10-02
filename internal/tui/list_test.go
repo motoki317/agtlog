@@ -1685,6 +1685,20 @@ func TestLiveUpdateThatSupersedesRefreshClearsRefreshingStatus(t *testing.T) {
 	}
 }
 
+func TestSessionUpdateReplacesPathWhoseIdentityChanged(t *testing.T) {
+	path := "/workspace/session.jsonl"
+	unnamed := &model.Session{Agent: model.AgentClaude, Path: path, Title: "Before first session ID"}
+	m := NewModel([]*model.Session{unnamed}, nil)
+
+	named := &model.Session{ID: "session-a", Agent: model.AgentClaude, Path: path, Title: "After first session ID"}
+	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{named}})
+	m = updated.(Model)
+
+	if len(m.sessions) != 1 || m.sessions[0] != named {
+		t.Fatalf("sessions after identity change = %#v, want one row for the path", m.sessions)
+	}
+}
+
 func TestNewerDetailLoadSupersedesOlderResult(t *testing.T) {
 	current := &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/session.jsonl", Title: "Current"}
 	m := NewModel([]*model.Session{current}, nil)

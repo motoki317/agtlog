@@ -964,19 +964,20 @@ func (m *Model) applySessionUpdate(update source.SessionUpdate) {
 		}
 	}
 	m.sessions = kept
+	// Rows merge by path, not identity: a transcript holds one top-level
+	// session, and its parsed ID can change while the file is still being written.
 	indices := make(map[string]int, len(m.sessions))
 	for index, session := range m.sessions {
-		indices[sessionIdentity(session)] = index
+		indices[session.Path] = index
 	}
 	for _, session := range update.Sessions {
 		if update.DiscoveryComplete && m.discoveryTouched[session.Path] {
 			continue
 		}
-		identity := sessionIdentity(session)
-		if index, exists := indices[identity]; exists {
+		if index, exists := indices[session.Path]; exists {
 			m.sessions[index] = session
 		} else {
-			indices[identity] = len(m.sessions)
+			indices[session.Path] = len(m.sessions)
 			m.sessions = append(m.sessions, session)
 		}
 	}
