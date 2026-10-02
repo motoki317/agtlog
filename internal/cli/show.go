@@ -187,6 +187,7 @@ func buildShowResponse(selected graphNode, nodes []graphNode, options showOption
 	if options.all {
 		limit = 0
 	}
+	size := newShowResponseSize(response)
 	budgetStopped := false
 	for index, event := range selected.session.Events {
 		if index < options.offset || kinds != nil && !kinds[event.Kind] {
@@ -195,22 +196,26 @@ func buildShowResponse(selected graphNode, nodes []graphNode, options showOption
 		if limit > 0 && len(response.Events) >= limit {
 			break
 		}
-		response.Events = append(response.Events, eventDTO(index, event, nodes, options.maxText))
-		response.Page = ShowPage{Offset: options.offset, Limit: limit, Returned: len(response.Events), Total: total, NextOffset: index + 1}
-		encoded, _ := json.MarshalIndent(response, "", "  ")
-		if len(encoded)+1 > machineResponseBudgetBytes {
-			if len(response.Events) == 1 {
-				fitted, ok := fitSingleEvent(response, index, event, nodes)
-				if !ok {
-					return ShowResponse{}, runtimeError("internal", "event metadata exceeds the show response budget")
-				}
-				response.Events[0] = fitted
-			} else {
-				response.Events = response.Events[:len(response.Events)-1]
+		// has_more is unknown until the page ends, so the check counts the page
+		// as it stands after this event.
+		page := ShowPage{Offset: options.offset, Limit: limit, Returned: len(response.Events) + 1, Total: total, NextOffset: index + 1}
+		candidate := eventDTO(index, event, nodes, options.maxText)
+		candidateBytes := encodedEventBytes(candidate)
+		if size.bytesWith(candidateBytes, page) > machineResponseBudgetBytes {
+			if len(response.Events) > 0 {
 				budgetStopped = true
 				break
 			}
+			fitted, ok := fitSingleEvent(index, event, nodes, func(candidate Event) bool {
+				return size.bytesWith(encodedEventBytes(candidate), page) <= machineResponseBudgetBytes
+			})
+			if !ok {
+				return ShowResponse{}, runtimeError("internal", "event metadata exceeds the show response budget")
+			}
+			candidate, candidateBytes = fitted, encodedEventBytes(fitted)
 		}
+		response.Events = append(response.Events, candidate)
+		size.add(candidateBytes)
 	}
 	next := options.offset
 	if len(response.Events) > 0 {
@@ -234,19 +239,60 @@ func showResponseFits(response ShowResponse) bool {
 	return len(encoded)+1 <= machineResponseBudgetBytes
 }
 
-func fitSingleEvent(response ShowResponse, index int, event model.Event, nodes []graphNode) (Event, bool) {
+// showResponseSize counts the budgeted bytes of a show response as events are
+// appended. Re-encoding the whole response after each event made a page cost time
+// quadratic in its event count.
+type showResponseSize struct {
+	withoutPage int
+	events      int
+	count       int
+}
+
+func newShowResponseSize(response ShowResponse) showResponseSize {
+	response.Events = []Event{}
+	encoded, _ := json.MarshalIndent(response, "", "  ")
+	return showResponseSize{withoutPage: len(encoded) + 1 - indentedBytes(response.Page, "  ")}
+}
+
+func (size showResponseSize) bytesWith(eventBytes int, page ShowPage) int {
+	return size.withoutPage + indentedBytes(page, "  ") + size.events + size.growth(eventBytes)
+}
+
+func (size *showResponseSize) add(eventBytes int) {
+	size.events += size.growth(eventBytes)
+	size.count++
+}
+
+// growth must match how MarshalIndent lays out the events array: the first event
+// turns "[]" into "[\n    E\n  ]", and each later event inserts ",\n    E".
+func (size showResponseSize) growth(eventBytes int) int {
+	if size.count == 0 {
+		return eventBytes + len("[\n    \n  ]") - len("[]")
+	}
+	return eventBytes + len(",\n    ")
+}
+
+// encodedEventBytes measures an event at the depth of the events array, where
+// every nested line carries four more spaces than a top-level encoding.
+func encodedEventBytes(event Event) int {
+	return indentedBytes(event, "    ")
+}
+
+func indentedBytes(value any, prefix string) int {
+	encoded, _ := json.MarshalIndent(value, prefix, "  ")
+	return len(encoded)
+}
+
+func fitSingleEvent(index int, event model.Event, nodes []graphNode, fits func(Event) bool) (Event, bool) {
 	maximum := maxTextRunes(event)
 	best := eventDTO(index, event, nodes, 1)
-	response.Events[0] = best
-	if !showResponseFits(response) {
+	if !fits(best) {
 		return Event{}, false
 	}
 	for low, high := 1, maximum; low <= high; {
 		limit := low + (high-low)/2
 		candidate := eventDTO(index, event, nodes, limit)
-		response.Events[0] = candidate
-		encoded, _ := json.MarshalIndent(response, "", "  ")
-		if len(encoded)+1 <= machineResponseBudgetBytes {
+		if fits(candidate) {
 			best = candidate
 			low = limit + 1
 		} else {

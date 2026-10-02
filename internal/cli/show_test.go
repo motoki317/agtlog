@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -497,6 +498,99 @@ func TestShowBudgetBoundsOneFullEvent(t *testing.T) {
 	}
 	if len(encoded)+1 > machineResponseBudgetBytes || len(response.Events) != 1 || !slices.Contains(response.Events[0].Truncated, "text") || response.Page.NextOffset != 1 {
 		t.Fatalf("encoded bytes = %d, event = %#v, page = %#v", len(encoded)+1, response.Events, response.Page)
+	}
+}
+
+// The budget check runs before has_more is known, so it counts "false" where the
+// final page prints "true". A page that just fits therefore measures one byte under
+// the budget.
+func TestShowBudgetStopsAtExactBoundary(t *testing.T) {
+	encodedBytes := func(t *testing.T, response ShowResponse) int {
+		t.Helper()
+		encoded, err := json.MarshalIndent(response, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(encoded) + 1
+	}
+	t.Run("last event", func(t *testing.T) {
+		// HTML-escaped runes, U+2028, and nested objects make each event's budgeted
+		// size differ from its raw text length.
+		var events []model.Event
+		for index := range 120 {
+			text := fmt.Sprintf("filler %03d <a&b> \u2028 %s", index, strings.Repeat("z", 900))
+			events = append(events,
+				model.Event{Kind: model.EventUser, Text: text},
+				model.Event{
+					Kind: model.EventToolCall, ToolName: "Edit", CallID: "call", ToolInput: "input",
+					Detail: &model.ToolDetail{Diff: "-old\n+new", Output: "<ok>"}, Duration: time.Second,
+					Usage: &model.Usage{InputTokens: 12, OutputTokens: 3}, Priced: true,
+				},
+			)
+		}
+		boundary := len(events)
+		build := func(textBytes int) ShowResponse {
+			session := &model.Session{ID: "boundary-session", Agent: model.AgentClaude, Events: append(slices.Clone(events),
+				model.Event{Kind: model.EventAssistantText, Text: strings.Repeat("y", textBytes)},
+				model.Event{Kind: model.EventAssistantText, Text: "after"},
+			)}
+			node := indexSessionGraphs([]*model.Session{session})[0]
+			response, err := buildShowResponse(node, []graphNode{node}, showOptions{limit: boundary + 1, maxText: 0})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return response
+		}
+		// Each "y" adds one byte, so a short probe locates the text that fills the budget.
+		probeText := 1
+		probe := build(probeText)
+		if probe.Page.Returned != boundary+1 {
+			t.Fatalf("probe page = %#v", probe.Page)
+		}
+		fitting := probeText + machineResponseBudgetBytes - 1 - encodedBytes(t, probe)
+
+		kept := build(fitting)
+		if kept.Page.Returned != boundary+1 || kept.Page.NextOffset != boundary+1 || !kept.Page.HasMore || encodedBytes(t, kept) != machineResponseBudgetBytes-1 {
+			t.Fatalf("fitting page = %#v, bytes = %d", kept.Page, encodedBytes(t, kept))
+		}
+		dropped := build(fitting + 1)
+		if dropped.Page.Returned != boundary || dropped.Page.NextOffset != boundary || !dropped.Page.HasMore || dropped.Page.Complete {
+			t.Fatalf("overflowing page = %#v", dropped.Page)
+		}
+	})
+	t.Run("oversized first event", func(t *testing.T) {
+		session := &model.Session{ID: "oversized-session", Agent: model.AgentClaude, Events: []model.Event{
+			{Kind: model.EventUser, Text: "skipped"},
+			{Kind: model.EventUser, Text: strings.Repeat("x", machineResponseBudgetBytes*2)},
+			{Kind: model.EventUser, Text: "next"},
+		}}
+		node := indexSessionGraphs([]*model.Session{session})[0]
+		response, err := buildShowResponse(node, []graphNode{node}, showOptions{offset: 1, all: true, maxText: 0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response.Page.Returned != 1 || response.Page.NextOffset != 2 || !response.Page.HasMore || encodedBytes(t, response) != machineResponseBudgetBytes-1 {
+			t.Fatalf("page = %#v, bytes = %d", response.Page, encodedBytes(t, response))
+		}
+	})
+}
+
+func BenchmarkBuildShowResponseSmallEvents(b *testing.B) {
+	events := make([]model.Event, 3000)
+	for index := range events {
+		events[index] = model.Event{Kind: model.EventAssistantText, Text: fmt.Sprintf("reply %d", index)}
+	}
+	session := &model.Session{ID: "benchmark-session", Agent: model.AgentClaude, Events: events}
+	node := indexSessionGraphs([]*model.Session{session})[0]
+	nodes := []graphNode{node}
+	options := showOptions{all: true, maxText: 2000}
+	b.ReportAllocs()
+	for b.Loop() {
+		response, err := buildShowResponse(node, nodes, options)
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.ReportMetric(float64(response.Page.Returned), "events/op")
 	}
 }
 
