@@ -1116,6 +1116,149 @@ func TestListMouseWheelUpScrollsContent(t *testing.T) {
 	}
 }
 
+// scrolledSurveyList returns a list scrolled by the wheel to offset 9 while row 0 stays selected.
+func scrolledSurveyList(t *testing.T) (Model, []*model.Session) {
+	t.Helper()
+	sessions := make([]*model.Session, 20)
+	for index := range sessions {
+		sessions[index] = &model.Session{
+			ID:        fmt.Sprintf("session-%02d", index),
+			Agent:     model.AgentClaude,
+			Path:      fmt.Sprintf("/workspace/survey-%02d.jsonl", index),
+			Title:     fmt.Sprintf("Survey %02d", index),
+			UpdatedAt: time.Unix(int64(100-index), 0),
+		}
+	}
+	m := NewModel(sessions, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	m = updated.(Model)
+	for range 3 {
+		updated, _ = m.Update(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonWheelDown})
+		m = updated.(Model)
+	}
+	if m.listOffset != 9 || m.cursor != 0 {
+		t.Fatalf("setup offset=%d cursor=%d, want offset 9 with row 0 selected", m.listOffset, m.cursor)
+	}
+	return m, sessions
+}
+
+func TestListBackgroundRefreshKeepsScrollOffset(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		discovery  bool
+		msg        func([]*model.Session) tea.Msg
+		wantOffset int
+	}{
+		{
+			name: "live update",
+			msg: func(sessions []*model.Session) tea.Msg {
+				moved := *sessions[12]
+				moved.UpdatedAt = time.Unix(200, 0)
+				return source.SessionUpdate{Sessions: []*model.Session{&moved}}
+			},
+			wantOffset: 9,
+		},
+		{
+			name: "live removal clamps to the new row count",
+			msg: func(sessions []*model.Session) tea.Msg {
+				var removed []string
+				for _, session := range sessions[10:] {
+					removed = append(removed, session.Path)
+				}
+				return source.SessionUpdate{RemovedPaths: removed}
+			},
+			wantOffset: 5,
+		},
+		{
+			name:      "discovery snapshot",
+			discovery: true,
+			msg: func(sessions []*model.Session) tea.Msg {
+				return source.SessionUpdate{Sessions: append([]*model.Session(nil), sessions...), DiscoveryComplete: true}
+			},
+			wantOffset: 9,
+		},
+		{
+			name:       "age tick",
+			msg:        func([]*model.Session) tea.Msg { return ageTickMsg{} },
+			wantOffset: 9,
+		},
+		{
+			name: "manual refresh result",
+			msg: func(sessions []*model.Session) tea.Msg {
+				return refreshedMsg{sessions: append([]*model.Session(nil), sessions...)}
+			},
+			wantOffset: 9,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m, sessions := scrolledSurveyList(t)
+			if test.discovery {
+				m = m.WithDiscoveryProgress(func() (int, int, bool) { return 0, 0, false })
+			}
+			want := sessionIdentity(sessions[0])
+
+			updated, _ := m.Update(test.msg(sessions))
+			m = updated.(Model)
+
+			if m.listOffset != test.wantOffset || m.selectedIdentity() != want {
+				t.Fatalf("offset=%d selected=%q, want offset %d with %q selected", m.listOffset, m.selectedIdentity(), test.wantOffset, want)
+			}
+		})
+	}
+}
+
+func TestListBackgroundRefreshKeepsVisibleSelectionVisible(t *testing.T) {
+	m, _ := scrolledSurveyList(t)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyHome})
+	m = updated.(Model)
+	capacity := m.listRowCapacity()
+	for range capacity - 1 {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = updated.(Model)
+	}
+	if m.listOffset != 0 || m.cursor != capacity-1 {
+		t.Fatalf("setup offset=%d cursor=%d, want the last visible row selected at offset 0", m.listOffset, m.cursor)
+	}
+	want := m.selectedIdentity()
+
+	inserted := &model.Session{ID: "session-new", Agent: model.AgentClaude, Path: "/workspace/survey-new.jsonl", Title: "Survey new", UpdatedAt: time.Unix(200, 0)}
+	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{inserted}})
+	m = updated.(Model)
+
+	if m.selectedIdentity() != want || m.cursor < m.listOffset || m.cursor >= m.listOffset+capacity {
+		t.Fatalf("cursor=%d offset=%d capacity=%d selected=%q, want %q kept in view", m.cursor, m.listOffset, capacity, m.selectedIdentity(), want)
+	}
+}
+
+func TestListUserActionRevealsScrolledAwaySelection(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		msgs []tea.Msg
+	}{
+		{name: "move selection", msgs: []tea.Msg{tea.KeyMsg{Type: tea.KeyDown}}},
+		{name: "sort", msgs: []tea.Msg{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(sortTitleKey)}}},
+		{name: "text filter", msgs: []tea.Msg{
+			tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}},
+			tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'S'}},
+		}},
+		{name: "agent filter", msgs: []tea.Msg{tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}}},
+		{name: "resize", msgs: []tea.Msg{tea.WindowSizeMsg{Width: 80, Height: 14}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			m, _ := scrolledSurveyList(t)
+
+			for _, msg := range test.msgs {
+				updated, _ := m.Update(msg)
+				m = updated.(Model)
+			}
+
+			if capacity := m.listRowCapacity(); m.cursor < m.listOffset || m.cursor >= m.listOffset+capacity {
+				t.Fatalf("selected row is outside window: cursor=%d offset=%d capacity=%d", m.cursor, m.listOffset, capacity)
+			}
+		})
+	}
+}
+
 func TestListMouseClickSelectsRow(t *testing.T) {
 	sessions := []*model.Session{
 		{ID: "first", UpdatedAt: time.Unix(2, 0)},

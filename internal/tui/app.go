@@ -183,7 +183,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.detail = cloneDetailScreen(m.detail)
 	}
 	if _, ok := msg.(ageTickMsg); ok {
-		m.syncList(m.selectedIdentity())
+		// The list computes ages in View, and a list sync here would scroll the
+		// selection back into view.
 		m.refreshDetailTimes()
 		return m, nextAgeTick()
 	}
@@ -209,7 +210,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sessions = refreshed.sessions
 		m.discoveryErr = nil
 		m.status = "refreshed"
-		m.rebuildList()
+		m.refreshList()
 		if isOpen {
 			// A refresh rereads every session, so the open one counts as changed.
 			return m, m.reconcileOpenDetail(open, true)
@@ -963,7 +964,7 @@ func (m *Model) applySessionUpdate(update source.SessionUpdate) {
 	// and discovery has already attributed ownership across it.
 	if update.DiscoveryComplete && len(m.discoveryTouched) == 0 && len(m.sessions) == 0 && len(update.RemovedPaths) == 0 {
 		m.sessions = append([]*model.Session(nil), update.Sessions...)
-		m.rebuildList()
+		m.refreshList()
 		return
 	}
 	removed := make(map[string]bool, len(update.RemovedPaths))
@@ -995,7 +996,7 @@ func (m *Model) applySessionUpdate(update source.SessionUpdate) {
 		}
 	}
 	source.AttributeOwnership(m.sessions)
-	m.rebuildList()
+	m.refreshList()
 }
 
 type ownershipAttribution struct {
@@ -1256,15 +1257,36 @@ func cloneSessionGraph(session *model.Session, cloned map[*model.Session]*model.
 	return &copy
 }
 
+// rebuildList serves user changes to the sort or agent filter. Background
+// changes use refreshList.
 func (m *Model) rebuildList() {
 	selected := m.selectedIdentity()
+	m.reorderList()
+	m.syncList(selected)
+}
+
+// refreshList keeps the scroll offset when the reader has scrolled the
+// selection out of view, because a change the reader did not make must not
+// undo that scroll. A selection that was in view stays in view.
+func (m *Model) refreshList() {
+	selected := m.selectedIdentity()
+	selectionVisible := m.cursor >= m.listOffset && m.cursor < m.listOffset+m.listRowCapacity()
+	m.reorderList()
+	m.selectIdentity(selected)
+	if selectionVisible {
+		m.ensureListSelectionVisible()
+	} else {
+		m.clampListOffset()
+	}
+}
+
+func (m *Model) reorderList() {
 	state := m.sortState
 	if !state.active {
 		state = sortState{kind: columnAge, desc: true, active: true}
 	}
 	sortSessions(m.sessions, state)
 	m.applyFilter()
-	m.syncList(selected)
 }
 
 func (m Model) selectedIdentity() string {
@@ -1276,6 +1298,11 @@ func (m Model) selectedIdentity() string {
 }
 
 func (m *Model) syncList(selected string) {
+	m.selectIdentity(selected)
+	m.ensureListSelectionVisible()
+}
+
+func (m *Model) selectIdentity(selected string) {
 	cursor := min(m.cursor, max(0, len(m.visible)-1))
 	for index, session := range m.visible {
 		if sessionIdentity(session) == selected {
@@ -1284,7 +1311,6 @@ func (m *Model) syncList(selected string) {
 		}
 	}
 	m.cursor = cursor
-	m.ensureListSelectionVisible()
 	if !m.filtering {
 		if current := m.selectedIdentity(); current != "" {
 			m.filterSelection = current
@@ -1308,16 +1334,21 @@ func (m Model) listRowCapacity() int {
 
 func (m *Model) ensureListSelectionVisible() {
 	capacity := m.listRowCapacity()
-	if capacity <= 0 || len(m.visible) == 0 {
-		m.listOffset = 0
-		return
-	}
 	if m.cursor < m.listOffset {
 		m.listOffset = m.cursor
 	} else if m.cursor >= m.listOffset+capacity {
 		m.listOffset = m.cursor - capacity + 1
 	}
-	m.listOffset = max(0, min(m.listOffset, max(0, len(m.visible)-capacity)))
+	m.clampListOffset()
+}
+
+func (m *Model) clampListOffset() {
+	capacity := m.listRowCapacity()
+	if capacity <= 0 || len(m.visible) == 0 {
+		m.listOffset = 0
+		return
+	}
+	m.listOffset = max(0, min(m.listOffset, len(m.visible)-capacity))
 }
 
 func (m *Model) applyFilter() {
