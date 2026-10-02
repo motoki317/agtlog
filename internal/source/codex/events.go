@@ -444,10 +444,13 @@ func appendCodexMessage(session *model.Session, event model.Event, preferred boo
 		if existingKey != dedupKey {
 			continue
 		}
+		// Codex logs the human-facing copy of a prompt before or after its
+		// model-input copy, and either copy proves that a human wrote it.
+		if event.Kind == model.EventUser {
+			event.Harness = event.Harness && existing.Harness
+			session.Events[index].Harness = event.Harness
+		}
 		if preferred {
-			if event.Kind == model.EventUser {
-				event.Harness = event.Harness && existing.Harness
-			}
 			event.Usage = existing.Usage
 			event.Cost = existing.Cost
 			event.Priced = existing.Priced

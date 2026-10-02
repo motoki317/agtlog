@@ -1966,6 +1966,25 @@ func TestLoadEventsCoalescesMirroredMessages(t *testing.T) {
 	}
 }
 
+func TestLoadEventsKeepsHumanPromptWhenModelInputCopyComesFirst(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-model-input-first.jsonl")
+	content := strings.Join([]string{
+		`{"timestamp":"2026-01-02T03:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Survey the crater"}]}}`,
+		`{"timestamp":"2026-01-02T03:00:00.005Z","type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","content":[{"type":"text","text":"Survey the crater"}]}}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{Path: path, Agent: model.AgentCodex}
+
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatalf("LoadEvents() error = %v", err)
+	}
+	if len(session.Events) != 1 || session.Events[0].Kind != model.EventUser || session.Events[0].Harness {
+		t.Fatalf("LoadEvents().Events = %#v, want one human-classified user event", session.Events)
+	}
+}
+
 func TestLoadEventsClassifiesStandaloneResponseUserAsHarness(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollout-response-user.jsonl")
 	content := `{"timestamp":"2026-01-02T03:00:00Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# Harness instructions"}]}}` + "\n"
