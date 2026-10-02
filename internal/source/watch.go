@@ -103,13 +103,17 @@ func (w *Watcher) Events() <-chan Change {
 	return w.events
 }
 
+// Close waits for run before it closes fsnotify. run then exits through w.done
+// or the context, so its close of w.events is ordered after the caller of
+// Close. fsnotify closes its own channels after a syscall wakeup, which gives
+// no such ordering. run also makes no fsnotify call while fsnotify closes.
 func (w *Watcher) Close() error {
 	var err error
 	w.once.Do(func() {
 		w.cancel()
 		close(w.done)
-		err = w.watcher.Close()
 		w.group.Wait()
+		err = w.watcher.Close()
 	})
 	return err
 }
