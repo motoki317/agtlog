@@ -19,8 +19,6 @@ func writeText(output io.Writer, value any) error {
 		return writeListText(output, response)
 	case ShowResponse:
 		return writeShowText(output, response)
-	case RawResponse:
-		return writeRawText(output, response)
 	case SearchResponse:
 		return writeSearchText(output, response)
 	default:
@@ -89,13 +87,6 @@ func writeShowText(output io.Writer, response ShowResponse) error {
 	}
 	if _, err := fmt.Fprintf(output, "PAGE\treturned=%d\ttotal=%d\thas_more=%t\tnext_offset=%d\tcomplete=%t\n",
 		response.Page.Returned, response.Page.Total, response.Page.HasMore, response.Page.NextOffset, response.Page.Complete); err != nil {
-		return err
-	}
-	return writeWarningText(output, response.Warnings)
-}
-
-func writeRawText(output io.Writer, response RawResponse) error {
-	if _, err := fmt.Fprintf(output, "[%d]\t%s\t%d\t%d\n%s\n", response.RawRecord.Index, terminalSafe(response.RawRecord.Path), response.RawRecord.Offset, response.RawRecord.Length, terminalSafe(response.RawRecord.RawJSON)); err != nil {
 		return err
 	}
 	return writeWarningText(output, response.Warnings)
