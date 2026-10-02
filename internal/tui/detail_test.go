@@ -1040,6 +1040,46 @@ func TestOverviewTabRoundTripPreservesTimelineFocus(t *testing.T) {
 	}
 }
 
+func TestOverviewTabRoundTripKeepsFollowingTheTail(t *testing.T) {
+	events := []model.Event{{Kind: model.EventUser, Text: "Survey the crater"}}
+	for index := range 20 {
+		events = append(events, model.Event{Kind: model.EventThinking, Text: fmt.Sprintf("Observation %02d", index)})
+	}
+	events = append(events, model.Event{Kind: model.EventAssistantText, Text: "Route found\nridge clear\npass open"})
+	root := &model.Session{ID: "lunar", Agent: model.AgentCodex, Path: "/workspace/crater/rollout.jsonl", Events: events}
+	m := NewModel([]*model.Session{root}, nil)
+	for _, msg := range []tea.Msg{tea.WindowSizeMsg{Width: 80, Height: 16}, tea.KeyMsg{Type: tea.KeyEnter}} {
+		updated, _ := m.Update(msg)
+		m = updated.(Model)
+	}
+	opened := detailStateFromScreen(t, m.detail)
+	offset := opened.viewport.YOffset
+	if !opened.followingTail() {
+		t.Fatal("test setup did not open a tail-following timeline")
+	}
+
+	for range 2 {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+		m = updated.(Model)
+	}
+	if returned := detailStateFromScreen(t, m.detail); !returned.followingTail() || returned.viewport.YOffset != offset {
+		t.Fatalf("tab round trip follow=%t offset=%d, want follow at offset %d", returned.followingTail(), returned.viewport.YOffset, offset)
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	replacement := cloneSession(root)
+	replacement.Events = append(replacement.Events, model.Event{Kind: model.EventAssistantText, Text: "Newest telemetry sample"})
+	for _, msg := range []tea.Msg{source.SessionUpdate{Sessions: []*model.Session{replacement}}, tea.KeyMsg{Type: tea.KeyTab}} {
+		updated, _ := m.Update(msg)
+		m = updated.(Model)
+	}
+	followed := detailStateFromScreen(t, m.detail)
+	if !followed.followingTail() || !strings.Contains(followed.focusables[followed.focus].event.Text, "Newest") {
+		t.Fatalf("Timeline after an update on Overview follow=%t focus %d/%d, want the newest event", followed.followingTail(), followed.focus, len(followed.focusables)-1)
+	}
+}
+
 func TestOverviewResizeAndWrapPreserveAValidViewport(t *testing.T) {
 	usage := make([]model.Usage, 15)
 	modelCosts := make(map[string]float64, len(usage))

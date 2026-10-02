@@ -352,12 +352,7 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		d.viewport, cmd = d.viewport.Update(msg)
 		return cmd
 	case "tab", "shift+tab":
-		d.tabFocusKeys[d.tab] = d.focusKey()
-		d.tab = (d.tab + 1) % 2
-		d.focusables = nil
-		d.focus = -1
-		d.viewport.SetYOffset(0)
-		d.rebuild()
+		d.switchTab()
 	case "j", "down":
 		d.moveFocus(1)
 	case "k", "up":
@@ -391,6 +386,25 @@ func (d *detailState) update(msg tea.Msg) tea.Cmd {
 		return cmd
 	}
 	return nil
+}
+
+// switchTab saves a tail-following Timeline as an empty focus key. rebuild
+// resolves an empty key to the newest event, so a Timeline that followed the
+// tail resumes following on return, also after a live update replaced the state.
+func (d *detailState) switchTab() {
+	leaving := d.focusKey()
+	if d.followingTail() {
+		leaving = ""
+	}
+	d.tabFocusKeys[d.tab] = leaving
+	d.tab = (d.tab + 1) % 2
+	d.focusables = nil
+	d.focus = -1
+	d.viewport.SetYOffset(0)
+	d.rebuild()
+	if d.tab == tabTimeline && d.tabFocusKeys[tabTimeline] == "" {
+		d.anchorBottom()
+	}
 }
 
 func (d *detailState) pinnedToBottom() bool {
