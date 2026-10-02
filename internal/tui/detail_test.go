@@ -3696,7 +3696,11 @@ func TestDetailSanitizesToolAndModelFields(t *testing.T) {
 	t.Setenv("NO_COLOR", "1")
 	session := &model.Session{
 		ID: "unsafe", Agent: model.AgentKind("claude\nforged"), Models: []string{"model\x1b[31mred"},
-		Events: []model.Event{{Kind: model.EventToolCall, ToolName: "Read\x1b]8;;invalid\a", ToolInput: "safe\u202ereversed"}},
+		Events: []model.Event{
+			{Kind: model.EventToolCall, ToolName: "Read\x1b]8;;invalid\a", ToolInput: "safe\u202ereversed"},
+			{Kind: model.EventAdvisor, Model: "advisor\x1b[2J\rmodel"},
+			{Kind: model.EventUsage, Text: "unattributed usage", Model: "usage\x1b[31m\u202emodel"},
+		},
 	}
 	m := NewModel([]*model.Session{session}, nil)
 	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}} {

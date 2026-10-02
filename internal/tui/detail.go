@@ -1424,7 +1424,7 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 	case model.EventAdvisor:
 		label := "advisor"
 		if event.Model != "" {
-			label = "advisor(" + shortModelName(event.Model) + ")"
+			label = "advisor(" + terminalText(shortModelName(event.Model), 96) + ")"
 		}
 		text := padding + foldMarker(false, false) + " " + glyphSubagent + " " + label
 		return []detailLine{{text: text, metrics: metricsText(eventMetricParts(event)), key: key, nowrap: true, role: detailAccent, event: event}}
@@ -1439,7 +1439,7 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 	case model.EventUsage:
 		title := firstLine(event.Text)
 		if event.Model != "" {
-			title += " (" + shortModelName(event.Model) + ")"
+			title += " (" + terminalText(shortModelName(event.Model), 96) + ")"
 		}
 		text := padding + foldMarker(false, false) + " " + glyphSecondary + " " + title
 		return []detailLine{{text: text, metrics: metricsText(eventMetricParts(event)), key: key, nowrap: true, role: detailSystemPrompt, event: event}}
