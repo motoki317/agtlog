@@ -90,6 +90,7 @@ func TestGoldenDetailFrame(t *testing.T) {
 	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(80, 18))
 	for _, key := range []tea.KeyMsg{
 		{Type: tea.KeyEnter},
+		{Type: tea.KeyRunes, Runes: []rune{'E'}},
 		{Type: tea.KeyDown},
 		{Type: tea.KeyRunes, Runes: []rune{'J'}},
 	} {

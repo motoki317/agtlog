@@ -17,7 +17,8 @@ open, and the newest row is the one row that a followed session guarantees to ad
 own choice follows the default, so the bulk keys govern the rows that arrive later as well as the
 rows on screen. A row that the reader folds keeps its own choice until the next bulk key.
 
-Each session opened from the list starts expanded. A drilled subagent copies its parent's default
+Each session opened from the list starts expanded. [Collapsed Timeline start](20261002-collapsed-timeline-start.md)
+replaces this sentence. A drilled subagent copies its parent's default
 when it opens, and a later bulk key changes only the screen where the reader presses it.
 
 # Alternatives

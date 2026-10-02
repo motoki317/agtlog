@@ -1733,13 +1733,13 @@ func TestMatchingLiveUpdatePreservesDetailAndRemovalReturnsToList(t *testing.T) 
 	m = updated.(Model)
 	detail := detailStateFromScreen(t, m.detail)
 	detail.expanded["kept"] = true
-	detail.defaultExpanded = false
+	detail.defaultExpanded = true
 
 	replacement := cloneSession(open)
 	replacement.Title = "After"
 	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{replacement}})
 	m = updated.(Model)
-	if m.detail == nil || detailStateFromScreen(t, m.detail).session.Title != "After" || !detailStateFromScreen(t, m.detail).expanded["kept"] || detailStateFromScreen(t, m.detail).defaultExpanded {
+	if m.detail == nil || detailStateFromScreen(t, m.detail).session.Title != "After" || !detailStateFromScreen(t, m.detail).expanded["kept"] || !detailStateFromScreen(t, m.detail).defaultExpanded {
 		t.Fatalf("matching update lost detail state: %#v", m.detail)
 	}
 

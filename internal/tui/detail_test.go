@@ -155,14 +155,14 @@ func TestDrilledSubagentInheritsDefaultExpansion(t *testing.T) {
 	m := NewModel([]*model.Session{parent}, nil)
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
-	detailStateFromScreen(t, m.detail).defaultExpanded = false
+	detailStateFromScreen(t, m.detail).defaultExpanded = true
 	for _, key := range []tea.KeyMsg{{Type: tea.KeyTab}, {Type: tea.KeyEnter}} {
 		updated, _ = m.Update(key)
 		m = updated.(Model)
 	}
 
-	if detailStateFromScreen(t, m.detail).defaultExpanded {
-		t.Fatal("drilled subagent did not inherit disabled default expansion")
+	if !detailStateFromScreen(t, m.detail).defaultExpanded {
+		t.Fatal("drilled subagent did not inherit enabled default expansion")
 	}
 }
 
@@ -224,6 +224,8 @@ func TestLeftCollapsesFocusedTimelineRow(t *testing.T) {
 	m := NewModel([]*model.Session{session}, nil)
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(Model)
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	m = updated.(Model)
 	detail := detailStateFromScreen(t, m.detail)
 	for index, item := range detail.focusables {
 		if item.expandable {
@@ -231,6 +233,9 @@ func TestLeftCollapsesFocusedTimelineRow(t *testing.T) {
 			detail.selectedLine = item.line
 			break
 		}
+	}
+	if !detail.isExpanded(detail.focusables[detail.focus].key) {
+		t.Fatal("fixture must select an expanded row before Left")
 	}
 	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyLeft})
 	m = updated.(Model)
@@ -2031,6 +2036,7 @@ func TestWrappedAssistantProseDoesNotColorLabelTextOnContinuation(t *testing.T) 
 		Kind: model.EventAssistantText, Text: strings.Repeat("x", 80) + " codex: still ordinary prose past the preview cap",
 	}}}
 	detail := newDetailState(session, 80, 16, styleSet)
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 	found := false
 	for rowIndex, row := range detail.rendered {
 		if rowIndex == detail.firstRenderedRow(row.detailIndex) || !strings.Contains(row.text, "codex:") {
@@ -2147,6 +2153,7 @@ func TestUserPromptFoldRevealsTheFullPrompt(t *testing.T) {
 	prompt := "First instruction line\nSecond instruction line\nThird instruction line"
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{{Kind: model.EventUser, Text: prompt}}}
 	detail := newDetailState(session, 80, 14, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 
 	if !detail.lines[0].expandable {
 		t.Fatalf("multi-line user prompt expandable = false, want true")
@@ -2162,7 +2169,7 @@ func TestUserPromptFoldRevealsTheFullPrompt(t *testing.T) {
 		}
 	}
 
-	assert(glyphExpanded, true) // rows expand by default, so the whole prompt shows
+	assert(glyphExpanded, true)
 
 	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 	assert(glyphCollapsed, false)
@@ -3065,7 +3072,7 @@ func TestReplaceDetailTreeKeepsChildRowsDuringReload(t *testing.T) {
 	childEvents := func(prefix string, count int) []model.Event {
 		events := make([]model.Event, count)
 		for index := range events {
-			events[index] = model.Event{Kind: model.EventAssistantText, Text: fmt.Sprintf("%s event %02d", prefix, index)}
+			events[index] = model.Event{Kind: model.EventAssistantText, Text: fmt.Sprintf("%s event %02d\n%s event %02d body\n%s event %02d tail", prefix, index, prefix, index, prefix, index)}
 		}
 		return events
 	}
@@ -3109,22 +3116,29 @@ func TestReplaceDetailTreeKeepsChildRowsDuringReload(t *testing.T) {
 	}
 	focusedKey := func(detail *detailState) string { return detail.focusables[detail.focus].key }
 
-	t.Run("focus and scroll", func(t *testing.T) {
+	t.Run("body cursor and scroll", func(t *testing.T) {
 		m := newModel(t, 12)
 		detail := detailStateFromScreen(t, m.detail)
+		detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 		detail.focus = 3
-		detail.selectedLine = detail.focusables[3].line
-		detail.viewport.SetYOffset(2)
+		detail.selectedLine = detail.focusables[3].line + 1
+		detail.rebuildRendered()
+		detail.viewport.SetYOffset(detail.selectedLine - 1)
+		wantLine := detail.selectedLine
 		wantKey, wantOffset := focusedKey(detail), detail.viewport.YOffset
 
 		m, childCmd := updateParent(t, m)
 		detail = detailStateFromScreen(t, m.detail)
-		if focusedKey(detail) != wantKey || detail.viewport.YOffset != wantOffset {
-			t.Fatalf("reloading child: key=%q offset=%d, want key=%q offset=%d", focusedKey(detail), detail.viewport.YOffset, wantKey, wantOffset)
+		if focusedKey(detail) != wantKey || detail.viewport.YOffset != wantOffset || detail.selectedLine != wantLine {
+			t.Fatalf("reloading child: key=%q offset=%d line=%d, want %q/%d/%d", focusedKey(detail), detail.viewport.YOffset, detail.selectedLine, wantKey, wantOffset, wantLine)
 		}
 		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 		m = updated.(Model)
 		detail = detailStateFromScreen(t, m.detail)
+		wantLine++
+		if detail.selectedLine != wantLine {
+			t.Fatalf("navigation during reload cursor=%d, want body line %d", detail.selectedLine, wantLine)
+		}
 		wantKey, wantOffset = focusedKey(detail), detail.viewport.YOffset
 
 		updated, _ = m.Update(childCmd())
@@ -3134,8 +3148,8 @@ func TestReplaceDetailTreeKeepsChildRowsDuringReload(t *testing.T) {
 		if detail.loadStatus != detailStatusLoaded || !strings.Contains(view, "Fresh event") || strings.Contains(view, "Old event") {
 			t.Fatalf("loaded rows did not replace the previous rows:\n%s", view)
 		}
-		if focusedKey(detail) != wantKey || detail.viewport.YOffset != wantOffset {
-			t.Fatalf("reloaded child: key=%q offset=%d, want key=%q offset=%d", focusedKey(detail), detail.viewport.YOffset, wantKey, wantOffset)
+		if focusedKey(detail) != wantKey || detail.viewport.YOffset != wantOffset || detail.selectedLine != wantLine {
+			t.Fatalf("reloaded child: key=%q offset=%d line=%d, want %q/%d/%d", focusedKey(detail), detail.viewport.YOffset, detail.selectedLine, wantKey, wantOffset, wantLine)
 		}
 	})
 
@@ -3212,9 +3226,8 @@ func TestReplaceDetailTreePreservesReloadedChildState(t *testing.T) {
 		m.detail = newDetailState(child, m.width, m.height, m.styles)
 		m.detailGeneration = 2
 		detail := detailStateFromScreen(t, m.detail)
-		detail.tab = tabOverview
-		detail.focus = 1
-		detail.rebuild()
+		detail.switchTab()
+		detail.selectRow(detail.focusables[1].line)
 
 		replacement := cloneSession(root)
 		replacement.Subagents[0].Events = nil
@@ -3730,6 +3743,7 @@ func TestExpandedToolDetailIsPlainTerminalText(t *testing.T) {
 		}},
 	}}
 	detail := newDetailState(session, 80, 18, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 	detail.moveFocus(1)
 	detail.moveFocus(1)
 
@@ -3770,6 +3784,7 @@ func TestExpandedMessageKeepsBlankLinesAndIndentation(t *testing.T) {
 		{Kind: model.EventAssistantText, Text: text},
 	}}
 	detail := newDetailState(session, 80, 24, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 
 	var body []string
 	for _, line := range detail.lines {
@@ -4080,21 +4095,27 @@ func TestDetailHasBodyUsesTimelineInputProjection(t *testing.T) {
 	}
 }
 
-func TestDetailTimelineExpandsByDefault(t *testing.T) {
+func TestDetailTimelineStartsCollapsed(t *testing.T) {
 	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{
-		{Kind: model.EventUser, Text: "Survey the crater"},
+		{Kind: model.EventUser, Text: "Survey the crater\nCheck the ridge"},
 		{Kind: model.EventThinking, Text: "Choose the safest route"},
 		{Kind: model.EventToolCall, ToolName: "exec_command", ToolInput: "survey --ridge", Detail: &model.ToolDetail{Output: "route clear"}},
-		{Kind: model.EventAssistantText, Text: "The ridge route is clear."},
+		{Kind: model.EventAssistantText, Text: "The ridge route is clear.\nSurvey complete."},
 	}}
 	detail := newDetailState(session, 80, 20, newStyles())
 
 	var rows []string
 	for _, line := range detail.lines {
 		rows = append(rows, strings.TrimSpace(line.text))
+		if line.key == "" || line.expandable && !strings.HasPrefix(strings.TrimSpace(line.text), glyphCollapsed) {
+			t.Errorf("default row = %q, want an event header with a collapsed glyph when expandable", line.text)
+		}
 	}
-	if !slices.Contains(rows, glyphSecondary+" thinking: Choose the safest route") || !slices.Contains(rows, "route clear") {
-		t.Fatalf("default timeline rows = %#v, want expanded turn and tool output", rows)
+	if len(rows) != len(session.Events) || !slices.Contains(rows, glyphSecondary+" thinking: Choose the safest route") || strings.Contains(strings.Join(rows, "\n"), "route clear") {
+		t.Fatalf("default timeline rows = %#v, want one header per event without tool output", rows)
+	}
+	if detail.defaultExpanded {
+		t.Fatal("defaultExpanded = true, want false")
 	}
 	if len(detail.expanded) != 0 {
 		t.Fatalf("default expansion overrides = %#v, want empty map", detail.expanded)
@@ -4123,6 +4144,8 @@ func TestDetailTimelineBottomAnchorStartsAtLogicalLine(t *testing.T) {
 		Kind: model.EventAssistantText, Text: strings.Repeat("newest wrapped telemetry ", 12),
 	}}}
 	detail := newDetailState(session, 28, 10, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
 
 	if detail.viewport.YOffset >= len(detail.rendered) || !detail.rendered[detail.viewport.YOffset].first {
 		t.Fatalf("bottom anchor offset %d starts on continuation: %#v", detail.viewport.YOffset, detail.rendered)
@@ -4304,6 +4327,7 @@ func TestDetailMouseClicksNeverFoldTheClickedRow(t *testing.T) {
 			for _, msg := range []tea.Msg{
 				tea.WindowSizeMsg{Width: 80, Height: 16},
 				tea.KeyMsg{Type: tea.KeyEnter},
+				tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}},
 				tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}},
 			} {
 				updated, _ := m.Update(msg)
@@ -4441,6 +4465,7 @@ func TestDetailRowAtYHonorsPanelBoundariesAndOffset(t *testing.T) {
 		{Kind: model.EventToolCall, ToolName: "Read", Detail: &model.ToolDetail{Output: "one\ntwo\nthree\nfour\nfive"}},
 	}}
 	detail := newDetailState(session, 80, 12, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 	detail.viewport.SetYOffset(4)
 
 	for _, test := range []struct {
@@ -4449,8 +4474,8 @@ func TestDetailRowAtYHonorsPanelBoundariesAndOffset(t *testing.T) {
 		ok    bool
 	}{
 		{y: 0}, {y: 4}, {y: 5},
-		{y: 6, index: 2, ok: true},
-		{y: 9, index: 2, ok: true},
+		{y: 6, index: 4, ok: true},
+		{y: 9, index: 7, ok: true},
 		{y: 10}, {y: 11},
 	} {
 		index, ok := detail.rowAtY(test.y)
@@ -4605,6 +4630,8 @@ func TestPinnedDetailTimelineStaysPinnedAcrossWrapToggles(t *testing.T) {
 	}
 	events = append(events, model.Event{Kind: model.EventAssistantText, Text: "Ridge report\n" + strings.Repeat("ridge telemetry ", 12) + "\n" + strings.Repeat("pass telemetry ", 12)})
 	detail := newDetailState(&model.Session{ID: "lunar", Agent: model.AgentCodex, Events: events}, 60, 16, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
 
 	for _, wrap := range []bool{false, true} {
 		detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
@@ -4614,7 +4641,7 @@ func TestPinnedDetailTimelineStaysPinnedAcrossWrapToggles(t *testing.T) {
 	}
 }
 
-func TestSpaceCollapsesDefaultExpandedTool(t *testing.T) {
+func TestSpaceExpandsDefaultCollapsedTool(t *testing.T) {
 	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Survey the crater"},
 		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/route.go", Detail: &model.ToolDetail{Output: "the ridge route is clear"}},
@@ -4632,13 +4659,17 @@ func TestSpaceCollapsesDefaultExpandedTool(t *testing.T) {
 
 	detail.update(tea.KeyMsg{Type: tea.KeySpace})
 
-	if expanded, ok := detail.expanded[toolKey]; !ok || expanded || detail.isExpanded(toolKey) {
-		t.Fatalf("tool override = %v, present %t, effective %t; want explicit collapse", expanded, ok, detail.isExpanded(toolKey))
+	if expanded, ok := detail.expanded[toolKey]; !ok || !expanded || !detail.isExpanded(toolKey) {
+		t.Fatalf("tool override = %v, present %t, effective %t; want explicit expansion", expanded, ok, detail.isExpanded(toolKey))
 	}
+	foundOutput := false
 	for _, line := range detail.lines {
-		if strings.Contains(line.text, "the ridge route is clear") {
-			t.Fatalf("collapsed tool retained body row %q", line.text)
+		if line.key == "" && strings.Contains(line.text, "the ridge route is clear") {
+			foundOutput = true
 		}
+	}
+	if !foundOutput {
+		t.Fatal("expanded tool has no output row")
 	}
 }
 
@@ -4657,6 +4688,8 @@ func TestShrinkingTimelineAtTheBottomKeepsTheViewportFilled(t *testing.T) {
 			}
 			events = append(events, model.Event{Kind: model.EventAssistantText, Text: strings.Repeat("ridge telemetry ", 12) + "\nsecond line\nthird line"})
 			detail := newDetailState(&model.Session{ID: "lunar", Agent: model.AgentCodex, Events: events}, 60, 16, newStyles())
+			detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+			detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
 			rowsBefore := len(detail.rendered)
 
 			detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(test.key)})
@@ -4696,6 +4729,7 @@ func TestTimelineGutterKeepsAbsoluteAndContinuationWidthsFixed(t *testing.T) {
 	}
 	detail := newDetailState(session, 40, 16, newStyles())
 	detail.absoluteTime = true
+	detail.defaultExpanded = true
 	detail.rebuild()
 
 	gutterWidth := detail.timelineGutterWidth()
@@ -4706,13 +4740,20 @@ func TestTimelineGutterKeepsAbsoluteAndContinuationWidthsFixed(t *testing.T) {
 	if got := ansi.Cut(first, 2, 2+gutterWidth); got != "Jul 20 11:55:07 " {
 		t.Fatalf("absolute gutter = %q, want dated seconds clock", got)
 	}
+	continuations := 0
 	for index, row := range detail.rendered {
 		if width := ansi.StringWidth(row.text); width != detail.viewport.Width {
 			t.Errorf("rendered row %d width = %d, want %d", index, width, detail.viewport.Width)
 		}
+		if !row.first {
+			continuations++
+		}
 		if !row.first && strings.TrimSpace(ansi.Cut(row.text, 2, 2+gutterWidth)) != "" {
 			t.Errorf("continuation row %d gutter is not blank: %q", index, ansi.Cut(row.text, 2, 2+gutterWidth))
 		}
+	}
+	if continuations == 0 {
+		t.Fatal("fixture has no wrapped continuation rows")
 	}
 	zeroStart := detail.firstRenderedRow(len(detail.lines) - 1)
 	if got := strings.TrimSpace(ansi.Cut(detail.rendered[zeroStart].text, 2, 2+gutterWidth)); got != "" {
@@ -4867,6 +4908,7 @@ func TestToolExpansionRevealsDiffLinesWithSemanticRoles(t *testing.T) {
 		{Kind: model.EventAssistantText, Text: "Route updated"},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 	for index, item := range detail.focusables {
 		if item.event.Kind == model.EventToolCall {
 			detail.focus = index
@@ -4946,6 +4988,7 @@ func TestCollapseAllClearsEveryExpandableTimelineRow(t *testing.T) {
 		{Kind: model.EventToolCall, ToolName: "exec_command", ToolInput: "check-route", Detail: &model.ToolDetail{Input: "check-route", Output: "route clear"}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 	var expandableKeys []string
 	for _, item := range detail.focusables {
 		if item.expandable {
@@ -4977,7 +5020,7 @@ func TestRowArrivingAfterCollapseAllStaysCollapsed(t *testing.T) {
 		{Kind: model.EventUser, Text: "Check the route"},
 	}}
 	m := NewModel([]*model.Session{session}, nil)
-	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'C'}}} {
+	for _, key := range []tea.KeyMsg{{Type: tea.KeyEnter}, {Type: tea.KeyRunes, Runes: []rune{'E'}}, {Type: tea.KeyRunes, Runes: []rune{'C'}}} {
 		updated, _ := m.Update(key)
 		m = updated.(Model)
 	}
@@ -5009,6 +5052,7 @@ func TestCollapseAllKeepsFocusWhereItWas(t *testing.T) {
 		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/second.go", Detail: &model.ToolDetail{Output: "second route clear"}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 	wantKey := ""
 	for index, item := range detail.focusables {
 		if strings.HasSuffix(item.key, "/event/1") {
@@ -5066,6 +5110,7 @@ func TestToolExpansionShowsReadableOutputUnderSecondaryLabel(t *testing.T) {
 		{Kind: model.EventToolCall, ToolName: "exec_command", ToolInput: "check-route", Detail: &model.ToolDetail{Input: "check-route", Output: "route clear\ncommand complete"}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 
 	want := map[string]detailRole{"output:": detailSecondary, "route clear": detailRow, "command complete": detailRow}
 	found := make(map[string]bool, len(want))
@@ -5095,6 +5140,7 @@ func TestExpandedToolHeaderStaysOnOneRowWhileBodyWraps(t *testing.T) {
 		{Kind: model.EventToolCall, ToolName: "update_plan", ToolInput: input, Detail: &model.ToolDetail{Input: input, Output: output}},
 	}}
 	detail := newDetailState(session, 32, 14, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 
 	headerIndex := -1
 	for index, line := range detail.lines {
@@ -5222,6 +5268,7 @@ func TestToolExpansionShowsReadableInputUnderSecondaryLabel(t *testing.T) {
 		{Kind: model.EventToolCall, ToolName: "Grep", ToolInput: "ridge", Detail: &model.ToolDetail{Input: "{\n  \"query\": \"ridge\"\n}"}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 
 	want := map[string]detailRole{"input:": detailSecondary, "{": detailRow, `"query": "ridge"`: detailRow, "}": detailRow}
 	found := make(map[string]bool, len(want))
@@ -5251,6 +5298,7 @@ func TestToolExpansionShowsInputBeforeOutput(t *testing.T) {
 		}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 
 	inputIndex, outputIndex := -1, -1
 	for index, line := range detail.lines {
@@ -5272,6 +5320,7 @@ func TestToolExpansionOmitsSingleLineFileInput(t *testing.T) {
 		{Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/route.go", Detail: &model.ToolDetail{Input: "/workspace/route.go", Output: "route ready"}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 
 	var rows []string
 	for _, line := range detail.lines {
@@ -5291,6 +5340,7 @@ func TestEnterDoesNotExpandToolInPlace(t *testing.T) {
 		{Kind: model.EventToolCall, ToolName: "Edit", ToolInput: "/workspace/route.go", Detail: &model.ToolDetail{Diff: "-old\n+new"}},
 	}}
 	detail := newDetailState(session, 80, 14, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 	detail.moveFocus(1)
 	detail.moveFocus(1)
 	detail.update(tea.KeyMsg{Type: tea.KeySpace})
@@ -5322,6 +5372,68 @@ func TestDetailScrollVisitsExpandedToolRows(t *testing.T) {
 	detail.moveFocus(1)
 	if !strings.Contains(detail.focusables[detail.focus].key, "/event/2") {
 		t.Fatalf("second expanded focus = %#v, want tool row", detail.focusables[detail.focus])
+	}
+}
+
+func TestTimelineLineKeysMoveThroughDetailLines(t *testing.T) {
+	var events []model.Event
+	for index := range 5 {
+		events = append(events, model.Event{Kind: model.EventAssistantText, Text: fmt.Sprintf("Report %d\n", index) + strings.Repeat("survey route with several details\n", 5) + fmt.Sprintf("Last body row %d", index)})
+	}
+	for _, width := range []int{80, 28} {
+		for _, keys := range []struct {
+			down tea.KeyMsg
+			up   tea.KeyMsg
+		}{
+			{down: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}}, up: tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'k'}}},
+			{down: tea.KeyMsg{Type: tea.KeyDown}, up: tea.KeyMsg{Type: tea.KeyUp}},
+		} {
+			t.Run(fmt.Sprintf("%d/%s", width, keys.down.String()), func(t *testing.T) {
+				detail := newDetailState(&model.Session{ID: "survey", Agent: model.AgentCodex, Events: events}, width, 16, newStyles())
+				detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
+				detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
+				assertCursor := func(wantLine int) {
+					t.Helper()
+					wantFocus := 0
+					for index, item := range detail.focusables {
+						if item.line <= wantLine {
+							wantFocus = index
+						}
+					}
+					if detail.selectedLine != wantLine || detail.focus != wantFocus {
+						t.Fatalf("cursor line/focus = %d/%d, want %d/%d", detail.selectedLine, detail.focus, wantLine, wantFocus)
+					}
+					first, last := detail.firstRenderedRow(wantLine), len(detail.rendered)-1
+					if wantLine+1 < len(detail.lines) {
+						last = detail.firstRenderedRow(wantLine+1) - 1
+					}
+					if first < detail.viewport.YOffset || last >= detail.viewport.YOffset+detail.viewport.Height {
+						t.Fatalf("selected line rows %d..%d not fully visible at offset %d", first, last, detail.viewport.YOffset)
+					}
+					if current, total := detail.rowCounter(); current != wantFocus+1 || total != len(events) {
+						t.Fatalf("counter = %d/%d, want event %d/%d", current, total, wantFocus+1, len(events))
+					}
+				}
+				assertCursor(0)
+				for next := 1; next < len(detail.lines); next++ {
+					detail.update(keys.down)
+					assertCursor(next)
+				}
+				if !detail.viewport.AtBottom() || !detail.followingTail() || !strings.Contains(ansi.Strip(detail.view()), "Last body row 4") {
+					t.Fatal("line keys did not reveal the final body row and resume tail following")
+				}
+				for range 2 {
+					detail.update(keys.down)
+					assertCursor(len(detail.lines) - 1)
+				}
+				for next := len(detail.lines) - 2; next >= 0; next-- {
+					detail.update(keys.up)
+					assertCursor(next)
+				}
+				detail.update(keys.up)
+				assertCursor(0)
+			})
+		}
 	}
 }
 
@@ -5383,12 +5495,13 @@ func TestWrapToggleWrapsBodyRowsAndHighlightsSelectedHead(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
 
-	// A long single-line reply is open by default. Its head never wraps, so the wrap
-	// toggle changes only the body rows.
+	// An expanded reply keeps its head on one row, so the wrap toggle changes
+	// only the body rows.
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{{
 		Kind: model.EventAssistantText, Text: strings.Repeat("charted route ", 12),
 	}}}
 	detail := newDetailState(session, 28, 40, newStyles(Theme{Name: "mono"}))
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 	bodyRows := func() int {
 		for index, line := range detail.lines {
 			if line.key != "" || !strings.Contains(line.text, "charted") {
@@ -5446,6 +5559,7 @@ func TestWrappedEdgeNavigationUsesFlatRowOffsets(t *testing.T) {
 		{Kind: model.EventAssistantText, Text: strings.Repeat("charted southern route ", 4)},
 	}}
 	detail := newDetailState(session, 28, 16, newStyles())
+	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'E'}})
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
 
 	selectedVisible := false

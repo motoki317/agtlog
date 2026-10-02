@@ -834,15 +834,15 @@ func captureDetailRestoreState(detail *detailState) detailRestoreState {
 		pinned:              detail.followingTail(),
 		defaultExpanded:     detail.defaultExpanded,
 		focus:               detail.focus,
+		lineOffset:          detail.selectedLineOffset(),
+		selectedLine:        detail.selectedLine,
+		focusKey:            detail.focusKey(),
 		wrap:                detail.wrap,
 		tab:                 detail.tab,
 		subagentSort:        detail.subagentSort,
 		subagentColumnFocus: detail.subagentColumnFocus,
 		expanded:            make(map[string]bool, len(detail.expanded)),
 		tabFocusKeys:        detail.tabFocusKeys,
-	}
-	if len(detail.focusables) > 0 {
-		restore.focusKey = detail.focusables[detail.focus].key
 	}
 	for key, expanded := range detail.expanded {
 		restore.expanded[key] = expanded
@@ -879,11 +879,14 @@ func (d *detailState) restoreView(restore detailRestoreState, width, height int)
 	d.resize(width, height)
 	if !restore.pinned {
 		d.viewport.SetYOffset(restore.viewportOffset)
+		if d.tab == tabOverview && restore.focusKey == "" && restore.selectedLine >= 0 && len(d.focusables) > 0 {
+			d.selectRow(min(restore.selectedLine, d.focusables[0].line-1))
+		}
 		for index, item := range d.focusables {
 			if item.key == restore.focusKey {
 				oldLine := d.selectedLine
 				d.focus = index
-				d.updateSelection(oldLine, item.line)
+				d.updateSelection(oldLine, d.focusedLine(restore.lineOffset))
 				break
 			}
 		}
