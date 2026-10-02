@@ -17,12 +17,12 @@ docs/plans/
 .env
 .envrc.local
 .claude/settings.local.json
+.claude/worktrees/
 
 # Nix
 result
 result-*
 .direnv/
-.envrc
 .pre-commit-config.yaml
 
 # OS and editors
