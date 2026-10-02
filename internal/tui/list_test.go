@@ -1522,7 +1522,6 @@ func TestPendingDetailLoadCannotRestoreStaleOwnership(t *testing.T) {
 	m = updated.(Model)
 	updated, _ = m.Update(detailLoadedMsg{
 		generation: m.detailGeneration,
-		identity:   sessionIdentity(currentOwner),
 		session:    staleLoad,
 	})
 	m = updated.(Model)
@@ -1596,6 +1595,66 @@ func TestMatchingLiveUpdatePreservesDetailAndRemovalReturnsToList(t *testing.T) 
 	m = updated.(Model)
 	if m.screen != screenList || m.detail != nil {
 		t.Fatalf("removed open session left detail active: screen %v detail %#v", m.screen, m.detail)
+	}
+}
+
+func TestLiveUpdateKeepsDrilledDetailWhenOpenSessionIdentityChanges(t *testing.T) {
+	path := "/workspace/session.jsonl"
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Path: "/workspace/agent-scout.jsonl", Title: "Scout"}
+	unnamed := &model.Session{
+		Agent: model.AgentClaude, Path: path, Title: "Before first session ID",
+		Subagents: []*model.Session{child}, Events: []model.Event{{Kind: model.EventSubagent, Subagent: child}},
+	}
+	m := NewModel([]*model.Session{unnamed}, nil)
+	m.screen = screenDetail
+	m.detailStack = []detailScreen{newDetailState(unnamed, m.width, m.height, m.styles)}
+	m.detail = newDetailState(child, m.width, m.height, m.styles)
+
+	named := cloneSession(unnamed)
+	named.ID = "session-a"
+	named.Title = "After first session ID"
+	updated, _ := m.Update(source.SessionUpdate{Sessions: []*model.Session{named}})
+	m = updated.(Model)
+
+	if m.screen != screenDetail || len(m.detailStack) != 1 {
+		t.Fatalf("identity change closed the drilled detail: screen %v stack %d", m.screen, len(m.detailStack))
+	}
+	if root := detailStateFromScreen(t, m.detailStack[0]).session; root != named {
+		t.Fatalf("open root = %#v, want the renamed session", root)
+	}
+	if top := detailStateFromScreen(t, m.detail).session; top != named.Subagents[0] {
+		t.Fatalf("drilled child = %#v, want the renamed session's child", top)
+	}
+}
+
+func TestLiveUpdateReloadsOpenDetailWhoseIdentityChanged(t *testing.T) {
+	path := "/workspace/session.jsonl"
+	unnamed := &model.Session{Agent: model.AgentClaude, Path: path, Title: "Before first session ID"}
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: unnamed,
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			loaded.Events = []model.Event{{Kind: model.EventUser, Text: "Loaded " + loaded.ID}}
+			return nil
+		},
+	}}, source.Options{})
+	m := NewModel([]*model.Session{unnamed}, registry)
+	updated, load := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(load())
+	m = updated.(Model)
+
+	named := &model.Session{ID: "session-a", Agent: model.AgentClaude, Path: path, Title: "After first session ID"}
+	updated, reload := m.Update(source.SessionUpdate{Sessions: []*model.Session{named}})
+	m = updated.(Model)
+	if reload == nil {
+		t.Fatal("identity change did not reload the open detail")
+	}
+	updated, _ = m.Update(reload())
+	m = updated.(Model)
+
+	got := detailStateFromScreen(t, m.detail).session
+	if got.ID != "session-a" || len(got.Events) != 1 || got.Events[0].Text != "Loaded session-a" {
+		t.Fatalf("open detail after identity change = %#v, want the reloaded session-a", got)
 	}
 }
 
@@ -1716,11 +1775,11 @@ func TestNewerDetailLoadSupersedesOlderResult(t *testing.T) {
 
 	newer := cloneSession(current)
 	newer.Events = []model.Event{{Kind: model.EventAssistantText, Text: "newer"}}
-	updated, _ := m.Update(detailLoadedMsg{generation: 2, identity: sessionIdentity(current), session: newer})
+	updated, _ := m.Update(detailLoadedMsg{generation: 2, session: newer})
 	m = updated.(Model)
 	older := cloneSession(current)
 	older.Events = []model.Event{{Kind: model.EventAssistantText, Text: "older"}}
-	updated, _ = m.Update(detailLoadedMsg{generation: 1, identity: sessionIdentity(current), session: older})
+	updated, _ = m.Update(detailLoadedMsg{generation: 1, session: older})
 	m = updated.(Model)
 
 	if got := detailStateFromScreen(t, m.detail).session.Events[0].Text; got != "newer" {
@@ -1738,7 +1797,7 @@ func TestDetailLoadPreservesWrapToggle(t *testing.T) {
 
 	loaded := cloneSession(current)
 	loaded.Events = []model.Event{{Kind: model.EventAssistantText, Text: strings.Repeat("wrapped route ", 20)}}
-	updated, _ := m.Update(detailLoadedMsg{generation: 1, identity: sessionIdentity(current), session: loaded})
+	updated, _ := m.Update(detailLoadedMsg{generation: 1, session: loaded})
 	m = updated.(Model)
 
 	if detailStateFromScreen(t, m.detail).wrap {

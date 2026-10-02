@@ -206,18 +206,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "refresh: " + terminalText(refreshed.err.Error(), 160)
 			return m, nil
 		}
-		openIdentity := ""
-		var openOwnership ownershipAttribution
-		if root := m.detailRoot(); root != nil {
-			openIdentity = sessionIdentity(root.session)
-			openOwnership = snapshotOwnershipAttribution(root.session)
-		}
+		open, isOpen := m.snapshotOpenDetail()
 		m.sessions = refreshed.sessions
 		m.discoveryErr = nil
 		m.status = "refreshed"
 		m.rebuildList()
-		if openIdentity != "" {
-			m.refreshOpenOwnership(openIdentity, openOwnership)
+		if isOpen {
+			m.refreshOpenOwnership(open.path, open.ownership)
 		}
 		return m, nil
 	}
@@ -225,7 +220,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if loaded.generation != m.detailGeneration {
 			return m, nil
 		}
-		if root := m.detailRoot(); root != nil && sessionIdentity(root.session) == loaded.identity {
+		if root := m.detailRoot(); root != nil && root.session.Path == loaded.session.Path {
 			if loaded.err != nil {
 				root.markLoadFailed(loaded.err)
 				root.rebuild()
@@ -235,7 +230,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Live updates can reattribute ownership while the load runs, so
 			// the list's current attribution replaces the loaded copy's.
 			for _, current := range m.sessions {
-				if sessionIdentity(current) == loaded.identity {
+				if current.Path == loaded.session.Path {
 					copyOwnershipAttribution(loaded.session, current)
 					break
 				}
@@ -265,19 +260,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.status == refreshingStatus {
 			m.status = ""
 		}
-		openIdentity := ""
-		openPath := ""
+		open, isOpen := m.snapshotOpenDetail()
 		openChanged := false
-		var openOwnership ownershipAttribution
-		if root := m.detailRoot(); root != nil {
-			openIdentity = sessionIdentity(root.session)
-			openPath = root.session.Path
-			openOwnership = snapshotOwnershipAttribution(root.session)
+		if isOpen {
 			for _, path := range update.RemovedPaths {
-				openChanged = openChanged || path == openPath
+				openChanged = openChanged || path == open.path
 			}
 			for _, session := range update.Sessions {
-				openChanged = openChanged || sessionIdentity(session) == openIdentity
+				openChanged = openChanged || session.Path == open.path
 			}
 		}
 		m.applySessionUpdate(update)
@@ -293,22 +283,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.watchingRoots = 0
 			}
 		}
-		if openIdentity != "" && !openChanged {
-			m.refreshOpenOwnership(openIdentity, openOwnership)
-		}
-		if openIdentity != "" && openChanged {
-			for _, session := range m.sessions {
-				if sessionIdentity(session) != openIdentity {
-					continue
-				}
-				if m.registry != nil {
-					m.detailGeneration++
-					return m, loadDetail(m.ctx, m.registry, session, m.detailGeneration)
-				}
-				return m, m.replaceDetailTree(session, false)
-			}
-			m.screen, m.detail = screenList, nil
-			m.detailStack = nil
+		if isOpen {
+			return m, m.reconcileOpenDetail(open, openChanged)
 		}
 		return m, nil
 	}
@@ -745,6 +721,7 @@ func (m *Model) replaceDetailTree(root *model.Session, reloadChildren bool) tea.
 		}
 	}
 	indexSessions(root)
+	openRoot := m.detailRoot()
 	replacements := make([]detailScreen, 0, len(screens))
 	var cmds []tea.Cmd
 	for _, screen := range screens {
@@ -769,6 +746,10 @@ func (m *Model) replaceDetailTree(root *model.Session, reloadChildren bool) tea.
 			continue
 		}
 		session := sessions[sessionIdentity(state.session)]
+		if state == openRoot {
+			// Callers match the open root by path, so its ID can differ from root's.
+			session = root
+		}
 		if session == nil {
 			break
 		}
@@ -1038,13 +1019,48 @@ func (a ownershipAttribution) equalSession(session *model.Session) bool {
 	return true
 }
 
+type openDetailSnapshot struct {
+	path      string
+	ownership ownershipAttribution
+}
+
+func (m Model) snapshotOpenDetail() (openDetailSnapshot, bool) {
+	root := m.detailRoot()
+	if root == nil {
+		return openDetailSnapshot{}, false
+	}
+	return openDetailSnapshot{path: root.session.Path, ownership: snapshotOwnershipAttribution(root.session)}, true
+}
+
+// reconcileOpenDetail brings the open detail in line with the session list.
+// It matches the open root by path, like list rows, so the detail follows a
+// session whose ID changed.
+func (m *Model) reconcileOpenDetail(open openDetailSnapshot, changed bool) tea.Cmd {
+	if !changed {
+		m.refreshOpenOwnership(open.path, open.ownership)
+		return nil
+	}
+	for _, session := range m.sessions {
+		if session.Path != open.path {
+			continue
+		}
+		if m.registry != nil {
+			m.detailGeneration++
+			return loadDetail(m.ctx, m.registry, session, m.detailGeneration)
+		}
+		return m.replaceDetailTree(session, false)
+	}
+	m.screen, m.detail, m.detailStack = screenList, nil, nil
+	return nil
+}
+
 // refreshOpenOwnership copies replay attribution into the open root detail.
 // Ownership spans every session, so an update to another session can change
 // the open session's share.
-func (m *Model) refreshOpenOwnership(identity string, previous ownershipAttribution) {
+func (m *Model) refreshOpenOwnership(path string, previous ownershipAttribution) {
 	var summary *model.Session
 	for _, session := range m.sessions {
-		if sessionIdentity(session) == identity {
+		if session.Path == path {
 			summary = session
 			break
 		}
@@ -1068,7 +1084,7 @@ func (m *Model) refreshOpenOwnership(identity string, previous ownershipAttribut
 			break
 		}
 	}
-	if root == nil || sessionIdentity(root.session) != identity {
+	if root == nil || root.session.Path != path {
 		return
 	}
 	copyOwnershipAttribution(root.session, summary)
@@ -1093,7 +1109,6 @@ func copyOwnershipAttribution(target, source *model.Session) {
 
 type detailLoadedMsg struct {
 	generation uint64
-	identity   string
 	session    *model.Session
 	err        error
 }
@@ -1162,11 +1177,10 @@ func (m *Model) applyChildDetailLoaded(loaded childDetailLoadedMsg) (Model, tea.
 // loadDetail loads into a copy because the command runs off the update
 // goroutine while the list keeps reading the original.
 func loadDetail(ctx context.Context, registry *source.Registry, session *model.Session, generation uint64) tea.Cmd {
-	identity := sessionIdentity(session)
 	copy := cloneSession(session)
 	return func() tea.Msg {
 		err := registry.LoadNodeDetail(ctx, copy)
-		return detailLoadedMsg{generation: generation, identity: identity, session: copy, err: err}
+		return detailLoadedMsg{generation: generation, session: copy, err: err}
 	}
 }
 

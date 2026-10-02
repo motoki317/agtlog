@@ -3072,7 +3072,7 @@ func TestReplaceDetailTreePreservesReloadedChildState(t *testing.T) {
 
 		replacement := cloneSession(root)
 		replacement.Subagents[0].Events = nil
-		updated, cmd := m.Update(detailLoadedMsg{generation: 2, identity: sessionIdentity(root), session: replacement})
+		updated, cmd := m.Update(detailLoadedMsg{generation: 2, session: replacement})
 		m = updated.(Model)
 		updated, _ = m.Update(cmd())
 		m = updated.(Model)
@@ -3095,7 +3095,7 @@ func TestReplaceDetailTreePreservesReloadedChildState(t *testing.T) {
 
 		replacement := cloneSession(root)
 		replacement.Subagents[0].Events = nil
-		updated, cmd := m.Update(detailLoadedMsg{generation: 2, identity: sessionIdentity(root), session: replacement})
+		updated, cmd := m.Update(detailLoadedMsg{generation: 2, session: replacement})
 		m = updated.(Model)
 		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
 		m = updated.(Model)
@@ -3141,7 +3141,7 @@ func TestReplaceDetailTreePreservesChildStateAcrossBurst(t *testing.T) {
 		m.detailGeneration = generation
 		replacement := cloneSession(root)
 		replacement.Subagents[0].Events = nil
-		updated, cmd := m.Update(detailLoadedMsg{generation: generation, identity: sessionIdentity(root), session: replacement})
+		updated, cmd := m.Update(detailLoadedMsg{generation: generation, session: replacement})
 		m = updated.(Model)
 		if generation == 3 {
 			updated, _ = m.Update(cmd())
@@ -3180,7 +3180,7 @@ func TestReplaceDetailTreeRebindsItemAfterChildLoad(t *testing.T) {
 
 	replacement := cloneSession(root)
 	replacement.Subagents[0].Events = nil
-	updated, cmd := m.Update(detailLoadedMsg{generation: 2, identity: sessionIdentity(root), session: replacement})
+	updated, cmd := m.Update(detailLoadedMsg{generation: 2, session: replacement})
 	m = updated.(Model)
 	if _, ok := m.detail.(*itemView); !ok || len(m.detailStack) != 2 || detailStateFromScreen(t, m.detailStack[1]).loadStatus != detailStatusLoading {
 		t.Fatalf("tree replacement dropped pending item: detail=%T stack=%d", m.detail, len(m.detailStack))
@@ -3232,7 +3232,7 @@ func TestReplaceDetailTreeLoadsNestedScreensInEitherOrder(t *testing.T) {
 			replacement := cloneSession(root)
 			replacement.Subagents[0].Events = nil
 			replacement.Subagents[0].Subagents[0].Events = nil
-			updated, cmd := m.Update(detailLoadedMsg{generation: 2, identity: sessionIdentity(root), session: replacement})
+			updated, cmd := m.Update(detailLoadedMsg{generation: 2, session: replacement})
 			m = updated.(Model)
 			if detailStateFromScreen(t, m.detailStack[1]).loadStatus != detailStatusLoading || detailStateFromScreen(t, m.detail).loadStatus != detailStatusLoading {
 				t.Fatal("tree replacement did not mark both nested child screens loading")
@@ -3291,7 +3291,7 @@ func TestDetailLoadPreservesSubagentSortInput(t *testing.T) {
 		{ID: "mike", Agent: model.AgentClaude, Title: "Mike"},
 	}
 
-	updated, _ := m.Update(detailLoadedMsg{generation: 1, identity: sessionIdentity(current), session: loaded})
+	updated, _ := m.Update(detailLoadedMsg{generation: 1, session: loaded})
 	m = updated.(Model)
 	detail = detailStateFromScreen(t, m.detail)
 	if detail.tab != tabOverview || detail.subagentColumnFocus != columnTitle || detail.subagentSort != (sortState{kind: columnTitle, active: true}) {
