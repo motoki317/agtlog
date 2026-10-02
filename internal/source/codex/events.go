@@ -420,19 +420,22 @@ func (p Parser) setCodexEventUsage(event *model.Event, usage model.Usage) {
 	}
 }
 
+// Two copies of a message stay separate when more than codexMirrorWindow events
+// lie between them.
+const codexMirrorWindow = 16
+
 func appendCodexMessage(session *model.Session, event model.Event, preferred bool, dedupText string, dedupTextByEvent map[int][32]byte) {
 	event.Text = codexElideEncrypted(model.CleanTimelineText(event.Text))
 	dedupKey := sha256.Sum256([]byte(model.CleanTimelineText(dedupText)))
 	if event.Text == "" {
 		return
 	}
-	// A 16-event window is the deduplication ceiling for mirrored message copies.
 	for index := range dedupTextByEvent {
-		if index < len(session.Events)-16 {
+		if index < len(session.Events)-codexMirrorWindow {
 			delete(dedupTextByEvent, index)
 		}
 	}
-	for index := len(session.Events) - 1; index >= 0 && index >= len(session.Events)-16; index-- {
+	for index := len(session.Events) - 1; index >= 0 && index >= len(session.Events)-codexMirrorWindow; index-- {
 		existing := session.Events[index]
 		if existing.Kind != event.Kind {
 			continue
