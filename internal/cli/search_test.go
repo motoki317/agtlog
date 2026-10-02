@@ -203,6 +203,25 @@ func TestSearchDefaultMatchReportsRuneRange(t *testing.T) {
 	}
 }
 
+func TestSearchASCIIPatternFoldsNonASCIILetters(t *testing.T) {
+	for _, test := range []struct {
+		pattern, text string
+		start, end    int
+	}{
+		{pattern: "kelvin", text: "x Kelvin", start: 2, end: 8},
+		{pattern: "mass", text: "MAſS", start: 0, end: 4},
+	} {
+		matcher, err := newTextMatcher(test.pattern, false, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		start, end, count, ok := matcher.find(test.text)
+		if !ok || start != test.start || end != test.end || count != 1 {
+			t.Fatalf("find(%q) for %q = %d:%d count %d found %t", test.text, test.pattern, start, end, count, ok)
+		}
+	}
+}
+
 func TestSearchRegexAndCaseSensitivity(t *testing.T) {
 	insensitive, err := newTextMatcher(`error [0-9]+`, true, false)
 	if err != nil {

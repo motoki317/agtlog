@@ -58,12 +58,13 @@ type searchableField struct {
 }
 
 type textMatcher struct {
-	pattern       string
-	patternRunes  []rune
-	patternASCII  string
-	asciiSkip     [256]int
-	regex         *regexp.Regexp
-	caseSensitive bool
+	pattern          string
+	patternRunes     []rune
+	patternASCII     string
+	asciiSkip        [256]int
+	foldsBeyondASCII bool
+	regex            *regexp.Regexp
+	caseSensitive    bool
 }
 
 func runSearch(ctx context.Context, args []string, help io.Writer, factory RegistryFactory) (any, string, error) {
@@ -529,6 +530,7 @@ func newTextMatcher(pattern string, regex, caseSensitive bool) (textMatcher, err
 			for index := 0; index+1 < len(matcher.patternASCII); index++ {
 				matcher.asciiSkip[matcher.patternASCII[index]] = len(matcher.patternASCII) - index - 1
 			}
+			matcher.foldsBeyondASCII = strings.ContainsAny(matcher.patternASCII, "ks")
 		}
 		return matcher, nil
 	}
@@ -567,7 +569,7 @@ func (matcher textMatcher) find(value string) (int, int, int, bool) {
 		}
 		return utf8.RuneCountInString(value[:first]), utf8.RuneCountInString(value[:first+len(matcher.pattern)]), strings.Count(value, matcher.pattern), true
 	}
-	if matcher.patternASCII != "" {
+	if matcher.patternASCII != "" && (!matcher.foldsBeyondASCII || !containsFoldOutlier(value)) {
 		first, count := matcher.findASCII(value)
 		if first < 0 {
 			return 0, 0, 0, false
@@ -604,6 +606,13 @@ func (matcher textMatcher) find(value string) (int, int, int, bool) {
 		return 0, 0, 0, false
 	}
 	return first, first + width, count, true
+}
+
+// containsFoldOutlier reports whether value contains U+212A KELVIN SIGN or U+017F
+// LATIN SMALL LETTER LONG S. They are the only non-ASCII runes that simple case
+// folding maps to an ASCII letter (k and s), and the byte-wise ASCII matcher misses them.
+func containsFoldOutlier(value string) bool {
+	return strings.Contains(value, "\u212A") || strings.Contains(value, "\u017F")
 }
 
 func equalFoldRune(left, right rune) bool {
