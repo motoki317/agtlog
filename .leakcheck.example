@@ -1,11 +1,12 @@
 # Copy this template to the gitignored `.leakcheck` file.
 #
-# internal/leakcheck scans tracked and untracked-but-not-ignored files for these
-# case-insensitive literal tokens. Add private product or service names that the
-# automatic environment inspection cannot discover. One-off extras can be passed
-# through AGTLOG_LEAKCHECK_EXTRA.
+# internal/leakcheck searches tracked files, and untracked files that Git does not ignore, for
+# each token below as a case-insensitive literal. List private product or service names that the
+# test cannot derive from the local environment. AGTLOG_LEAKCHECK_EXTRA adds comma- or
+# space-separated tokens for one run.
 #
-# One token per line; '#' starts a comment. Keep this template fictional.
+# Write one token per line. A line that starts with '#' is a comment. Keep this template
+# fictional.
 #
 # example-private-service
 # 111122223333
