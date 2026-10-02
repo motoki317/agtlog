@@ -1489,11 +1489,11 @@ func (d *detailState) eventForKey(key string) (model.Event, bool) {
 func (d *detailState) toolEventLines(event model.Event, indent int, key string) []detailLine {
 	padding := strings.Repeat(" ", indent)
 	expandable := detailHasBody(event)
-	summary := toolLine(event, d.isExpanded(key))
-	text := padding + foldMarker(expandable, d.isExpanded(key)) + " " + summary
+	expanded := expandable && d.isExpanded(key)
+	text := padding + foldMarker(expandable, expanded) + " " + toolLine(event, expanded)
 	label := glyphTool + " " + toolDisplayName(event.ToolName)
 	lines := []detailLine{{text: text, label: label, metrics: metricsText(eventMetricParts(event)), key: key, nowrap: true, expandable: expandable, role: detailTool, event: event}}
-	if !d.isExpanded(key) || event.Detail == nil {
+	if !expanded {
 		return lines
 	}
 	childPadding := strings.Repeat(" ", indent+2)

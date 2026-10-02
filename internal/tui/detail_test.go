@@ -5151,17 +5151,38 @@ func TestToolHeaderPreviewReflectsVisibleInputBody(t *testing.T) {
 	}
 }
 
-func TestFileToolWithoutRenderedBodyIsNotExpandable(t *testing.T) {
-	event := model.Event{
-		Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/route.go",
-		Detail: &model.ToolDetail{Input: "{\n  \"path\": \"/workspace/route.go\"\n}"},
-	}
-	detail := &detailState{expanded: make(map[string]bool), defaultExpanded: true}
+func TestToolWithoutRenderedBodyIsNotExpandable(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		event  model.Event
+		header string
+	}{
+		{
+			name: "file tool with multiline input",
+			event: model.Event{
+				Kind: model.EventToolCall, ToolName: "Read", ToolInput: "/workspace/route.go",
+				Detail: &model.ToolDetail{Input: "{\n  \"path\": \"/workspace/route.go\"\n}"},
+			},
+			header: glyphTool + " Read(/workspace/route.go)",
+		},
+		{
+			name: "shell tool with single-line input",
+			event: model.Event{
+				Kind: model.EventToolCall, ToolName: "Bash", ToolInput: "mkdir -p route",
+				Detail: &model.ToolDetail{Input: "mkdir -p route"},
+			},
+			header: glyphTool + " Bash(mkdir -p route)",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			detail := &detailState{expanded: make(map[string]bool), defaultExpanded: true}
 
-	lines := detail.toolEventLines(event, 0, "read")
+			lines := detail.toolEventLines(test.event, 0, "tool")
 
-	if len(lines) != 1 || lines[0].expandable || !strings.Contains(lines[0].text, glyphTool+" Read(/workspace/route.go)") {
-		t.Errorf("file tool without rendered body = %#v, want one non-expandable header with preview", lines)
+			if len(lines) != 1 || lines[0].expandable || !strings.Contains(lines[0].text, test.header) {
+				t.Errorf("tool without rendered body = %q, want one non-expandable header with %q", timelineLineTexts(lines), test.header)
+			}
+		})
 	}
 }
 
