@@ -40,6 +40,24 @@ func TestReadRecordReportsChangedSource(t *testing.T) {
 	}
 }
 
+func TestReadRecordReportsTruncatedSourceAsChanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	first := []byte(`{"message":"first"}`)
+	second := []byte(`{"message":"second"}`)
+	if err := os.WriteFile(path, []byte(string(first)+"\n"+string(second)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ref := model.RecordRef{Path: path, Offset: int64(len(first) + 1), Length: int64(len(second)), Digest: sha256.Sum256(second)}
+	if err := os.Truncate(path, int64(len(first)+1)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := source.ReadRecord(context.Background(), ref)
+	if !errors.Is(err, source.ErrRecordChanged) {
+		t.Fatalf("ReadRecord() error = %v, want ErrRecordChanged", err)
+	}
+}
+
 func TestReadRecordRejectsSymlink(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target.jsonl")

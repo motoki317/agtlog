@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -53,6 +54,9 @@ func ReadRecord(ctx context.Context, ref model.RecordRef) ([]byte, error) {
 	}
 	record := make([]byte, int(ref.Length))
 	if _, err := file.ReadAt(record, ref.Offset); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, ErrRecordChanged
+		}
 		return nil, fmt.Errorf("%w: %v", ErrRecordRead, err)
 	}
 	if err := ctx.Err(); err != nil {
