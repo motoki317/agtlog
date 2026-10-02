@@ -208,8 +208,9 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, key 
 		if event.Model != "" {
 			label = "advisor(" + terminalText(shortModelName(event.Model), 96) + ")"
 		}
-		text := foldMarker(false, false) + " " + glyphSubagent + " " + label
-		return []detailLine{{text: text, metrics: metricsText(eventMetricParts(event)), key: key, nowrap: true, role: detailAccent, event: event}}
+		label = glyphSubagent + " " + label
+		text := foldMarker(false, false) + " " + label
+		return []detailLine{{text: text, label: label, metrics: metricsText(eventMetricParts(event)), key: key, nowrap: true, role: detailAccent, event: event}}
 	case model.EventCompact:
 		text := foldMarker(false, false) + " " + glyphSecondary + " " + compactTitle(event.CompactTrigger)
 		if event.CompactPostTokens > 0 {

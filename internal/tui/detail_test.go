@@ -2091,6 +2091,35 @@ func TestRoleLabelsCarryDistinctIdentityColors(t *testing.T) {
 	}
 }
 
+func TestSubagentAndAdvisorRowsWithMetricsColorTheirLabel(t *testing.T) {
+	profile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
+	styleSet := newStyles(themes["default"])
+	usage := &model.Usage{InputTokens: 1200, OutputTokens: 300}
+	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout the ridge", Events: []model.Event{{Kind: model.EventUser, Text: "Scout"}}}
+	for _, test := range []struct {
+		name  string
+		event model.Event
+		label string
+	}{
+		{name: "task", event: model.Event{Kind: model.EventSubagent, ToolInput: "Scout the ridge", Subagent: child}, label: glyphSubagent + " Task"},
+		{name: "advisor", event: model.Event{Kind: model.EventAdvisor, Model: "claude-opus-4-1", Usage: usage}, label: glyphSubagent + " advisor(" + shortModelName("claude-opus-4-1") + ")"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			detail := newDetailState(&model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{test.event}}, 100, 12, styleSet)
+			line := detail.lines[0]
+			if line.metrics == "" {
+				t.Fatalf("fixture row %q has no metrics", line.text)
+			}
+			got := detail.styleLine(detail.rendered[0].text, line, false, true)
+			if want := styleSet.accent.Render(test.label); !strings.Contains(got, want) {
+				t.Fatalf("styled row = %q, want accent label %q", got, want)
+			}
+		})
+	}
+}
+
 func TestUserPromptLabelsHarnessAndHumanTurns(t *testing.T) {
 	detail := &detailState{}
 	for _, test := range []struct {
