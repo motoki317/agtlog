@@ -195,30 +195,44 @@ type rateCosts struct {
 	multiplier   float64
 }
 
-func rateCostsFor(usage model.Usage, pricing Pricing) rateCosts {
-	cacheWrite := pricing.Input * 1.25
+type pricingTerms struct {
+	cacheWriteRate float64
+	cacheReadRate  float64
+	inputTokens    int64
+	multiplier     float64
+}
+
+func pricingTermsFor(usage model.Usage, pricing Pricing) pricingTerms {
+	terms := pricingTerms{
+		cacheWriteRate: pricing.Input * 1.25,
+		cacheReadRate:  pricing.Input * 0.1,
+		inputTokens:    usage.InputTokens,
+		multiplier:     1,
+	}
 	if pricing.CacheWrite != nil {
-		cacheWrite = *pricing.CacheWrite
+		terms.cacheWriteRate = *pricing.CacheWrite
 	}
-	cacheRead := pricing.Input * 0.1
 	if pricing.CacheRead != nil {
-		cacheRead = *pricing.CacheRead
+		terms.cacheReadRate = *pricing.CacheRead
 	}
-	inputTokens := usage.InputTokens
 	if usage.InputIncludesCacheRead {
-		inputTokens = max(0, inputTokens-usage.CacheReadTokens)
+		terms.inputTokens = max(0, usage.InputTokens-usage.CacheReadTokens)
 	}
-	multiplier := 1.0
 	if usage.Speed == "fast" && pricing.ProviderSpecificEntry.Fast != 0 {
-		multiplier = pricing.ProviderSpecificEntry.Fast
+		terms.multiplier = pricing.ProviderSpecificEntry.Fast
 	}
+	return terms
+}
+
+func rateCostsFor(usage model.Usage, pricing Pricing) rateCosts {
+	terms := pricingTermsFor(usage, pricing)
 	return rateCosts{
-		input:        priceTokens(inputTokens, pricing.Input, pricing.InputAbove200K, pricing.InputAbove272K),
+		input:        priceTokens(terms.inputTokens, pricing.Input, pricing.InputAbove200K, pricing.InputAbove272K),
 		output:       priceTokens(usage.OutputTokens, pricing.Output, pricing.OutputAbove200K, pricing.OutputAbove272K),
-		cacheWrite5m: priceTokens(usage.CacheCreation5mTokens, cacheWrite, pricing.CacheWriteAbove200K, pricing.CacheWriteAbove272K),
-		cacheRead:    priceTokens(usage.CacheReadTokens, cacheRead, pricing.CacheReadAbove200K, pricing.CacheReadAbove272K),
+		cacheWrite5m: priceTokens(usage.CacheCreation5mTokens, terms.cacheWriteRate, pricing.CacheWriteAbove200K, pricing.CacheWriteAbove272K),
+		cacheRead:    priceTokens(usage.CacheReadTokens, terms.cacheReadRate, pricing.CacheReadAbove200K, pricing.CacheReadAbove272K),
 		cacheWrite1h: priceTokens(usage.CacheCreation1hTokens, pricing.Input*2, doubled(pricing.InputAbove200K), doubled(pricing.InputAbove272K)),
-		multiplier:   multiplier,
+		multiplier:   terms.multiplier,
 	}
 }
 
@@ -232,36 +246,21 @@ func (r rateCosts) total() float64 {
 }
 
 func bucketBreakdownFor(usage model.Usage, pricing Pricing) model.CostBreakdown {
-	cacheWrite := pricing.Input * 1.25
-	if pricing.CacheWrite != nil {
-		cacheWrite = *pricing.CacheWrite
-	}
-	cacheRead := pricing.Input * 0.1
-	if pricing.CacheRead != nil {
-		cacheRead = *pricing.CacheRead
-	}
-	inputTokens := usage.InputTokens
-	if usage.InputIncludesCacheRead {
-		inputTokens = max(0, inputTokens-usage.CacheReadTokens)
-	}
-	multiplier := 1.0
-	if usage.Speed == "fast" && pricing.ProviderSpecificEntry.Fast != 0 {
-		multiplier = pricing.ProviderSpecificEntry.Fast
-	}
+	terms := pricingTermsFor(usage, pricing)
 	cacheWrite5mBase, cacheWrite5mAbove := priceTokenBucketTiers(
-		usage.CacheCreation5mTokens, cacheWrite, pricing.CacheWriteAbove200K, pricing.CacheWriteAbove272K, multiplier,
+		usage.CacheCreation5mTokens, terms.cacheWriteRate, pricing.CacheWriteAbove200K, pricing.CacheWriteAbove272K, terms.multiplier,
 	)
 	cacheWrite1hBase, cacheWrite1hAbove := priceTokenBucketTiers(
-		usage.CacheCreation1hTokens, pricing.Input*2, doubled(pricing.InputAbove200K), doubled(pricing.InputAbove272K), multiplier,
+		usage.CacheCreation1hTokens, pricing.Input*2, doubled(pricing.InputAbove200K), doubled(pricing.InputAbove272K), terms.multiplier,
 	)
 	cacheWriteBuckets := cacheWrite5mBase.Add(cacheWrite1hBase)
 	cacheWriteBuckets = cacheWriteBuckets.Add(cacheWrite5mAbove)
 	cacheWriteBuckets = cacheWriteBuckets.Add(cacheWrite1hAbove)
 	return model.CostBreakdown{
-		Input:      priceTokenBuckets(inputTokens, pricing.Input, pricing.InputAbove200K, pricing.InputAbove272K, multiplier),
-		Output:     priceTokenBuckets(usage.OutputTokens, pricing.Output, pricing.OutputAbove200K, pricing.OutputAbove272K, multiplier),
+		Input:      priceTokenBuckets(terms.inputTokens, pricing.Input, pricing.InputAbove200K, pricing.InputAbove272K, terms.multiplier),
+		Output:     priceTokenBuckets(usage.OutputTokens, pricing.Output, pricing.OutputAbove200K, pricing.OutputAbove272K, terms.multiplier),
 		CacheWrite: cacheWriteBuckets,
-		CacheRead:  priceTokenBuckets(usage.CacheReadTokens, cacheRead, pricing.CacheReadAbove200K, pricing.CacheReadAbove272K, multiplier),
+		CacheRead:  priceTokenBuckets(usage.CacheReadTokens, terms.cacheReadRate, pricing.CacheReadAbove200K, pricing.CacheReadAbove272K, terms.multiplier),
 	}
 }
 
@@ -274,12 +273,7 @@ func priceTokenBucketTiers(tokens int64, base float64, above200K, above272K *flo
 	if tokens <= 0 {
 		return nil, nil
 	}
-	threshold := int64(200_000)
-	above := above200K
-	if above == nil && above272K != nil {
-		threshold = 272_000
-		above = above272K
-	}
+	threshold, above := marginalTier(above200K, above272K)
 	if above == nil || tokens <= threshold {
 		return model.CostBuckets{{RatePerToken: base * multiplier, Tokens: tokens}}, nil
 	}
@@ -288,16 +282,18 @@ func priceTokenBucketTiers(tokens int64, base float64, above200K, above272K *flo
 }
 
 func priceTokens(tokens int64, base float64, above200K, above272K *float64) float64 {
-	threshold := int64(200_000)
-	above := above200K
-	if above == nil && above272K != nil {
-		threshold = 272_000
-		above = above272K
-	}
+	threshold, above := marginalTier(above200K, above272K)
 	if above == nil || tokens <= threshold {
 		return float64(tokens) * base
 	}
 	return float64(threshold)*base + float64(tokens-threshold)**above
+}
+
+func marginalTier(above200K, above272K *float64) (int64, *float64) {
+	if above200K == nil && above272K != nil {
+		return 272_000, above272K
+	}
+	return 200_000, above200K
 }
 
 func doubled(rate *float64) *float64 {
