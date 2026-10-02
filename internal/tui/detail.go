@@ -2023,21 +2023,8 @@ const headerFieldSep = " │ "
 func (d *detailState) headerPanelLines() []panelLine {
 	session := d.session
 	totalCost := session.OwnedCost()
-	ownCost := session.Cost
-	ownCost.USD -= session.DuplicatedUSD
-	subagentCost := model.Cost{}
-	missing := make(map[string]bool)
-	for _, subagent := range session.Subagents {
-		cost := subagent.OwnedCost()
-		subagentCost.USD += cost.USD
-		subagentCost.Estimated = subagentCost.Estimated || cost.Estimated
-		for _, name := range cost.MissingPricingModels {
-			if !missing[name] {
-				subagentCost.MissingPricingModels = append(subagentCost.MissingPricingModels, name)
-				missing[name] = true
-			}
-		}
-	}
+	ownCost := session.OwnedSelfCost()
+	subagentCost := session.OwnedDescendantCost()
 	innerWidth := max(0, d.width-2)
 	line1 := firstLine(session.Title)
 
