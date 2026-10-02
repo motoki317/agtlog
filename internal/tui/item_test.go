@@ -1138,6 +1138,34 @@ func TestItemViewScrollsWithStepAndEdgeKeys(t *testing.T) {
 	}
 }
 
+func TestItemKeyBarFollowsDetailKeyBarRules(t *testing.T) {
+	event := model.Event{Kind: model.EventThinking, Text: "Chart route"}
+	keyBar := func(item *itemView) string {
+		lines := strings.Split(ansi.Strip(item.view()), "\n")
+		return lines[len(lines)-1]
+	}
+
+	item := newItemView(event, model.AgentClaude, nil, 160, 8, newStyles(themes["default"]))
+	if !item.wrap {
+		t.Fatal("fixture item did not start wrapped")
+	}
+	bar := keyBar(item)
+	for _, want := range []string{"w nowrap", "t theme", "? help", "q quit"} {
+		if !strings.Contains(bar, want) {
+			t.Errorf("wrapped item key bar missing %q: %q", want, bar)
+		}
+	}
+	item.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'w'}})
+	if bar := keyBar(item); !strings.Contains(bar, "w wrap") || strings.Contains(bar, "w nowrap") {
+		t.Errorf("unwrapped item key bar = %q, want the w wrap hint", bar)
+	}
+
+	mono := newItemView(event, model.AgentClaude, nil, 160, 8, newStyles(Theme{Name: "mono"}))
+	if bar := keyBar(mono); strings.Contains(bar, "t theme") || !strings.Contains(bar, "? help") {
+		t.Errorf("mono item key bar = %q, want help without the inert theme hint", bar)
+	}
+}
+
 func TestItemViewWrapToggleRebuildsFlatPlainRows(t *testing.T) {
 	text := strings.Repeat("charted route ", 12)
 	item := newItemView(model.Event{Kind: model.EventAssistantText, Text: text}, model.AgentClaude, nil, 24, 8, newStyles())

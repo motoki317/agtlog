@@ -45,4 +45,4 @@
 │    ]                                                                         │
 │  }                                                                           │
 ╰──────────────────────────────────────────────────────────────────────── 1/46 ╯
-j/k scroll   w wrap   T time   esc back   wheel scroll
+j/k scroll   w nowrap   T time   esc back   wheel scroll   ? help   q quit

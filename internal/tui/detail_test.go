@@ -2603,7 +2603,7 @@ func TestWideKeyBarsAdvertiseMouse(t *testing.T) {
 	if keyBar := detailKeyText(160, false, tabOverview, true); !strings.Contains(keyBar, "mouse scroll/click") {
 		t.Fatalf("wide Overview key bar missing mouse hint: %q", keyBar)
 	}
-	if keyBar := itemKeyText(160); !strings.Contains(keyBar, "wheel scroll") {
+	if keyBar := itemKeyText(160, false, true); !strings.Contains(keyBar, "wheel scroll") {
 		t.Fatalf("wide item key bar missing mouse hint: %q", keyBar)
 	}
 }

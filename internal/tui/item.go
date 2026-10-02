@@ -199,7 +199,7 @@ func (i *itemView) view() string {
 	if panelHeight == i.height {
 		return panel
 	}
-	keyBar := i.styles.keyHint.Render(fitPlain(itemKeyText(i.width), i.width, false))
+	keyBar := i.styles.keyHint.Render(fitPlain(itemKeyText(i.width, i.styles.mono, i.wrap), i.width, false))
 	return panel + "\n" + keyBar
 }
 
@@ -662,7 +662,19 @@ func itemLabel(event model.Event, agent model.AgentKind) string {
 	}
 }
 
-func itemKeyText(width int) string {
+// itemKeyText keeps the rules of detailKeyText: the wrap hint names the mode
+// that w switches to, mono hides the inert theme hint, and shared hints drop in
+// the same order.
+func itemKeyText(width int, mono, wrap bool) string {
+	wrapHint := "w wrap"
+	if wrap {
+		wrapHint = "w nowrap"
+	}
 	timeHint := timeFormatKey + " time"
-	return fitKeyHints(width, []string{"j/k scroll", "w wrap", timeHint, "esc back", "wheel scroll"}, []string{"wheel scroll", "j/k scroll", "w wrap", timeHint})
+	hints := []string{"j/k scroll", wrapHint, timeHint, "esc back", "wheel scroll"}
+	if !mono {
+		hints = append(hints, "t theme")
+	}
+	hints = append(hints, "? help", "q quit")
+	return fitKeyHints(width, hints, []string{"wheel scroll", "t theme", "? help", "j/k scroll", wrapHint, "q quit", timeHint})
 }
