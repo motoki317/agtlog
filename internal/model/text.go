@@ -6,6 +6,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 const maxTitleRunes = 96
@@ -175,6 +177,38 @@ func BoundedDetailText(value string, limits ...int) string {
 		seen++
 	}
 	return value[:headByte] + "…" + value[tailByte:]
+}
+
+// TerminalText makes log text safe to print. It strips ANSI escape sequences
+// first, because a sequence whose ESC became a space prints its tail, for
+// example "[31m", as text. Then every other control or Unicode format (Cf)
+// character becomes a space, so the text cannot move the cursor or reorder
+// bidirectional text.
+func TerminalText(value string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			return ' '
+		}
+		return r
+	}, ansi.Strip(value))
+}
+
+// TerminalLine returns TerminalText of the first maxRunes runes of value, with
+// each whitespace run collapsed to one space. The cap applies to the input, so
+// the cost stays bounded for event text of any length. A sequence cut at the
+// cap leaves no residue, because ansi.Strip drops an unterminated sequence. A
+// maxRunes of zero or less sets no cap.
+func TerminalLine(value string, maxRunes int) string {
+	if maxRunes > 0 {
+		for index := range value {
+			if maxRunes == 0 {
+				value = value[:index]
+				break
+			}
+			maxRunes--
+		}
+	}
+	return strings.Join(strings.Fields(TerminalText(value)), " ")
 }
 
 func ElideEncrypted(text string) string {

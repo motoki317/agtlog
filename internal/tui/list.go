@@ -229,13 +229,13 @@ func removeListColumn(columns []listColumn, kind listColumnKind) []listColumn {
 func sessionCellWithPresentation(session *model.Session, presentation sessionPresentation, now time.Time, column listColumn) string {
 	switch column.kind {
 	case columnAgent:
-		return terminalText(string(session.Agent), 32)
+		return model.TerminalLine(string(session.Agent), 32)
 	case columnProject:
-		return terminalText(session.Project, 96)
+		return model.TerminalLine(session.Project, 96)
 	case columnTitle:
-		return terminalText(session.Title, 160)
+		return model.TerminalLine(session.Title, 160)
 	case columnModel:
-		return terminalText(presentation.model, 96)
+		return model.TerminalLine(presentation.model, 96)
 	case columnAge:
 		if column.absoluteTime {
 			return formatDetailTime(session.UpdatedAt, sessionSpansMultipleDates(session))
@@ -420,25 +420,6 @@ func compactDollars(usd float64, maxWidth int) string {
 	return strings.Repeat("9", max(1, maxWidth))
 }
 
-// terminalText makes log text safe to print. Control and format characters
-// become spaces, so log content cannot inject escape sequences or
-// bidirectional overrides.
-func terminalText(value string, maxRunes int) string {
-	var output strings.Builder
-	count := 0
-	for _, r := range value {
-		if count >= maxRunes {
-			break
-		}
-		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
-			r = ' '
-		}
-		output.WriteRune(r)
-		count++
-	}
-	return strings.Join(strings.Fields(output.String()), " ")
-}
-
 func (m Model) listView() string {
 	layout := newListLayout(m.height, m.filtering)
 	if layout.compact {
@@ -538,7 +519,7 @@ func (m Model) sessionsPanel(height int) string {
 		plain := fitPlain("Session discovery failed.", innerWidth, false)
 		content = append(content, panelLine{plain: plain, styled: m.styles.warning.Render(plain)})
 		if rowCapacity > 1 {
-			plain = fitPlain(terminalText(m.discoveryErr.Error(), 160), innerWidth, false)
+			plain = fitPlain(model.TerminalLine(m.discoveryErr.Error(), 160), innerWidth, false)
 			content = append(content, panelLine{plain: plain, styled: m.styles.warning.Render(plain)})
 		}
 		if rowCapacity > 2 {
@@ -690,7 +671,7 @@ func (m Model) listSummary() string {
 		totalLabel += " partial"
 	}
 	state := fmt.Sprintf("%d sessions · %d projects · %s total · watching %d roots", len(m.visible), m.visibleProjects, totalLabel, m.watchedRootCount())
-	if query := terminalText(m.filter.Value(), 24); query != "" && !m.filtering {
+	if query := model.TerminalLine(m.filter.Value(), 24); query != "" && !m.filtering {
 		state += " · /" + query
 	}
 	if m.sortState.active {
@@ -793,7 +774,9 @@ func panelRuleLabel(rule string, label panelLabel, width int, right bool, styles
 	if label.plain == "" || width < 4 {
 		return styles.border.Render(strings.Repeat(rule, width))
 	}
-	plain := ansi.Truncate(panelLabelText(label.plain, 256), max(1, width-3), "…")
+	// Not model.TerminalLine: the detail tab label separates its tabs with two
+	// spaces, and the styled label applies only while plain is unchanged.
+	plain := ansi.Truncate(strings.TrimSpace(model.TerminalText(label.plain)), max(1, width-3), "…")
 	styled := styles.title.Render(plain)
 	if plain == label.plain && label.styled != "" {
 		styled = label.styled
@@ -805,22 +788,6 @@ func panelRuleLabel(rule string, label panelLabel, width int, right bool, styles
 		return styles.border.Render(strings.Repeat(rule, remaining)) + decoratedStyled
 	}
 	return styles.border.Render(rule) + decoratedStyled + styles.border.Render(strings.Repeat(rule, max(0, remaining-1)))
-}
-
-func panelLabelText(value string, maxRunes int) string {
-	var output strings.Builder
-	count := 0
-	for _, char := range ansi.Strip(value) {
-		if count >= maxRunes {
-			break
-		}
-		if unicode.IsControl(char) || unicode.In(char, unicode.Cf) {
-			char = ' '
-		}
-		output.WriteRune(char)
-		count++
-	}
-	return strings.TrimSpace(output.String())
 }
 
 func fitPlain(value string, width int, right bool) string {

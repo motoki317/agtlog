@@ -6,9 +6,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
-	"unicode"
 
-	"github.com/charmbracelet/x/ansi"
+	"github.com/motoki317/agtlog/internal/model"
 )
 
 var textNow = time.Now
@@ -37,7 +36,7 @@ func writeListText(output io.Writer, response ListResponse) error {
 			subs = fmt.Sprint(session.Subagents)
 		}
 		if _, err := fmt.Fprintf(table, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
-			terminalSafe(session.Ref), terminalSafe(session.Agent), terminalSafe(session.Project), terminalSafe(session.Title),
+			model.TerminalLine(session.Ref, 0), model.TerminalLine(session.Agent, 0), model.TerminalLine(session.Project, 0), model.TerminalLine(session.Title, 0),
 			textAge(session.UpdatedAt), session.Turns, subs, humanTokens(session.Tokens.Total), humanCost(session.Cost)); err != nil {
 			return err
 		}
@@ -54,22 +53,22 @@ func writeListText(output io.Writer, response ListResponse) error {
 
 func writeShowText(output io.Writer, response ShowResponse) error {
 	if _, err := fmt.Fprintf(output, "REF\t%s\nAGENT\t%s\nPROJECT\t%s\nTITLE\t%s\nTOKENS\t%s\nCOST\t%s\n",
-		terminalSafe(response.Session.Ref), terminalSafe(response.Session.Agent), terminalSafe(response.Session.Project),
-		terminalSafe(response.Session.Title), humanTokens(response.Session.Tokens.Total), humanCost(response.Session.Cost)); err != nil {
+		model.TerminalLine(response.Session.Ref, 0), model.TerminalLine(response.Session.Agent, 0), model.TerminalLine(response.Session.Project, 0),
+		model.TerminalLine(response.Session.Title, 0), humanTokens(response.Session.Tokens.Total), humanCost(response.Session.Cost)); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintf(output, "TURNS\t%d\tself=%d\tdescendants=%d\n", response.Totals.Turns.Total, response.Totals.Turns.Self, response.Totals.Turns.Descendants); err != nil {
 		return err
 	}
 	for _, ref := range response.SubagentRefs {
-		if _, err := fmt.Fprintf(output, "SUBAGENT\t%s\n", terminalSafe(ref)); err != nil {
+		if _, err := fmt.Fprintf(output, "SUBAGENT\t%s\n", model.TerminalLine(ref, 0)); err != nil {
 			return err
 		}
 	}
 	for _, event := range response.Events {
-		text := terminalSafe(event.Text)
+		text := model.TerminalLine(event.Text, 0)
 		if event.Tool != nil && event.Tool.Summary != "" {
-			text += " -> " + terminalSafe(event.Tool.Summary)
+			text += " -> " + model.TerminalLine(event.Tool.Summary, 0)
 		}
 		var metrics []string
 		if event.Tool != nil && event.Tool.DurationMS > 0 {
@@ -81,7 +80,7 @@ func writeShowText(output io.Writer, response ShowResponse) error {
 		if len(metrics) > 0 {
 			text += "  " + strings.Join(metrics, "  ")
 		}
-		if _, err := fmt.Fprintf(output, "[%d]\t%s\t%s\t%s\n", event.Index, textClock(event.Timestamp), terminalSafe(event.Kind), text); err != nil {
+		if _, err := fmt.Fprintf(output, "[%d]\t%s\t%s\t%s\n", event.Index, textClock(event.Timestamp), model.TerminalLine(event.Kind, 0), text); err != nil {
 			return err
 		}
 	}
@@ -99,8 +98,8 @@ func writeSearchText(output io.Writer, response SearchResponse) error {
 	}
 	for _, hit := range response.Hits {
 		if _, err := fmt.Fprintf(table, "%s\t%d\t%s\t%s\t%d:%d\t%d\t%s\n",
-			terminalSafe(hit.Session.Ref), hit.Event.Index, terminalSafe(hit.Event.Kind), terminalSafe(hit.Field),
-			hit.Range[0], hit.Range[1], hit.Matches, terminalSafe(hit.Snippet)); err != nil {
+			model.TerminalLine(hit.Session.Ref, 0), hit.Event.Index, model.TerminalLine(hit.Event.Kind, 0), model.TerminalLine(hit.Field, 0),
+			hit.Range[0], hit.Range[1], hit.Matches, model.TerminalLine(hit.Snippet, 0)); err != nil {
 			return err
 		}
 	}
@@ -125,23 +124,11 @@ func writeWarningText(output io.Writer, warnings []Warning) error {
 		if location == "" {
 			location = warning.Path
 		}
-		if _, err := fmt.Fprintf(output, "WARNING\t%s\t%s\t%s\n", terminalSafe(warning.Code), terminalSafe(location), terminalSafe(warning.Message)); err != nil {
+		if _, err := fmt.Fprintf(output, "WARNING\t%s\t%s\t%s\n", model.TerminalLine(warning.Code, 0), model.TerminalLine(location, 0), model.TerminalLine(warning.Message, 0)); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-func terminalSafe(value string) string {
-	value = ansi.Strip(value)
-	var sanitized strings.Builder
-	for _, r := range value {
-		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
-			r = ' '
-		}
-		sanitized.WriteRune(r)
-	}
-	return strings.Join(strings.Fields(sanitized.String()), " ")
 }
 
 func textAge(value string) string {

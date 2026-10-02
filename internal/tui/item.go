@@ -211,10 +211,10 @@ func (i *itemView) panelHeight() int {
 }
 
 func (i *itemView) title() string {
-	label := terminalText(itemLabel(i.event, i.agent), 96)
+	label := model.TerminalLine(itemLabel(i.event, i.agent), 96)
 	parts := make([]string, 0, len(i.crumbs)+1)
 	for _, crumb := range i.crumbs {
-		if crumb := terminalText(crumb, 96); crumb != "" {
+		if crumb := model.TerminalLine(crumb, 96); crumb != "" {
 			parts = append(parts, crumb)
 		}
 	}
@@ -303,7 +303,7 @@ func itemMetadataLines(event model.Event, now time.Time, agent model.AgentKind) 
 			continue
 		}
 		lines = append(lines, detailLine{
-			text: detailPlainText(fmt.Sprintf("%-*s  %s", labelWidth, field.label, field.value)),
+			text: model.TerminalText(fmt.Sprintf("%-*s  %s", labelWidth, field.label, field.value)),
 			role: detailRow, agent: agent,
 		})
 	}
@@ -318,17 +318,17 @@ func itemRequestLines(event model.Event, agent model.AgentKind) []detailLine {
 	if event.Usage.TotalTokens() > 0 {
 		tokenLine += " · ctx " + humanTokens(event.Usage.TotalTokens())
 	}
-	lines := []detailLine{{text: detailPlainText(tokenLine), role: detailRow, agent: agent}}
+	lines := []detailLine{{text: model.TerminalText(tokenLine), role: detailRow, agent: agent}}
 	if event.PricingModel != "" {
 		lines = append(lines, detailLine{
-			text: detailPlainText(fmt.Sprintf("rate  priced as %s — no published rate for %s",
+			text: model.TerminalText(fmt.Sprintf("rate  priced as %s — no published rate for %s",
 				displayModelName(event.PricingModel), displayModelName(event.Model))),
 			role: detailRow, agent: agent,
 		})
 	}
 	if !event.Priced || !validCostBreakdown(event.Cost) {
 		return append(lines, detailLine{
-			text: detailPlainText("price unavailable for " + displayModelName(event.Model)),
+			text: model.TerminalText("price unavailable for " + displayModelName(event.Model)),
 			role: detailRow, agent: agent,
 		})
 	}
@@ -338,13 +338,13 @@ func itemRequestLines(event model.Event, agent model.AgentKind) []detailLine {
 			continue
 		}
 		lines = append(lines, detailLine{
-			text: detailPlainText(fmt.Sprintf("  %-12s %-*s = %s",
+			text: model.TerminalText(fmt.Sprintf("  %-12s %-*s = %s",
 				group.label, termsWidth, group.terms, formatPreciseCost(group.buckets.Cost(), event.CostEstimated))),
 			role: detailRow, agent: agent,
 		})
 	}
 	lines = append(lines, detailLine{
-		text: detailPlainText(fmt.Sprintf("  %-12s %-*s = %s",
+		text: model.TerminalText(fmt.Sprintf("  %-12s %-*s = %s",
 			"total", termsWidth, "", formatPreciseCost(event.Cost.Total(), event.CostEstimated))),
 		role: detailRow, agent: agent,
 	})
@@ -562,7 +562,7 @@ func itemEventLines(event model.Event, agent model.AgentKind) []detailLine {
 		}
 		lines = append(lines, detailLine{text: "Diff", role: detailHeader, agent: agent})
 		for _, text := range strings.Split(diff, "\n") {
-			plain := detailPlainText(text)
+			plain := model.TerminalText(text)
 			role := detailDiffContext
 			if strings.HasPrefix(plain, "+") {
 				role = detailDiffAdd
@@ -628,7 +628,7 @@ func itemTextLines(text string, role detailRole, agent model.AgentKind) []detail
 	lines := strings.Split(text, "\n")
 	result := make([]detailLine, len(lines))
 	for index, line := range lines {
-		result[index] = detailLine{text: detailPlainText(line), role: role, agent: agent}
+		result[index] = detailLine{text: model.TerminalText(line), role: role, agent: agent}
 	}
 	return result
 }
@@ -644,7 +644,7 @@ func itemLabel(event model.Event, agent model.AgentKind) string {
 		return "User"
 	case model.EventAssistantText:
 		if agent != "" {
-			return terminalText(string(agent), 32) + " message"
+			return model.TerminalLine(string(agent), 32) + " message"
 		}
 		return "Assistant"
 	case model.EventThinking:

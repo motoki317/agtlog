@@ -12,10 +12,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"sync/atomic"
-	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
@@ -45,7 +43,7 @@ func main() {
 		if status, ok := machinecli.ExitStatus(err); ok {
 			os.Exit(status)
 		}
-		fmt.Fprintf(os.Stderr, "agtlog: %s\n", terminalField(err.Error(), 512))
+		fmt.Fprintf(os.Stderr, "agtlog: %s\n", model.TerminalLine(err.Error(), 512))
 		os.Exit(1)
 	}
 }
@@ -489,20 +487,4 @@ func runBubbleTea(ctx context.Context, input io.Reader, output io.Writer, initia
 
 func newBubbleTeaProgram(ctx context.Context, input io.Reader, output io.Writer, initial tea.Model) *tea.Program {
 	return tea.NewProgram(initial, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx), tea.WithInput(input), tea.WithOutput(output))
-}
-
-func terminalField(value string, maxRunes int) string {
-	var sanitized strings.Builder
-	count := 0
-	for _, r := range value {
-		if count >= maxRunes {
-			break
-		}
-		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
-			r = ' '
-		}
-		sanitized.WriteRune(r)
-		count++
-	}
-	return strings.Join(strings.Fields(sanitized.String()), " ")
 }

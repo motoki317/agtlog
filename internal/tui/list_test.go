@@ -596,6 +596,15 @@ func (s *refreshTestSource) ParseContext(_ context.Context, path string) (*model
 }
 func (s *refreshTestSource) Reprice(*model.Session) {}
 
+func TestListRowStripsEscapeSequencesFromTitle(t *testing.T) {
+	m := NewModel([]*model.Session{{ID: "alert", Agent: model.AgentClaude, Project: "harbor", Title: "\x1b[31mRed\x1b[0m alert"}}, nil)
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 20})
+	view := ansi.Strip(updated.(Model).View())
+	if !strings.Contains(view, "Red alert") || strings.Contains(view, "[31m") || strings.Contains(view, "[0m") {
+		t.Fatalf("list row kept escape residue:\n%s", view)
+	}
+}
+
 func TestFilterNarrowsRowsByFuzzyTitle(t *testing.T) {
 	sessions := []*model.Session{
 		{ID: "lunar", Agent: model.AgentClaude, Project: "observatory", Title: "Map lunar craters"},

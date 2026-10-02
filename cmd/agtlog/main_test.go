@@ -23,13 +23,6 @@ import (
 	"github.com/motoki317/agtlog/internal/tui"
 )
 
-func TestTerminalFieldSanitizesDiagnostics(t *testing.T) {
-	got := terminalField("safe\u202ereversed\r\n\x1bforged", 200)
-	if strings.ContainsAny(got, "\r\n\x1b") || strings.ContainsRune(got, '\u202e') {
-		t.Fatalf("terminalField() emitted unsafe text %q", got)
-	}
-}
-
 func TestApplicationContextCancelsOnInterrupt(t *testing.T) {
 	signal.Ignore(os.Interrupt)
 	t.Cleanup(func() { signal.Reset(os.Interrupt) })
@@ -1252,6 +1245,18 @@ func TestBubbleTeaRunnerDegradesToStaticFrameOffTerminal(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "Plan the launch") || strings.Contains(output.String(), "\x1b[?1049h") {
 		t.Fatalf("non-terminal output = %q", output.String())
+	}
+}
+
+func TestStaticFrameStripsEscapeSequencesFromTitle(t *testing.T) {
+	session := &model.Session{ID: "session-a", Agent: model.AgentClaude, Title: "\x1b[31mRed\x1b[0m alert"}
+	var output bytes.Buffer
+
+	if err := runBubbleTea(context.Background(), strings.NewReader(""), &output, tui.NewModel([]*model.Session{session}, nil), nil); err != nil {
+		t.Fatalf("runBubbleTea() error = %v", err)
+	}
+	if !strings.Contains(output.String(), "Red alert") || strings.Contains(output.String(), "[31m") || strings.Contains(output.String(), "[0m") {
+		t.Fatalf("static frame kept escape residue:\n%s", output.String())
 	}
 }
 

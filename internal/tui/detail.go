@@ -219,7 +219,7 @@ func newDetailState(session *model.Session, width, height int, styles styles) *d
 
 func newDetailStateBase(session *model.Session, width, height int, styles styles) *detailState {
 	state := &detailState{session: session, expanded: make(map[string]bool), defaultExpanded: true, loadStatus: detailStatusLoaded, styles: styles, wrap: true, subagentTotal: subagentCount(session)}
-	if project := terminalText(session.Project, 96); project != "" {
+	if project := model.TerminalLine(session.Project, 96); project != "" {
 		state.crumbs = []string{project}
 	}
 	state.viewport = newViewport(max(1, width-2), max(1, height-8))
@@ -563,7 +563,7 @@ func (d *detailState) rebuild() {
 		d.subagents = nil
 		message := "detail unavailable"
 		if d.err != nil {
-			message = terminalText(d.err.Error(), 512)
+			message = model.TerminalLine(d.err.Error(), 512)
 		}
 		lines = []detailLine{{text: "detail error: " + message, role: detailWarning}}
 	} else if d.tab == tabOverview {
@@ -882,7 +882,7 @@ func (d *detailState) compactPanelLabel() panelLabel {
 	label := d.tabLabel()
 	plain, styled := label.plain, label.styled
 	if len(d.crumbs) > 0 {
-		crumbs := terminalText(strings.Join(d.crumbs, " › "), 256)
+		crumbs := model.TerminalLine(strings.Join(d.crumbs, " › "), 256)
 		plain += " · " + crumbs
 		styled += d.styles.title.Render(" · " + crumbs)
 	}
@@ -969,7 +969,7 @@ func (d *detailState) panelTitle(name string) string {
 	if len(d.crumbs) > 0 {
 		title += " · " + strings.Join(d.crumbs, " › ")
 	}
-	return ansi.Truncate(terminalText(title, 256), max(1, d.width-5), "…")
+	return ansi.Truncate(model.TerminalLine(title, 256), max(1, d.width-5), "…")
 }
 
 // headerFieldSep is a spaced vertical bar, which reads as a column boundary. A
@@ -985,10 +985,10 @@ func (d *detailState) headerPanelLines() []panelLine {
 	line1 := firstLine(session.Title)
 
 	line2Parts := make([]string, 0, 3)
-	if agent := terminalText(string(session.Agent), 32); agent != "" {
+	if agent := model.TerminalLine(string(session.Agent), 32); agent != "" {
 		line2Parts = append(line2Parts, agent)
 	}
-	project, cwd := terminalText(session.Project, 96), terminalText(session.CWD, 256)
+	project, cwd := model.TerminalLine(session.Project, 96), model.TerminalLine(session.CWD, 256)
 	workspaceIndex := -1
 	if project != "" && cwd != "" {
 		workspaceIndex = len(line2Parts)
@@ -998,7 +998,7 @@ func (d *detailState) headerPanelLines() []panelLine {
 	} else if cwd != "" {
 		line2Parts = append(line2Parts, cwd)
 	}
-	if models := terminalText(detailModels(session), 256); models != "" {
+	if models := model.TerminalLine(detailModels(session), 256); models != "" {
 		line2Parts = append(line2Parts, models)
 	}
 	if workspaceIndex >= 0 && ansi.StringWidth(strings.Join(line2Parts, headerFieldSep)) > innerWidth {
@@ -1007,7 +1007,7 @@ func (d *detailState) headerPanelLines() []panelLine {
 	line2 := strings.Join(line2Parts, headerFieldSep)
 
 	line3Parts := make([]string, 0, 3)
-	if branch := terminalText(session.GitBranch, 96); branch != "" {
+	if branch := model.TerminalLine(session.GitBranch, 96); branch != "" {
 		line3Parts = append(line3Parts, "branch "+branch)
 	}
 	started, updated := formatHeaderTime(session.StartedAt), formatHeaderTime(session.UpdatedAt)

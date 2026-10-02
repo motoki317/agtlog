@@ -137,7 +137,7 @@ func (d *detailState) userPromptLines(event model.Event, key string, context int
 		return lines
 	}
 	for _, line := range timelineBodyLines(event.Text) {
-		lines = append(lines, detailLine{text: timelineBodyIndent + detailPlainText(line), role: role})
+		lines = append(lines, detailLine{text: timelineBodyIndent + model.TerminalText(line), role: role})
 	}
 	return lines
 }
@@ -198,7 +198,7 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, key 
 		title = ansi.Truncate(title, 28, "…")
 		typeLabel := glyphSubagent + " " + toolName
 		text := childMarker + typeLabel + "(" + title + ")"
-		if model := terminalText(shortModels(event.Subagent), 96); model != "" {
+		if model := model.TerminalLine(shortModels(event.Subagent), 96); model != "" {
 			text += " " + model
 		}
 		metrics := humanTokens(event.Subagent.TotalUsage().TotalTokens()) + " · " + formatCost(event.Subagent.TotalCost())
@@ -206,7 +206,7 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, key 
 	case model.EventAdvisor:
 		label := "advisor"
 		if event.Model != "" {
-			label = "advisor(" + terminalText(shortModelName(event.Model), 96) + ")"
+			label = "advisor(" + model.TerminalLine(shortModelName(event.Model), 96) + ")"
 		}
 		label = glyphSubagent + " " + label
 		text := foldMarker(false, false) + " " + label
@@ -222,7 +222,7 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, key 
 	case model.EventUsage:
 		title := firstLine(event.Text)
 		if event.Model != "" {
-			title += " (" + terminalText(shortModelName(event.Model), 96) + ")"
+			title += " (" + model.TerminalLine(shortModelName(event.Model), 96) + ")"
 		}
 		text := foldMarker(false, false) + " " + glyphSecondary + " " + title
 		return []detailLine{{text: text, metrics: metricsText(eventMetricParts(event)), key: key, nowrap: true, role: detailSystemPrompt, event: event}}
@@ -253,7 +253,7 @@ func (d *detailState) toolEventLines(event model.Event, key string) []detailLine
 	}
 	if event.Detail.Diff != "" {
 		for _, text := range timelineBodyLines(event.Detail.Diff) {
-			plain := detailPlainText(text)
+			plain := model.TerminalText(text)
 			role := detailDiffContext
 			if strings.HasPrefix(plain, "+") {
 				role = detailDiffAdd
@@ -272,7 +272,7 @@ func (d *detailState) toolEventLines(event model.Event, key string) []detailLine
 		}
 		lines = append(lines, detailLine{text: timelineBodyIndent + section.label, role: detailSecondary})
 		for _, text := range timelineBodyLines(section.text) {
-			lines = append(lines, detailLine{text: timelineBodyIndent + detailPlainText(text), role: detailRow})
+			lines = append(lines, detailLine{text: timelineBodyIndent + model.TerminalText(text), role: detailRow})
 		}
 	}
 	return lines
@@ -290,22 +290,13 @@ func detailInputBody(event model.Event) string {
 	}
 }
 
-func detailPlainText(text string) string {
-	return strings.Map(func(char rune) rune {
-		if unicode.IsControl(char) || unicode.In(char, unicode.Cf) {
-			return ' '
-		}
-		return char
-	}, ansi.Strip(text))
-}
-
 func detailHasBody(event model.Event) bool {
 	detail := event.Detail
 	return detail != nil && (detail.Diff != "" || detail.Output != "" || detailInputBody(event) != "" && strings.Contains(detail.Input, "\n"))
 }
 
 func (d *detailState) assistantTextLines(event model.Event, key string, agent model.AgentKind) []detailLine {
-	label := terminalText(string(agent), 32) + ":"
+	label := model.TerminalLine(string(agent), 32) + ":"
 	expandable := textExpandable(event.Text)
 	expanded := expandable && d.isExpanded(key)
 	text := foldMarker(expandable, expanded) + " " + label
@@ -319,7 +310,7 @@ func (d *detailState) assistantTextLines(event model.Event, key string, agent mo
 		return lines
 	}
 	for _, line := range timelineBodyLines(event.Text) {
-		lines = append(lines, detailLine{text: timelineBodyIndent + detailPlainText(line), role: detailAssistant})
+		lines = append(lines, detailLine{text: timelineBodyIndent + model.TerminalText(line), role: detailAssistant})
 	}
 	return lines
 }
@@ -342,7 +333,7 @@ func toolLine(event model.Event, expanded bool) string {
 }
 
 func toolDisplayName(name string) string {
-	name = terminalText(name, 96)
+	name = model.TerminalLine(name, 96)
 	if name == "exec_command" {
 		return "Bash"
 	}
@@ -361,7 +352,7 @@ func formatDuration(duration time.Duration) string {
 
 func firstLine(text string) string {
 	for _, line := range strings.Split(text, "\n") {
-		if line = terminalText(line, 512); line != "" {
+		if line = model.TerminalLine(line, 512); line != "" {
 			return line
 		}
 	}

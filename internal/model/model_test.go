@@ -449,6 +449,48 @@ func TestBoundedDetailTextKeepsBothEnds(t *testing.T) {
 	}
 }
 
+func TestTerminalTextStripsSequencesBeforeReplacingControls(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "color", value: "\x1b[31mred\x1b[0m", want: "red"},
+		{name: "hyperlink", value: "\x1b]8;;https://example.invalid\alink\x1b]8;;\a", want: "link"},
+		{name: "controls keep their position", value: "a\tb\r\nc", want: "a b  c"},
+		{name: "bidirectional override", value: "safe\u202ereversed", want: "safe reversed"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := TerminalText(test.value); got != test.want {
+				t.Fatalf("TerminalText(%q) = %q, want %q", test.value, got, test.want)
+			}
+		})
+	}
+}
+
+func TestTerminalLineCollapsesWhitespaceAndCapsInputRunes(t *testing.T) {
+	cases := []struct {
+		name     string
+		value    string
+		maxRunes int
+		want     string
+	}{
+		{name: "one line", value: "  \x1b[1mPlan\x1b[0m\n\troute  ", want: "Plan route"},
+		{name: "cap", value: "界界界界", maxRunes: 3, want: "界界界"},
+		{name: "sequence cut at the cap", value: "ab\x1b[31mcd", maxRunes: 5, want: "ab"},
+		{name: "hyperlink cut at the cap", value: "ab\x1b]8;;https://example.invalid\acd", maxRunes: 12, want: "ab"},
+		{name: "no trailing space at the cap", value: "ab  cd", maxRunes: 3, want: "ab"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			if got := TerminalLine(test.value, test.maxRunes); got != test.want {
+				t.Fatalf("TerminalLine(%q, %d) = %q, want %q", test.value, test.maxRunes, got, test.want)
+			}
+		})
+	}
+}
+
 func TestCleanTimelineTextRemovesEmbeddedHardNoise(t *testing.T) {
 	value := "Keep this line\n<system-reminder>hidden metadata</system-reminder>\nWarmup\nAnd this line"
 	if got := CleanTimelineText(value); got != "Keep this line\nAnd this line" {

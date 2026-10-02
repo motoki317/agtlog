@@ -106,7 +106,7 @@ func (d *detailState) overviewLines() []detailLine {
 		session := item.s
 		totalCost := session.TotalCost()
 		cost := formatCost(totalCost)
-		modelName := terminalText(shortModelsWithCost(session, totalCost), 96)
+		modelName := model.TerminalLine(shortModelsWithCost(session, totalCost), 96)
 		lines = append(lines, detailLine{text: subagentRow(item, d.now, columns, modelName, session.TotalTurns(), cost), nowrap: true, key: sessionIdentity(session), subagent: true, subagentSession: session, subagentCost: cost, role: detailRow, agent: session.Agent})
 	}
 	return lines
@@ -196,8 +196,8 @@ func requestCount(count int) string {
 }
 
 func duplicateOwnerLabel(owner model.DuplicateOwner) string {
-	title := firstLine(terminalText(owner.Title, 160))
-	id := terminalText(owner.SessionID, 96)
+	title := model.TerminalLine(owner.Title, 160)
+	id := model.TerminalLine(owner.SessionID, 96)
 	if title == "" {
 		if id != "" {
 			return id
@@ -211,7 +211,7 @@ func duplicateOwnerLabel(owner model.DuplicateOwner) string {
 }
 
 func overviewLine(text string, role detailRole) detailLine {
-	return detailLine{text: detailPlainText(text), role: role}
+	return detailLine{text: model.TerminalText(text), role: role}
 }
 
 type ownModelCost struct {
@@ -455,7 +455,7 @@ func subagentRow(item flattenedSubagent, now time.Time, columns []listColumn, mo
 		value := ""
 		switch column.kind {
 		case columnAgent:
-			value = terminalText(string(session.Agent), 32)
+			value = model.TerminalLine(string(session.Agent), 32)
 		case columnTitle:
 			value = subagentTitleCell(item, column.width)
 		case columnModel:
@@ -546,7 +546,7 @@ func (d *detailState) styleSubagentLine(line string, detail detailLine) string {
 		}
 		columnOffset = end + 1
 	}
-	agent := terminalText(string(session.Agent), 32)
+	agent := model.TerminalLine(string(session.Agent), 32)
 	if start := strings.Index(line, agent); start >= 0 {
 		cells = append(cells, styleCell{start: start, end: start + len(agent), style: d.agentStyle(session.Agent)})
 	}

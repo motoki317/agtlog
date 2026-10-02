@@ -35,7 +35,7 @@ func validCostBreakdown(breakdown model.CostBreakdown) bool {
 }
 
 func displayModelName(name string) string {
-	if name = terminalText(name, 96); name != "" {
+	if name = model.TerminalLine(name, 96); name != "" {
 		return name
 	}
 	return "unknown"

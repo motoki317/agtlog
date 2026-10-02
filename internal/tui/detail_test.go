@@ -3956,7 +3956,7 @@ func TestTimelineBodyLinesLongANSISequenceKeepsVisibleContent(t *testing.T) {
 
 	got := timelineBodyLines(text)
 	if !slices.Equal(got, want) {
-		t.Fatalf("timelineBodyLines() rendered %q, want visible content with trailing ellipsis", detailPlainText(strings.Join(got, "\n")))
+		t.Fatalf("timelineBodyLines() rendered %q, want visible content with trailing ellipsis", model.TerminalText(strings.Join(got, "\n")))
 	}
 }
 

@@ -203,7 +203,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.discoveryErr != nil {
 				m.discoveryErr = refreshed.err
 			}
-			m.status = "refresh: " + terminalText(refreshed.err.Error(), 160)
+			m.status = "refresh: " + model.TerminalLine(refreshed.err.Error(), 160)
 			return m, nil
 		}
 		open, isOpen := m.snapshotOpenDetail()
@@ -279,7 +279,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.discoveryTouched = nil
 			m.discoveryErr = update.DiscoveryErr
 			if update.DiscoveryErr != nil {
-				m.status = "discovery: " + terminalText(update.DiscoveryErr.Error(), 160)
+				m.status = "discovery: " + model.TerminalLine(update.DiscoveryErr.Error(), 160)
 				// No watcher runs after initial discovery fails.
 				m.watchingRoots = 0
 			}
@@ -635,7 +635,7 @@ func detailCrumbLabel(session *model.Session) string {
 	if title := firstLine(session.Title); title != "" {
 		return ansi.Truncate(title, 48, "…")
 	}
-	return terminalText(session.ID, 48)
+	return model.TerminalLine(session.ID, 48)
 }
 
 func subagentCrumbLabels(root, target *model.Session) []string {
@@ -680,7 +680,7 @@ func detailBreadcrumbs(root, target *model.Session) []string {
 		return nil
 	}
 	crumbs := make([]string, 0, len(path))
-	if project := terminalText(root.Project, 96); project != "" {
+	if project := model.TerminalLine(root.Project, 96); project != "" {
 		crumbs = append(crumbs, project)
 	}
 	for _, ancestor := range path[:len(path)-1] {
@@ -1329,7 +1329,7 @@ func (m *Model) applyFilter() {
 		}
 		candidates = append(candidates, session)
 	}
-	query := strings.ToLower(strings.TrimSpace(terminalText(m.filter.Value(), 128)))
+	query := strings.ToLower(strings.TrimSpace(model.TerminalLine(m.filter.Value(), 128)))
 	if query == "" {
 		m.visible = candidates
 		m.updateVisibleSummary()
@@ -1338,7 +1338,7 @@ func (m *Model) applyFilter() {
 	haystacks := make([]string, len(candidates))
 	for index, session := range candidates {
 		haystacks[index] = strings.ToLower(strings.Join([]string{
-			terminalText(string(session.Agent), 32), terminalText(session.Project, 96), terminalText(session.Title, 160),
+			model.TerminalLine(string(session.Agent), 32), model.TerminalLine(session.Project, 96), model.TerminalLine(session.Title, 160),
 		}, " "))
 	}
 	matches := fuzzy.FindNoSort(query, haystacks)
