@@ -72,8 +72,7 @@ func TestRepoFilesDoNotLeakLocalNames(t *testing.T) {
 func collectForbidden(root string) []string {
 	set := map[string]bool{}
 
-	var add func(string)
-	add = func(name string) {
+	add := func(name string) {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			return
