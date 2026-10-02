@@ -1667,6 +1667,24 @@ func TestLiveUpdateInvalidatesOlderRefreshResult(t *testing.T) {
 	}
 }
 
+func TestLiveUpdateThatSupersedesRefreshClearsRefreshingStatus(t *testing.T) {
+	adapter := &refreshTestSource{session: &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/session.jsonl", Title: "Initial"}}
+	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1})
+	m := NewModel([]*model.Session{adapter.session}, registry)
+	updated, refresh := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	m = updated.(Model)
+
+	live := &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/session.jsonl", Title: "Live"}
+	updated, _ = m.Update(source.SessionUpdate{Sessions: []*model.Session{live}})
+	m = updated.(Model)
+	updated, _ = m.Update(refresh())
+	m = updated.(Model)
+
+	if summary := m.listSummary(); strings.Contains(summary, "refreshing") {
+		t.Fatalf("summary after superseded refresh = %q, want no pending refresh", summary)
+	}
+}
+
 func TestNewerDetailLoadSupersedesOlderResult(t *testing.T) {
 	current := &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/session.jsonl", Title: "Current"}
 	m := NewModel([]*model.Session{current}, nil)

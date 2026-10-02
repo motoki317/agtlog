@@ -70,6 +70,8 @@ type discoveryTickMsg struct{}
 
 const mouseWheelRows = 3
 
+const refreshingStatus = "refreshing…"
+
 const (
 	screenList screen = iota
 	screenDetail
@@ -248,7 +250,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.discoveryTouched[session.Path] = true
 			}
 		}
+		// The update can be newer than the snapshot that an in-flight manual
+		// refresh reads, so it supersedes that refresh.
 		m.refreshGeneration++
+		if m.status == refreshingStatus {
+			m.status = ""
+		}
 		openIdentity := ""
 		openPath := ""
 		openChanged := false
@@ -386,7 +393,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.detail.update(msg)
 	}
 	if keyMsg, ok := msg.(tea.KeyMsg); ok && !m.filtering && !m.discoveryLoading && key.Matches(keyMsg, m.keys.Refresh) && m.registry != nil {
-		m.status = "refreshing…"
+		m.status = refreshingStatus
 		m.refreshGeneration++
 		return m, refreshSessions(m.ctx, m.registry, m.refreshGeneration)
 	}
