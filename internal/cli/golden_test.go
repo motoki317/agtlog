@@ -66,6 +66,20 @@ func TestFormatsContainNoRawTerminalEscapes(t *testing.T) {
 	}
 }
 
+func TestHumanTokensMovesToTheNextUnitWhenRoundingReachesOneThousand(t *testing.T) {
+	for value, want := range map[int64]string{
+		999:         "999",
+		999_499:     "999k",
+		999_500:     "1.0M",
+		999_949_999: "999.9M",
+		999_950_000: "1.0B",
+	} {
+		if got := humanTokens(value); got != want {
+			t.Fatalf("humanTokens(%d) = %q, want %q", value, got, want)
+		}
+	}
+}
+
 func goldenRegistry() *source.Registry {
 	cacheRead := 0.0005
 	calculator := cost.NewCalculator(cost.Table{

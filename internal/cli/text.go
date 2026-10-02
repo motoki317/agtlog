@@ -187,10 +187,12 @@ func humanTokens(value int64) string {
 	if abs < 0 {
 		abs = -abs
 	}
+	// Each threshold is the smallest value that the next smaller unit rounds to
+	// 1000, so 999,500 renders as 1.0M and not 1000k.
 	switch {
-	case abs >= 1_000_000_000:
+	case abs >= 999_950_000:
 		return fmt.Sprintf("%.1fB", float64(value)/1_000_000_000)
-	case abs >= 1_000_000:
+	case abs >= 999_500:
 		return fmt.Sprintf("%.1fM", float64(value)/1_000_000)
 	case abs >= 1_000:
 		return fmt.Sprintf("%.0fk", float64(value)/1_000)
