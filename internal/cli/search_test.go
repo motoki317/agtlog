@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -373,6 +374,42 @@ func TestSearchBroadLoadFailureWarnsButScopedFails(t *testing.T) {
 	err := Execute(context.Background(), []string{"search", "needle", "--session", "broken-session"}, io.Discard, &stderr, func(context.Context, Options) (Registry, error) { return registry, nil })
 	if exitCode(err) != 1 || errorCode(err) != "unreadable_session" || !strings.Contains(stderr.String(), `"code": "unreadable_session"`) {
 		t.Fatalf("scoped error = %#v, stderr = %q", err, stderr.String())
+	}
+}
+
+func TestSearchPagingEndsDespiteUnreadableSession(t *testing.T) {
+	newer := &model.Session{ID: "newer-session", Agent: model.AgentClaude, UpdatedAt: time.Unix(30, 0), Events: []model.Event{{Kind: model.EventUser, Text: "needle"}}}
+	broken := &model.Session{ID: "broken-session", Agent: model.AgentClaude, UpdatedAt: time.Unix(20, 0)}
+	older := &model.Session{ID: "older-session", Agent: model.AgentClaude, UpdatedAt: time.Unix(10, 0), Events: []model.Event{{Kind: model.EventUser, Text: "needle"}}}
+	registry := &fakeRegistry{sessions: []*model.Session{newer, broken, older}, load: func(session *model.Session) error {
+		if session == broken {
+			return errors.New("fictional read failure")
+		}
+		return nil
+	}}
+	var pages []SearchPage
+	for offset := 0; len(pages) < 4; {
+		var output bytes.Buffer
+		args := []string{"search", "needle", "--limit", "1", "--offset", strconv.Itoa(offset)}
+		if err := Execute(context.Background(), args, &output, io.Discard, func(context.Context, Options) (Registry, error) { return registry, nil }); err != nil {
+			t.Fatal(err)
+		}
+		var response SearchResponse
+		if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		pages = append(pages, response.Page)
+		if !response.Page.HasMore {
+			break
+		}
+		offset = response.Page.NextOffset
+	}
+	want := []SearchPage{
+		{Offset: 0, Limit: 1, Returned: 1, HasMore: true, NextOffset: 1, SessionsScanned: 2, SessionsMatched: 2},
+		{Offset: 1, Limit: 1, Returned: 1, NextOffset: 2, SessionsScanned: 2, SessionsMatched: 2},
+	}
+	if !reflect.DeepEqual(pages, want) {
+		t.Fatalf("pages = %#v, want %#v", pages, want)
 	}
 }
 

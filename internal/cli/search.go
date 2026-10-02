@@ -351,7 +351,9 @@ func executeSearch(ctx context.Context, registry Registry, candidates []searchCa
 		end = start + options.limit
 	}
 	response.Hits = nonNil(append([]SearchHit(nil), orderedHits[start:end]...))
-	hasMore := len(orderedHits) > end || !exhaustive || nextCandidate < len(candidates)
+	// An unreadable session lowers complete, not has_more: has_more promises a hit
+	// at next_offset, and paging past the last readable hit would never end.
+	hasMore := len(orderedHits) > end || stopped
 	nextOffset := options.offset + len(response.Hits)
 	response.Page.Offset = options.offset
 	response.Page.Limit = searchPageLimit(options)
