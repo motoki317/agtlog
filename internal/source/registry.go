@@ -362,9 +362,11 @@ func copySessionTreeContext(ctx context.Context, session *model.Session) (*model
 	return &copy, nil
 }
 
+// linkSessionGraphsContext rewrites the sessions that it receives, so callers
+// pass copies. Some Codex subagent files carry a ParentID that the parent
+// transcript does not announce, so any child with a ParentID also links through
+// it alone.
 func linkSessionGraphsContext(ctx context.Context, sessions []*model.Session) (map[*model.Session]bool, error) {
-	// Newer Codex sidecars carry ParentID without a parent-side spawn announcement,
-	// so graph ownership must be recoverable from parsed sessions alone.
 	byParentAndID := make(map[string]*model.Session, len(sessions))
 	ambiguousParentAndID := make(map[string]bool)
 	byAgentAndID := make(map[string][]*model.Session, len(sessions))

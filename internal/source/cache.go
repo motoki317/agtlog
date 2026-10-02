@@ -34,6 +34,9 @@ type cacheDiagnostic struct {
 	Message string `json:"message"`
 }
 
+// cacheVersion covers the cacheEntry envelope. A change to what a parser stores
+// in the Session payload bumps that adapter's CacheFingerprint instead. See
+// docs/ADR/20260815-summary-cache-repricing.md.
 const cacheVersion = 4
 
 const maxSummaryCacheBytes = 64 << 20
@@ -508,6 +511,10 @@ func CacheDirOutsideRoots(cacheDir string, roots []string) bool {
 	return ok
 }
 
+// ResolveCacheDir resolves symlinks in cacheDir, and a missing tail resolves
+// through its deepest existing ancestor. It reports false if cacheDir or a root
+// fails to resolve, or if the cache directory contains or falls inside a root.
+// See docs/ADR/20260823-extra-agent-home-directories.md.
 func ResolveCacheDir(cacheDir string, roots []string) (string, bool) {
 	cachePath, err := resolveExistingPath(cacheDir)
 	if err != nil {

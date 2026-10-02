@@ -21,10 +21,9 @@ type requestOwnershipKey struct {
 	loggedCost                 float64
 }
 
-// AttributeOwnership applies the global-dedup idea from ccusage's adapter/claude/mod.rs
-// (load_entries_inner, push_deduped_entry, and usage_dedupe_hash):
-// https://github.com/ryoppippi/ccusage. agtlog assigns the earliest origin instead of
-// whichever copy scan order encounters first.
+// AttributeOwnership recomputes the Duplicated fields of every session in place.
+// The earliest-started session owns a request that several sessions share. See
+// docs/ADR/20260724-cross-session-cost-dedup.md.
 func AttributeOwnership(sessions []*model.Session) {
 	_ = attributeOwnershipContext(context.Background(), sessions)
 }
@@ -105,8 +104,9 @@ func ownershipKey(session *model.Session, request model.RequestUsage) (requestOw
 	if request.MessageID != "" {
 		return key, true
 	}
-	// Codex RequestUsage lacks the MessageID that normally gates ownership. Partial
-	// mirrors can differ as files while sharing billed ledger entries, so stable usage fields form the key.
+	// Codex requests carry no MessageID. Two copies of one Codex session can differ
+	// as files but share billed ledger entries at the same offsets, so the session
+	// ID, record offset, and usage fields form the key.
 	if session.Agent != model.AgentCodex || session.ID == "" {
 		return requestOwnershipKey{}, false
 	}

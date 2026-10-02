@@ -38,10 +38,12 @@ type mirrorFollowState struct {
 	current atomic.Pointer[mirrorFollowSnapshot]
 }
 
-// Mirror collapse runs before graph linking because duplicate sidecar identities make child lookup ambiguous. IDs and
-// file sizes cannot prove equality, so full-source digests prevent a distinct transcript from being discarded. If a
-// future Session field differs, reflect.DeepEqual fails closed by retaining both copies for the existing ambiguity
-// handling.
+// collapseMirroredSessionsWithCandidatesContext must run before graph linking,
+// because duplicate copies of one child session make child lookup ambiguous.
+// Copies that share an agent and session ID collapse only when their parsed
+// state and source digests match. The returned candidates name the collapsed
+// identities and source paths, so that the follower knows which changes need a
+// snapshot rebuild. See docs/ADR/20260823-extra-agent-home-directories.md.
 func collapseMirroredSessionsWithCandidatesContext(ctx context.Context, sessions []*model.Session) ([]*model.Session, mirrorCandidates, error) {
 	collapsed := make([]*model.Session, 0, len(sessions))
 	byIdentity := make(map[mirrorIdentity][]int)
@@ -174,13 +176,14 @@ func mirrorSourcesEqualContext(ctx context.Context, left, right *model.Session, 
 	return true, nil
 }
 
-// A read failure returns an unverified digest so reconciliation retains both copies. Only cancellation aborts discovery.
+// digestSessionSourceContext reports a read failure as a digest with ok false,
+// so the copies do not collapse. Only cancellation returns an error.
 func digestSessionSourceContext(ctx context.Context, session *model.Session, digests map[string]sourceDigest) (sourceDigest, error) {
 	if err := ctx.Err(); err != nil {
 		return sourceDigest{}, err
 	}
 	path := session.Path
-	// A # suffix names a logical node whose bytes live in the preceding physical file.
+	// The part before # is the physical file. The suffix names a logical node inside it.
 	if separator := strings.IndexByte(path, '#'); separator >= 0 {
 		path = path[:separator]
 	}
@@ -217,8 +220,10 @@ func digestSessionSourceContext(ctx context.Context, session *model.Session, dig
 	return digest, nil
 }
 
-// Physical paths differ between copies. Ownership fields are recalculated after linking, and subagent trees are compared
-// separately from event pointers.
+// mirrorComparable clears the physical paths, which differ by home, and the
+// Duplicated fields, which attribution recomputes after linking. It clears
+// Event.Subagent pointers because the copy.Subagents comparison below covers
+// those trees.
 func mirrorComparable(session *model.Session) *model.Session {
 	copy := *session
 	copy.Path = ""

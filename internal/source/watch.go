@@ -19,7 +19,9 @@ import (
 type WatchOptions struct {
 	Debounce       time.Duration
 	RescanInterval time.Duration
-	// InitialDiscoveryDone prevents startup changes from outrunning mirror state built by the concurrent discovery.
+	// A non-nil InitialDiscoveryDone holds the first Change until the channel
+	// closes, so that no update reaches the consumer before the concurrent
+	// startup Discover registers mirrored copies.
 	InitialDiscoveryDone <-chan struct{}
 }
 
@@ -316,9 +318,9 @@ func indexFollowSessions(sessions []*model.Session) followSessionIndex {
 	return index
 }
 
-// apply stores copies. A flush without a snapshot delivers the refreshed
-// sessions themselves, and the consumer writes to them, for example through
-// AttributeOwnership.
+// apply stores copies because a Change that builds no snapshot from the index
+// delivers the refreshed sessions themselves. The consumer writes to delivered
+// sessions, for example through AttributeOwnership.
 func (index followSessionIndex) apply(ctx context.Context, refreshed []*model.Session, removedPaths []string) error {
 	for _, path := range removedPaths {
 		delete(index, path)
@@ -673,6 +675,9 @@ func (w *Watcher) scanFiles(addWatches bool) (map[string]string, error) {
 
 const walkBatchEntries = 128
 
+// walkTreeContext checks for cancellation between batches of directory entries.
+// filepath.WalkDir reads a whole directory before its first visit, so it cannot
+// stop inside a large directory.
 func walkTreeContext(ctx context.Context, root string, visit fs.WalkDirFunc) error {
 	info, err := os.Lstat(root)
 	if err != nil {
