@@ -6,21 +6,21 @@ default:
 build:
     CGO_ENABLED=0 go build -o agtlog ./cmd/agtlog
 
-# Run all tests, including the no-leak guard.
+# Run all tests, including the leak guard.
 test:
     go test ./...
 
-# Run tests under the race detector separately because it requires cgo.
+# Run tests under the race detector, which needs cgo.
 test-race:
     CGO_ENABLED=1 go test -race ./...
 
-# Run static checks; golangci-lint remains advisory.
+# Check gofmt and go vet, and run golangci-lint as advisory.
 check:
     @u="$(gofmt -l cmd internal)"; if [ -n "$u" ]; then echo "gofmt needed:"; echo "$u"; exit 1; fi
     go vet ./...
     golangci-lint run ./... || true
 
-# Scan committable files for machine-local identifiers.
+# Scan committable files for local identifiers.
 leakcheck:
     go test ./internal/leakcheck/
 
@@ -30,7 +30,7 @@ pre-commit: build
     go vet ./...
     go test ./...
 
-# Verify the Nix package independently from the fast commit gate.
+# Build the Nix package outside the fast commit gate.
 nix-build:
     nix build .#agtlog --no-link --print-build-logs
 
