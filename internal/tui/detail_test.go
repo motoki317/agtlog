@@ -2111,7 +2111,7 @@ func TestUserPromptLabelsHarnessAndHumanTurns(t *testing.T) {
 		{name: "human", event: model.Event{Kind: model.EventUser, Text: "Survey the crater"}, wantLabel: "you:", wantRole: detailUserPrompt},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			lines := detail.userPromptLines(test.event, 0, "prompt", 0)
+			lines := detail.userPromptLines(test.event, "prompt", 0)
 			if len(lines) != 1 || lines[0].label != test.wantLabel || lines[0].role != test.wantRole {
 				t.Fatalf("userPromptLines() = %#v, want one %q line with role %v", lines, test.wantLabel, test.wantRole)
 			}
@@ -2379,7 +2379,7 @@ func TestSystemAndCompactRowsUseTheSystemPromptTint(t *testing.T) {
 	wantStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#ABB2BF")).Background(lipgloss.Color("#2B2A26"))
 
 	for _, kind := range []model.EventKind{model.EventSystem, model.EventCompact} {
-		line := detail.eventLines(&model.Session{}, model.Event{Kind: kind, Text: "runtime notice"}, 0, "event")[0]
+		line := detail.eventLines(&model.Session{}, model.Event{Kind: kind, Text: "runtime notice"}, "event")[0]
 		plain := fitPlain(line.text, 36, false)
 		if got, want := detail.styleLine(plain, line, false, true), wantStyle.Render(plain); got != want {
 			t.Errorf("%s row styling = %q, want system tint %q", kind, got, want)
@@ -2403,7 +2403,7 @@ func TestUsageRowShowsStandardMetricsWithSystemPromptRole(t *testing.T) {
 		Priced:        true,
 		CostEstimated: true,
 	}
-	lines := (&detailState{}).eventLines(&model.Session{}, event, 0, "event")
+	lines := (&detailState{}).eventLines(&model.Session{}, event, "event")
 	if len(lines) != 1 || lines[0].role != detailSystemPrompt ||
 		!strings.Contains(lines[0].text, "unattributed usage") ||
 		!strings.Contains(lines[0].text, "gpt-5.6") ||
@@ -2428,7 +2428,7 @@ func TestCompactRowShowsTriggerAndContext(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			event := model.Event{Kind: model.EventCompact, CompactTrigger: test.trigger, CompactPostTokens: test.post}
-			line := detail.eventLines(&model.Session{}, event, 0, "event")[0]
+			line := detail.eventLines(&model.Session{}, event, "event")[0]
 			if got := ansi.Strip(line.text); !strings.Contains(got, test.want) {
 				t.Errorf("compact row = %q, want to contain %q", got, test.want)
 			}
@@ -2440,7 +2440,7 @@ func TestAdvisorRowShowsModelAndMetrics(t *testing.T) {
 	detail := &detailState{}
 	usage := model.Usage{Model: "claude-fable-5", InputTokens: 1000, OutputTokens: 500}
 	event := model.Event{Kind: model.EventAdvisor, Model: "claude-fable-5", Usage: &usage}
-	line := detail.eventLines(&model.Session{}, event, 0, "event")[0]
+	line := detail.eventLines(&model.Session{}, event, "event")[0]
 	if got := ansi.Strip(line.text); !strings.Contains(got, "advisor(") || !strings.Contains(got, shortModelName("claude-fable-5")) {
 		t.Errorf("advisor row = %q, want advisor(model) label", got)
 	}
@@ -5150,13 +5150,13 @@ func TestToolHeaderPreviewReflectsVisibleInputBody(t *testing.T) {
 	}
 	detail := &detailState{expanded: make(map[string]bool), defaultExpanded: true}
 
-	expanded := detail.toolEventLines(execEvent, 0, "exec")[0].text
+	expanded := detail.toolEventLines(execEvent, "exec")[0].text
 	if strings.Contains(expanded, "(check-route)") || strings.Contains(expanded, "→ exit 0") || !strings.Contains(expanded, glyphTool+" Bash · 1.2s") {
 		t.Errorf("expanded exec header = %q, want input preview and result summary omitted when body shown", expanded)
 	}
 
 	detail.expanded["exec"] = false
-	collapsed := detail.toolEventLines(execEvent, 0, "exec")[0].text
+	collapsed := detail.toolEventLines(execEvent, "exec")[0].text
 	if !strings.Contains(collapsed, glyphTool+" Bash(check-route) → exit 0 · 1.2s") {
 		t.Errorf("collapsed exec header = %q, want input preview", collapsed)
 	}
@@ -5165,7 +5165,7 @@ func TestToolHeaderPreviewReflectsVisibleInputBody(t *testing.T) {
 		Kind: model.EventToolCall, ToolName: "Edit", ToolInput: "/workspace/route.go (+1 -1)",
 		Detail: &model.ToolDetail{Input: "{\n  \"path\": \"/workspace/route.go\"\n}", Diff: "-old route\n+new route"},
 	}
-	expandedEdit := detail.toolEventLines(editEvent, 0, "edit")[0].text
+	expandedEdit := detail.toolEventLines(editEvent, "edit")[0].text
 	if !strings.Contains(expandedEdit, glyphTool+" Edit(/workspace/route.go (+1 -1))") {
 		t.Errorf("expanded Edit header = %q, want non-echo preview preserved", expandedEdit)
 	}
@@ -5197,7 +5197,7 @@ func TestToolWithoutRenderedBodyIsNotExpandable(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			detail := &detailState{expanded: make(map[string]bool), defaultExpanded: true}
 
-			lines := detail.toolEventLines(test.event, 0, "tool")
+			lines := detail.toolEventLines(test.event, "tool")
 
 			if len(lines) != 1 || lines[0].expandable || !strings.Contains(lines[0].text, test.header) {
 				t.Errorf("tool without rendered body = %q, want one non-expandable header with %q", timelineLineTexts(lines), test.header)

@@ -172,6 +172,7 @@ const (
 	detailPreviewLineCap         = 40
 	detailPreviewRuneCap         = 4096
 	subagentTitleMinVisibleWidth = 20
+	timelineBodyIndent           = "  "
 )
 
 const (
@@ -566,7 +567,7 @@ func (d *detailState) rebuild() {
 	} else if d.loadStatus == detailStatusLoading {
 		lines = []detailLine{{text: "Loading timeline…", role: detailSecondary}}
 	} else {
-		lines = d.sessionLines(d.session, 0, sessionIdentity(d.session))
+		lines = d.sessionLines(d.session, sessionIdentity(d.session))
 	}
 	d.lines = lines
 	d.focusables = d.focusables[:0]
@@ -1216,17 +1217,17 @@ func (d *detailState) firstRenderedRow(detailIndex int) int {
 // one continuous log, so every event is a sibling row carrying its own request's
 // figures. Nesting is reserved for what a row contains — a tool's output, a
 // prompt's full text — and for subagents, which open as their own screen.
-func (d *detailState) sessionLines(session *model.Session, indent int, path string) []detailLine {
+func (d *detailState) sessionLines(session *model.Session, path string) []detailLine {
 	var lines []detailLine
 	for index, event := range session.Events {
 		if event.Kind == model.EventUser {
-			lines = append(lines, d.userPromptLines(event, indent, timelineUserKey(path, index), nextRequestContext(session.Events, index))...)
+			lines = append(lines, d.userPromptLines(event, timelineUserKey(path, index), nextRequestContext(session.Events, index))...)
 			continue
 		}
-		lines = append(lines, d.eventLines(session, event, indent, timelineEventKey(path, index))...)
+		lines = append(lines, d.eventLines(session, event, timelineEventKey(path, index))...)
 	}
 	if len(lines) == 0 {
-		lines = append(lines, detailLine{text: strings.Repeat(" ", indent) + "No timeline events.", role: detailSecondary})
+		lines = append(lines, detailLine{text: "No timeline events.", role: detailSecondary})
 	}
 	return lines
 }
@@ -1329,7 +1330,7 @@ func textExpandable(text string) bool {
 // the model was prompted with without leaving for the item view. context is the
 // window the request this prompt triggered was sent with; the prompt bills no
 // tokens of its own.
-func (d *detailState) userPromptLines(event model.Event, indent int, key string, context int64) []detailLine {
+func (d *detailState) userPromptLines(event model.Event, key string, context int64) []detailLine {
 	expandable := textExpandable(event.Text)
 	expanded := expandable && d.isExpanded(key)
 	label := "you:"
@@ -1338,7 +1339,7 @@ func (d *detailState) userPromptLines(event model.Event, indent int, key string,
 		label = "harness:"
 		role = detailSystemPrompt
 	}
-	prefix := strings.Repeat(" ", indent) + foldMarker(expandable, expanded) + " " + label
+	prefix := foldMarker(expandable, expanded) + " " + label
 	text := prefix
 	if !expanded {
 		if summary := firstLine(event.Text); summary != "" {
@@ -1353,9 +1354,8 @@ func (d *detailState) userPromptLines(event model.Event, indent int, key string,
 	if !expanded {
 		return lines
 	}
-	childPadding := strings.Repeat(" ", indent+2)
 	for _, line := range timelineBodyLines(event.Text) {
-		lines = append(lines, detailLine{text: childPadding + detailPlainText(line), role: role})
+		lines = append(lines, detailLine{text: timelineBodyIndent + detailPlainText(line), role: role})
 	}
 	return lines
 }
@@ -1390,20 +1390,19 @@ func timelineEventKey(path string, index int) string {
 	return fmt.Sprintf("%s/event/%d", path, index)
 }
 
-func (d *detailState) eventLines(session *model.Session, event model.Event, indent int, key string) []detailLine {
-	padding := strings.Repeat(" ", indent)
+func (d *detailState) eventLines(session *model.Session, event model.Event, key string) []detailLine {
 	switch event.Kind {
 	case model.EventAssistantText:
-		return d.assistantTextLines(event, indent, key, session.Agent)
+		return d.assistantTextLines(event, key, session.Agent)
 	case model.EventThinking:
-		text := padding + foldMarker(false, false) + " " + glyphSecondary + " thinking: " + firstLine(event.Text)
+		text := foldMarker(false, false) + " " + glyphSecondary + " thinking: " + firstLine(event.Text)
 		return []detailLine{{text: text, metrics: metricsText(eventMetricParts(event)), key: key, nowrap: true, role: detailSecondary, event: event}}
 	case model.EventToolCall:
-		return d.toolEventLines(event, indent, key)
+		return d.toolEventLines(event, key)
 	case model.EventSubagent:
 		childMarker := foldMarker(false, false) + " "
 		if event.Subagent == nil {
-			return []detailLine{{text: padding + childMarker + glyphSubagent + " subagent unavailable", key: key, subagent: true, role: detailWarning, event: event}}
+			return []detailLine{{text: childMarker + glyphSubagent + " subagent unavailable", key: key, subagent: true, role: detailWarning, event: event}}
 		}
 		childKey := key + "/subagent/" + sessionIdentity(event.Subagent)
 		title := firstLine(event.ToolInput)
@@ -1419,7 +1418,7 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 		}
 		title = ansi.Truncate(title, 28, "…")
 		typeLabel := glyphSubagent + " " + toolName
-		text := padding + childMarker + typeLabel + "(" + title + ")"
+		text := childMarker + typeLabel + "(" + title + ")"
 		if model := terminalText(shortModels(event.Subagent), 96); model != "" {
 			text += " " + model
 		}
@@ -1430,22 +1429,22 @@ func (d *detailState) eventLines(session *model.Session, event model.Event, inde
 		if event.Model != "" {
 			label = "advisor(" + terminalText(shortModelName(event.Model), 96) + ")"
 		}
-		text := padding + foldMarker(false, false) + " " + glyphSubagent + " " + label
+		text := foldMarker(false, false) + " " + glyphSubagent + " " + label
 		return []detailLine{{text: text, metrics: metricsText(eventMetricParts(event)), key: key, nowrap: true, role: detailAccent, event: event}}
 	case model.EventCompact:
-		text := padding + foldMarker(false, false) + " " + glyphSecondary + " " + compactTitle(event.CompactTrigger)
+		text := foldMarker(false, false) + " " + glyphSecondary + " " + compactTitle(event.CompactTrigger)
 		if event.CompactPostTokens > 0 {
 			text += " · ctx " + humanTokens(event.CompactPostTokens)
 		}
 		return []detailLine{{text: text, key: key, role: detailSystemPrompt, event: event}}
 	case model.EventSystem:
-		return []detailLine{{text: padding + foldMarker(false, false) + " " + glyphSecondary + " " + firstLine(event.Text), key: key, role: detailSystemPrompt, event: event}}
+		return []detailLine{{text: foldMarker(false, false) + " " + glyphSecondary + " " + firstLine(event.Text), key: key, role: detailSystemPrompt, event: event}}
 	case model.EventUsage:
 		title := firstLine(event.Text)
 		if event.Model != "" {
 			title += " (" + terminalText(shortModelName(event.Model), 96) + ")"
 		}
-		text := padding + foldMarker(false, false) + " " + glyphSecondary + " " + title
+		text := foldMarker(false, false) + " " + glyphSecondary + " " + title
 		return []detailLine{{text: text, metrics: metricsText(eventMetricParts(event)), key: key, nowrap: true, role: detailSystemPrompt, event: event}}
 	default:
 		return nil
@@ -1490,17 +1489,15 @@ func (d *detailState) eventForKey(key string) (model.Event, bool) {
 	return model.Event{}, false
 }
 
-func (d *detailState) toolEventLines(event model.Event, indent int, key string) []detailLine {
-	padding := strings.Repeat(" ", indent)
+func (d *detailState) toolEventLines(event model.Event, key string) []detailLine {
 	expandable := detailHasBody(event)
 	expanded := expandable && d.isExpanded(key)
-	text := padding + foldMarker(expandable, expanded) + " " + toolLine(event, expanded)
+	text := foldMarker(expandable, expanded) + " " + toolLine(event, expanded)
 	label := glyphTool + " " + toolDisplayName(event.ToolName)
 	lines := []detailLine{{text: text, label: label, metrics: metricsText(eventMetricParts(event)), key: key, nowrap: true, expandable: expandable, role: detailTool, event: event}}
 	if !expanded {
 		return lines
 	}
-	childPadding := strings.Repeat(" ", indent+2)
 	if event.Detail.Diff != "" {
 		for _, text := range timelineBodyLines(event.Detail.Diff) {
 			plain := detailPlainText(text)
@@ -1510,7 +1507,7 @@ func (d *detailState) toolEventLines(event model.Event, indent int, key string) 
 			} else if strings.HasPrefix(plain, "-") {
 				role = detailDiffRemove
 			}
-			lines = append(lines, detailLine{text: childPadding + plain, role: role})
+			lines = append(lines, detailLine{text: timelineBodyIndent + plain, role: role})
 		}
 	}
 	for _, section := range []struct {
@@ -1520,9 +1517,9 @@ func (d *detailState) toolEventLines(event model.Event, indent int, key string) 
 		if section.text == "" {
 			continue
 		}
-		lines = append(lines, detailLine{text: childPadding + section.label, role: detailSecondary})
+		lines = append(lines, detailLine{text: timelineBodyIndent + section.label, role: detailSecondary})
 		for _, text := range timelineBodyLines(section.text) {
-			lines = append(lines, detailLine{text: childPadding + detailPlainText(text), role: detailRow})
+			lines = append(lines, detailLine{text: timelineBodyIndent + detailPlainText(text), role: detailRow})
 		}
 	}
 	return lines
@@ -1558,12 +1555,11 @@ func detailHasBody(event model.Event) bool {
 // carrying the reply's own request metrics on the right, foldable to reveal the
 // full text below. This keeps every timeline entry a single row when collapsed,
 // consistent with tool rows.
-func (d *detailState) assistantTextLines(event model.Event, indent int, key string, agent model.AgentKind) []detailLine {
+func (d *detailState) assistantTextLines(event model.Event, key string, agent model.AgentKind) []detailLine {
 	label := terminalText(string(agent), 32) + ":"
-	padding := strings.Repeat(" ", indent)
 	expandable := textExpandable(event.Text)
 	expanded := expandable && d.isExpanded(key)
-	text := padding + foldMarker(expandable, expanded) + " " + label
+	text := foldMarker(expandable, expanded) + " " + label
 	if !expanded {
 		if summary := firstLine(event.Text); summary != "" {
 			text += " " + summary
@@ -1573,9 +1569,8 @@ func (d *detailState) assistantTextLines(event model.Event, indent int, key stri
 	if !expanded {
 		return lines
 	}
-	childPadding := strings.Repeat(" ", indent+2)
 	for _, line := range timelineBodyLines(event.Text) {
-		lines = append(lines, detailLine{text: childPadding + detailPlainText(line), role: detailAssistant})
+		lines = append(lines, detailLine{text: timelineBodyIndent + detailPlainText(line), role: detailAssistant})
 	}
 	return lines
 }
