@@ -153,6 +153,30 @@ func TestSourceDiscoverIgnoresSymlinkedSessionFiles(t *testing.T) {
 	}
 }
 
+func TestSourceDiscoverWalksSymlinkedRoot(t *testing.T) {
+	dir := tempRoot(t)
+	target := filepath.Join(dir, "target")
+	session := filepath.Join(target, "project-alpha", "session-main.jsonl")
+	if err := os.MkdirAll(filepath.Dir(session), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(session, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "linked")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	got, err := NewSource(testParser(), []string{link}).Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover() error = %v", err)
+	}
+	if want := []string{session}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Discover() = %v, want %v", got, want)
+	}
+}
+
 func TestRootsIncludesBothDefaultClaudeHomes(t *testing.T) {
 	home := filepath.Join("fictional", "home")
 	got := Roots(home, "", nil)
