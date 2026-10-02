@@ -6,65 +6,53 @@ status: "accepted"
 
 # Context
 
-The Anthropic Advisor tool runs a second model server-side inside one Messages request. Its usage
-is reported in `usage.iterations[]` as an entry with `type: "advisor_message"` and its own `model`,
-and — per the Messages API docs — it is billed at that advisor model's rates. The top-level `usage`
-fields deliberately exclude it "because they are billed at a different rate", so the true billed
-total for a request is the top-level usage plus every advisor iteration.
+The Anthropic Advisor tool runs a second model server-side inside one Messages request. The response
+reports its usage in `usage.iterations[]` as an entry with `type: "advisor_message"` and its own
+`model`. Per the Messages API docs, Anthropic bills that entry at the advisor model's rates. The
+top-level `usage` fields deliberately exclude it "because they are billed at a different rate". The
+billed total for a request is therefore the top-level usage plus every advisor iteration.
 
-agtlog previously read only the top-level `usage`, so every advisor turn was uncosted and its
-`server_tool_use` block was dropped (server tool blocks fell through to the default skip). Across
-the local logs that undercounted ~$1.3k over 53 sessions; on one session it was the whole gap
-between agtlog and the reference `ccusage` total. Same-tier Opus↔Opus pairing makes the advisor
-bill at full Opus rates, so the omission is not marginal.
+Before this decision, agtlog read only the top-level `usage`. Every advisor turn had no cost, and
+the timeline dropped its `server_tool_use` block with the other server tool blocks.
 
 # Decision
 
-Count each `advisor_message` iteration as its own usage, priced at the iteration's own model.
+We count each `advisor_message` iteration as its own usage, priced at the iteration's model.
 
-- `parseFile` appends one advisor usage record per iteration under a synthetic message key
-  (`<messageID>\x00advisor\x00<index>`) so the existing dedup counts it once across re-logged lines
-  and the session total, per-model costs, and info-tab breakdown all include it.
-- `loadEvents` renders each advisor `server_tool_use` block as an `EventAdvisor` timeline row. The
-  block is logged when the call opens but its usage completes on a later line, so advisor usage is
-  collected per message across the whole pass and attached to the rows afterward; the Nth advisor
-  block maps to the Nth iteration.
+The summary parser appends one usage record per counted advisor iteration. It skips an
+`advisor_message` entry without a model, with a negative token count, or with no tokens. The
+record's synthetic message ID combines the message ID with the iteration's position among the
+counted iterations of that line, not its position in `iterations[]`. Both the per-file
+deduplication and the [cross-session owner rule](./20260724-cross-session-cost-dedup.md) key on the
+message ID and request ID. Each therefore counts the iteration once across re-logged or replayed
+lines. The session total and the per-model costs include it.
 
-The executor side is unchanged: the top-level `usage` already reflects it, and agtlog keeps reading
-it as before.
+The timeline shows each advisor `server_tool_use` block as an `EventAdvisor` row and still drops
+every other `server_tool_use` block. Claude Code logs the block when the call opens, and the advisor
+usage completes on a later line. The loader therefore collects advisor usage per message across the
+whole file and attaches it after the scan. The Nth advisor block of a message gets the Nth counted
+iteration.
 
 # Consequences
 
-- Session, list, and info-tab totals match the billed total; on the validated session agtlog now
-  equals `ccusage` to the cent.
-- Each advisor consultation shows as its own `advisor(<model>)` row with its tokens and cost, so a
-  same-tier advisor is visible instead of silently inflating the executor model's number.
-- When the advisor model differs from the executor (e.g. Haiku main, Opus advisor), the info-tab
-  per-model breakdown lists it separately because pricing keys on the iteration's model.
-
-# Impact
-
-The decision touches Claude usage parsing, event loading, and the timeline; it changes cost figures
-for sessions that used the Advisor tool. It does not affect Codex parsing, compaction, the read-only
-treatment of logs, or the pricing tables. The cache-fingerprint schema bump (parser `v12` → `v13`)
-re-parses sessions cached before the change so their totals pick up advisor cost.
+The per-model cost breakdown keys on the iteration's model. An advisor on the executor's model joins
+that model's line. A different advisor model gets its own line, for example an Opus advisor beside a
+Haiku executor.
 
 # Alternatives
 
-**Trust the top-level `usage` alone** was rejected: the docs are explicit that advisor tokens are
-billed and excluded from the top-level totals precisely because they price differently, so ignoring
-them undercounts. An earlier reading mistook the advisor's uncached re-read of the transcript for a
-double-counted re-representation; the primary source and a controlled `ccusage` experiment refuted
-it.
+We rejected trusting the top-level `usage` alone because it excludes billed advisor tokens. An
+earlier reading mistook the advisor's uncached re-read of the transcript for a double-counted copy.
+The primary source and a controlled `ccusage` experiment refuted that reading.
 
-**Fold advisor cost into the executor row/model** was rejected because it hides where advisor spend
-happens and misprices any cross-tier pairing.
+We rejected folding advisor cost into the executor row and model because it hides where advisor
+spend happens and misprices any cross-tier pairing.
 
-**Attach advisor usage on the block's own line** was rejected because the advisor usage completes on
-a later line, so most rows would show no cost.
+We rejected attaching advisor usage on the block's own line because the usage completes on a later
+line, so most rows would show no cost.
 
 # Notes
 
-`fallback_message` iterations (server-side model fallback) share the `iterations[]` shape and are
-billed the same way; only `advisor_message` appears in current logs, so the parser counts that type
-and can extend to `fallback_message` when it shows up.
+`fallback_message` iterations, which record a server-side model fallback, share the `iterations[]`
+shape and are billed the same way. Only `advisor_message` appeared in the measured logs, so the
+parser counts only that type. It can add `fallback_message` when that type appears.

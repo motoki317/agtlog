@@ -16,7 +16,7 @@ API charge.
 
 # Decision
 
-For a usage record, agtlog follows the ccusage formula with rates in USD per token:
+We price each usage record with the ccusage formula. Rates are in USD per token:
 
 ```text
 input * inputRate
@@ -26,88 +26,94 @@ input * inputRate
 + cacheRead * cacheReadRate
 ```
 
-If LiteLLM omits cache rates, `cacheWriteRate` defaults to `inputRate * 1.25` and
-`cacheReadRate` defaults to `inputRate * 0.1`. When a Claude record contains the structured cache
-creation object, its 5-minute and 1-hour fields replace the legacy flat cache-creation count. A
-recorded `costUSD` takes precedence when present.
+If LiteLLM omits cache rates, `cacheWriteRate` defaults to `inputRate * 1.25` and `cacheReadRate`
+defaults to `inputRate * 0.1`. If a Claude record contains the structured cache creation object, its
+5-minute and 1-hour fields replace the legacy flat cache-creation count. A `costUSD` value in a
+Claude record takes precedence over the formula. The Codex parser reads no recorded cost.
 
-The 200,000-token and 272,000-token rates are marginal tiers: tokens through the threshold use the
-base rate and only tokens above it use the higher rate. A `fast` record looks up the model with a
-`-fast` suffix where available and multiplies the whole result by the provider's fast multiplier.
-Missing pricing produces a zero cost and carries the unresolved model name as a flag. The TUI marks
-that partial value with `!`.
+LiteLLM lists a higher rate above 200,000 tokens, above 272,000 tokens, or both for some models. We
+apply the higher rate as a marginal tier within one usage record. Each token category counts only
+its own tokens against the threshold. It uses the base rate up to the threshold and the higher rate
+above it. If a category lists both thresholds, the 200,000-token tier applies.
 
-Codex cost is an **API-equivalent estimate**. The TUI prefixes it with `~`, as in `~$4.20`. This is
-not a subscription charge: users on ChatGPT or another plan pay according to that plan and normally
-pay less than the displayed API-rate estimate. agtlog maps the private `gpt-5.6-sol` runtime slug to
-the public `gpt-5.6` price and uses `gpt-5` as the configured fallback for other unknown Codex
-slugs. Every Codex result remains estimated after mapping.
+A record whose `speed` is `fast` uses the model's `-fast` entry if one exists and the base entry
+otherwise. If the entry in use has a `provider_specific_entry.fast` multiplier, that multiplier
+scales the whole result, also for a `-fast` entry. A model without a price costs zero and carries
+its name as a missing-pricing flag. The TUI marks that partial value with `!`, and every caller
+must check the flag before it treats zero as a real cost.
 
-Codex `token_count` events are cumulative. The adapter treats the last
-`total_token_usage` as the authoritative session total and uses summed `last_token_usage` deltas
-only when the cumulative total is absent or when the per-model deltas reconcile exactly. Codex
-re-bills the full context on later turns, so sessions with hundreds of millions of input tokens are
-real accounting outcomes, not a summing bug. In one measured session, sum-of-deltas differed from
-the last cumulative value by about 1.3 percent after a mid-session context reset; the cumulative
-value remains authoritative.
+Every cost that agtlog computes from rates is an **API-equivalent estimate**, not a subscription
+charge. A Codex user on ChatGPT or another plan pays according to that plan and normally pays less
+than the displayed estimate.
 
-Codex folds `reasoning_output_tokens` into output. Its normalized usage sets
-`InputIncludesCacheRead`, causing cached input to be subtracted from ordinary input before the cache
-read rate is applied. Claude leaves this flag unset because its cache-read tokens are separate from
-ordinary input.
+A Codex slug without its own LiteLLM entry gets the rate of a stand-in model. For a `gpt-5` family
+slug, agtlog strips a known runtime suffix such as `-sol` and uses the base model's rate. Any other
+unknown slug uses the fallback model `gpt-5`, which `cmd/agtlog` passes to the Codex parser. The TUI
+prefixes such a cost with `~`, as in `~$4.20`. The `~` marks only a substituted rate: a cost at the
+logged model's own published rate has no `~`, although it is also an estimate. The detail view
+names both the logged model and the stand-in model.
+
+Each Codex `token_count` event carries a cumulative `total_token_usage` and a per-request
+`last_token_usage`. We treat the final `total_token_usage` value as authoritative. We use the
+per-request values only if that total is absent, or if their sum across all models equals it
+exactly. [Codex counter segments](./20260905-codex-counter-segments.md) applies this rule to each
+segment, a run of records between two restarts of the cumulative counter. Codex bills the full
+context again on every later turn. A session with hundreds of millions of input tokens is therefore
+a real accounting outcome, not a summing bug.
+
+Codex counts `reasoning_output_tokens` inside `output_tokens`. Codex usage sets
+`InputIncludesCacheRead`, so the calculator subtracts cached input from input before it applies the
+input rate. Claude reports cache reads separately from input and leaves the flag unset.
 
 The binary embeds a LiteLLM snapshot as the release-time floor. At startup, a valid
-`$XDG_CACHE_HOME/agtlog/pricing.json` overlays it model by model. When the cache is absent, invalid,
-or older than 24 hours, agtlog starts a timeout-bounded background fetch and writes a validated
-replacement for the next launch. It does not change prices during a running session. `--offline`
-disables the fetch while retaining the embedded and cached tables.
+`$XDG_CACHE_HOME/agtlog/pricing.json` overlays it model by model, so a model that the cached table
+omits keeps its embedded price. If the cache is absent, invalid, or older than 24 hours, the TUI
+starts a timeout-bounded background fetch. The fetch writes a validated replacement for the next
+launch. Prices do not change while agtlog runs.
+
+`--offline` disables the fetch and keeps the embedded and cached tables. As
+[Machine-readable CLI](./20260805-machine-readable-cli.md) records, the `list`, `show`, and
+`search` subcommands never start the fetch.
 
 `--refresh-prices` is the user-requested exception to deferred refresh. It fetches and validates the
-table synchronously with a 30-second timeout, atomically replaces the cache, and applies the fresh
-overlay to the session that then starts. Any refresh-stage failure aborts startup. The default path
-keeps its background timing and silent-failure behavior; only an explicit request delays the UI.
+table synchronously with a 30-second timeout and atomically replaces the cache. The run that then
+starts uses the fresh overlay. Any failure in this refresh aborts startup. The default path keeps
+its background timing and silent failures.
+
+[Summary cache repricing](./20260815-summary-cache-repricing.md) defines how a pricing change
+reaches cached session summaries.
 
 # Consequences
 
-- Claude and Codex totals are comparable at public API rates, but only Claude values can represent
-  direct recorded cost when the log supplies it.
-- The `~` and `!` markers are part of the meaning of a number, not decoration.
-- A released binary gains new prices after one successful background refresh and a later launch.
-- Existing embedded models remain available when a runtime table omits them.
-- Cost can be zero for an unpriced model; callers must inspect the missing-pricing flag.
+The `~` and `!` markers are part of the meaning of a number, not decoration.
 
 # Impact
 
-Token normalization changes the cached usage ledger and requires a parser fingerprint bump. Model
-aliases, pricing thresholds, and overlay tables do not invalidate cached summaries because agtlog
-reapplies them to the ledger on every cache hit. Tests cover the formula, marginal tiers, defaults,
-fast mode, Codex cache semantics, missing prices, overlay precedence, freshness, and offline
-behavior.
-
 The estimate cannot answer subscription-plan questions such as quota, marginal charge, or invoice
-total. The UI and documentation must keep the `~` gloss visible wherever users could mistake the
-estimate for money paid.
+total. Wherever users can mistake an estimate for money paid, the UI and documentation must state
+that costs use public API rates.
 
 # Alternatives
 
-**Show no Codex cost** was rejected because it would prevent comparison across the unified session
-list. The estimate is useful when its API-rate meaning is explicit.
+We rejected showing no Codex cost because it prevents comparison across the unified session list.
 
-**Sum every cumulative event** was rejected because it would repeatedly count the same session
-total. **Always sum per-turn deltas** was also rejected because context resets can make that sum
-diverge from Codex's authoritative cumulative counter.
+We first prefixed every Codex cost with `~`. We dropped that rule because an exact published rate is
+not approximate. A reader instead needs the logged and applied model names to audit a substitution.
 
-**Use only embedded prices** was rejected because rates can change between releases. **Drop the
-embedded snapshot and rely on runtime downloads** was reconsidered and rejected because a first run
-without network access would price every model at zero with a missing-pricing marker, and
-`--offline` would no longer retain a usable price floor.
+We rejected summing every cumulative event because it counts the same session total many times. We
+also rejected always summing per-request values because a context reset can make that sum diverge
+from the cumulative counter. In one measured session, the difference was about 1.3 percent.
 
-**Fetch before every startup** was rejected because it would delay the UI by default.
-`--refresh-prices` accepts that delay only when the user requests it. **Hot-swap a running table**
-was rejected because it would change totals during a session.
+We rejected using only embedded prices because rates can change between releases. We reconsidered
+and rejected dropping the embedded snapshot in favor of runtime downloads. Without network access, a
+first run then prices every model at zero with a missing-pricing marker, and `--offline` has no
+usable price floor.
+
+We rejected fetching before every startup because it delays the UI by default. `--refresh-prices`
+accepts that delay only on request. We rejected replacing the table in a running process because it
+changes totals while the user reads them.
 
 # Notes
 
-`just update-pricing` manually refreshes the embedded release snapshot from LiteLLM. Runtime caching
-complements that manual release process; it does not replace review of the embedded data. A
-scheduled refresh workflow remains future work.
+`just update-pricing` refreshes the embedded release snapshot from LiteLLM by hand. The runtime
+cache does not replace review of the embedded data.
