@@ -212,7 +212,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = "refreshed"
 		m.rebuildList()
 		if isOpen {
-			m.refreshOpenOwnership(open.path, open.ownership)
+			// A refresh rereads every session, so the open one counts as changed.
+			return m, m.reconcileOpenDetail(open, true)
 		}
 		return m, nil
 	}

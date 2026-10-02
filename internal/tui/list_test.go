@@ -1658,6 +1658,58 @@ func TestLiveUpdateReloadsOpenDetailWhoseIdentityChanged(t *testing.T) {
 	}
 }
 
+func TestManualRefreshThatDropsOpenSessionReturnsToList(t *testing.T) {
+	now := time.Date(2026, time.July, 24, 10, 0, 0, 0, time.UTC)
+	open := &model.Session{ID: "open", Agent: model.AgentClaude, Path: "/workspace/open.jsonl", Title: "Open", UpdatedAt: now}
+	other := &model.Session{ID: "other", Agent: model.AgentClaude, Path: "/workspace/other.jsonl", Title: "Other", UpdatedAt: now.Add(-time.Hour)}
+	m := NewModel([]*model.Session{open, other}, nil)
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	if got := detailStateFromScreen(t, m.detail).session; got != open {
+		t.Fatalf("opened session = %#v, want open", got)
+	}
+	m.refreshGeneration = 1
+
+	updated, _ = m.Update(refreshedMsg{generation: 1, sessions: []*model.Session{other}})
+	m = updated.(Model)
+
+	if m.screen != screenList || m.detail != nil || m.detailStack != nil {
+		t.Fatalf("refresh without the open session left detail active: screen %v detail %#v", m.screen, m.detail)
+	}
+}
+
+func TestManualRefreshReloadsOpenDetail(t *testing.T) {
+	open := &model.Session{ID: "open", Agent: model.AgentClaude, Path: "/workspace/open.jsonl", Title: "Open"}
+	registry := source.NewRegistry([]source.Source{detailTestSource{
+		session: open,
+		loadNodeEvents: func(_ context.Context, loaded *model.Session) error {
+			loaded.Events = []model.Event{{Kind: model.EventUser, Text: "Loaded " + loaded.Title}}
+			return nil
+		},
+	}}, source.Options{})
+	m := NewModel([]*model.Session{open}, registry)
+	updated, load := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(load())
+	m = updated.(Model)
+	m.refreshGeneration = 1
+
+	refreshed := cloneSession(open)
+	refreshed.Title = "Refreshed"
+	updated, reload := m.Update(refreshedMsg{generation: 1, sessions: []*model.Session{refreshed}})
+	m = updated.(Model)
+	if reload == nil {
+		t.Fatal("refresh did not reload the open detail")
+	}
+	updated, _ = m.Update(reload())
+	m = updated.(Model)
+
+	got := detailStateFromScreen(t, m.detail).session
+	if got.Title != "Refreshed" || len(got.Events) != 1 || got.Events[0].Text != "Loaded Refreshed" {
+		t.Fatalf("open detail after refresh = %#v, want the reloaded refreshed session", got)
+	}
+}
+
 func TestHelpOverlayListsSecondaryKeys(t *testing.T) {
 	m := NewModel([]*model.Session{{ID: "lunar", Agent: model.AgentClaude}}, nil)
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
