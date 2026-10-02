@@ -24,6 +24,7 @@ type searchOptions struct {
 	cwd           string
 	since         string
 	until         string
+	window        updateWindow
 	kind          string
 	session       string
 	regex         bool
@@ -90,7 +91,7 @@ func runSearch(ctx context.Context, args []string, help io.Writer, factory Regis
 	for _, node := range allNodes {
 		nodesBySession[node.session] = node
 	}
-	candidates, scoped, err := searchCandidates(roots, allNodes, nodesBySession, commandDiags, options, time.Now(), time.Local)
+	candidates, scoped, err := searchCandidates(roots, allNodes, nodesBySession, commandDiags, options)
 	if err != nil {
 		return nil, "", err
 	}
@@ -147,6 +148,11 @@ func parseSearchOptions(args []string, help io.Writer) (searchOptions, string, e
 	if options.snippet < 0 {
 		return searchOptions{}, "", usageError("--snippet must not be negative")
 	}
+	window, err := parseUpdateWindow(options.since, options.until, time.Now(), time.Local)
+	if err != nil {
+		return searchOptions{}, "", err
+	}
+	options.window = window
 	if _, err := parseKinds(options.kind); err != nil {
 		return searchOptions{}, "", err
 	}
@@ -162,27 +168,13 @@ func searchUsage(output io.Writer) {
 	_, _ = fmt.Fprintln(output, "Use -- before a pattern that begins with '-'.")
 }
 
-func searchCandidates(roots []*model.Session, allNodes []graphNode, nodesBySession map[*model.Session]graphNode, diagnostics []commandDiagnostic, options searchOptions, now time.Time, location *time.Location) ([]searchCandidate, bool, error) {
-	var since, until time.Time
-	var err error
-	if options.since != "" {
-		since, err = parseTimeFilter(options.since, now, location)
-		if err != nil {
-			return nil, options.session != "", err
-		}
-	}
-	if options.until != "" {
-		until, err = parseTimeFilter(options.until, now, location)
-		if err != nil {
-			return nil, options.session != "", err
-		}
-	}
+func searchCandidates(roots []*model.Session, allNodes []graphNode, nodesBySession map[*model.Session]graphNode, diagnostics []commandDiagnostic, options searchOptions) ([]searchCandidate, bool, error) {
 	if options.session != "" {
 		selected, err := resolveSelector(options.session, allNodes, diagnostics)
 		if err != nil {
 			return nil, true, err
 		}
-		if !searchSummaryMatches(selected.session, options, since, until) {
+		if !searchSummaryMatches(selected.session, options) {
 			return []searchCandidate{}, true, nil
 		}
 		if hasUnreadableDescendant(selected, diagnostics) {
@@ -193,7 +185,7 @@ func searchCandidates(roots []*model.Session, allNodes []graphNode, nodesBySessi
 	}
 	filtered := make([]graphNode, 0, len(roots))
 	for _, root := range roots {
-		if searchSummaryMatches(root, options, since, until) {
+		if searchSummaryMatches(root, options) {
 			if node, exists := nodesBySession[root]; exists {
 				filtered = append(filtered, node)
 			}
@@ -230,8 +222,8 @@ func hasUnreadableDescendant(selected graphNode, diagnostics []commandDiagnostic
 	return false
 }
 
-func searchSummaryMatches(session *model.Session, options searchOptions, since, until time.Time) bool {
-	if options.common.agent != "" && string(session.Agent) != options.common.agent || options.project != "" && session.Project != options.project || options.cwd != "" && !cwdContains(options.cwd, session.CWD) || !since.IsZero() && session.UpdatedAt.Before(since) || !until.IsZero() && session.UpdatedAt.After(until) {
+func searchSummaryMatches(session *model.Session, options searchOptions) bool {
+	if options.common.agent != "" && string(session.Agent) != options.common.agent || options.project != "" && session.Project != options.project || options.cwd != "" && !cwdContains(options.cwd, session.CWD) || !options.window.contains(session.UpdatedAt) {
 		return false
 	}
 	return true

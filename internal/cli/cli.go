@@ -302,6 +302,31 @@ func newFlagSet(name string, output io.Writer, usage func(io.Writer)) *flag.Flag
 	return flags
 }
 
+type updateWindow struct {
+	since time.Time
+	until time.Time
+}
+
+func parseUpdateWindow(since, until string, now time.Time, location *time.Location) (updateWindow, error) {
+	var window updateWindow
+	var err error
+	if since != "" {
+		if window.since, err = parseTimeFilter(since, now, location); err != nil {
+			return updateWindow{}, err
+		}
+	}
+	if until != "" {
+		if window.until, err = parseTimeFilter(until, now, location); err != nil {
+			return updateWindow{}, err
+		}
+	}
+	return window, nil
+}
+
+func (window updateWindow) contains(value time.Time) bool {
+	return (window.since.IsZero() || !value.Before(window.since)) && (window.until.IsZero() || !value.After(window.until))
+}
+
 func parseTimeFilter(value string, now time.Time, location *time.Location) (time.Time, error) {
 	if parsed, err := time.Parse(time.RFC3339, value); err == nil {
 		return parsed, nil

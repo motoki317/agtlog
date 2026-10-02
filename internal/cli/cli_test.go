@@ -363,3 +363,22 @@ func TestSubcommandHelpWritesOnlyStdout(t *testing.T) {
 		})
 	}
 }
+
+func TestInvalidTimeFilterIsUsageErrorBeforeRegistry(t *testing.T) {
+	for _, args := range [][]string{
+		{"list", "--since", "last-week"},
+		{"list", "--until", "last-week"},
+		{"search", "needle", "--since", "last-week"},
+		{"search", "needle", "--until", "last-week"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			err := Execute(context.Background(), args, &stdout, &stderr, func(context.Context, Options) (Registry, error) {
+				return nil, errors.New("fictional pricing refresh failure")
+			})
+			if exitCode(err) != 2 || errorCode(err) != "usage" || stdout.Len() != 0 {
+				t.Fatalf("error = %#v, stdout = %q, stderr = %q", err, stdout.String(), stderr.String())
+			}
+		})
+	}
+}

@@ -21,6 +21,7 @@ type listOptions struct {
 	query   string
 	since   string
 	until   string
+	window  updateWindow
 	sort    string
 	order   string
 	limit   int
@@ -45,11 +46,7 @@ func runList(ctx context.Context, args []string, help io.Writer, factory Registr
 		return nil, "", runtimeError("internal", err.Error())
 	}
 	sessions, commandDiags := addressableRoots(sessions, commandDiagnostics(diagnostics))
-	now := time.Now()
-	filtered, err := filterListSessions(sessions, options, now, time.Local)
-	if err != nil {
-		return nil, "", err
-	}
+	filtered := filterListSessions(sessions, options)
 	sortListSessions(filtered, options.sort, options.order)
 	total := len(filtered)
 	start := min(options.offset, total)
@@ -114,6 +111,11 @@ func parseListOptions(args []string, help io.Writer) (listOptions, error) {
 	if options.offset < 0 {
 		return listOptions{}, usageError("--offset must not be negative")
 	}
+	window, err := parseUpdateWindow(options.since, options.until, time.Now(), time.Local)
+	if err != nil {
+		return listOptions{}, err
+	}
+	options.window = window
 	return options, nil
 }
 
@@ -127,31 +129,17 @@ func errorsIsHelp(err error) bool {
 	return err == flag.ErrHelp
 }
 
-func filterListSessions(sessions []*model.Session, options listOptions, now time.Time, location *time.Location) ([]*model.Session, error) {
-	var since, until time.Time
-	var err error
-	if options.since != "" {
-		since, err = parseTimeFilter(options.since, now, location)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if options.until != "" {
-		until, err = parseTimeFilter(options.until, now, location)
-		if err != nil {
-			return nil, err
-		}
-	}
+func filterListSessions(sessions []*model.Session, options listOptions) []*model.Session {
 	candidates := make([]*model.Session, 0, len(sessions))
 	for _, session := range sessions {
-		if options.common.agent != "" && string(session.Agent) != options.common.agent || options.project != "" && session.Project != options.project || options.cwd != "" && !cwdContains(options.cwd, session.CWD) || !since.IsZero() && session.UpdatedAt.Before(since) || !until.IsZero() && session.UpdatedAt.After(until) {
+		if options.common.agent != "" && string(session.Agent) != options.common.agent || options.project != "" && session.Project != options.project || options.cwd != "" && !cwdContains(options.cwd, session.CWD) || !options.window.contains(session.UpdatedAt) {
 			continue
 		}
 		candidates = append(candidates, session)
 	}
 	query := strings.ToLower(strings.TrimSpace(options.query))
 	if query == "" {
-		return candidates, nil
+		return candidates
 	}
 	haystacks := make([]string, len(candidates))
 	for index, session := range candidates {
@@ -162,7 +150,7 @@ func filterListSessions(sessions []*model.Session, options listOptions, now time
 	for _, match := range matches {
 		result = append(result, candidates[match.Index])
 	}
-	return result, nil
+	return result
 }
 
 func sortListSessions(sessions []*model.Session, field, order string) {
