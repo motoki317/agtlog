@@ -1,31 +1,27 @@
 # Machine-readable CLI
 
-agtlog exposes local Claude Code and Codex sessions through `list`, `show`, and
-`search`. Running `agtlog` without one of these verbs still starts the terminal UI.
-When either stdin or stdout is non-terminal, that existing TUI path prints its
-plain static snapshot instead.
+agtlog exposes local Claude Code and Codex sessions through `list`, `show`, and `search`. Without
+one of these verbs, `agtlog` starts the terminal UI.
 
-Except for help, each command that exits successfully writes one response to
-stdout. `-h` and `--help` write plain help text to stdout and exit 0. JSON is the
-default format and uses two-space indentation. `--format text` emits a compact,
-terminal-safe human view of a result. JSON is the complete machine contract.
-Operational errors and usage diagnostics never share stdout with a response.
-Non-fatal warnings are fields in a successful response.
+`agtlog <verb> --help` lists the flags of each verb with their defaults.
+
+A successful command writes one response to stdout. Help is the exception: `-h` and `--help` write
+plain help text to stdout and exit 0. The default format, JSON, is the complete machine contract.
+Errors and usage diagnostics never go to stdout. A successful response carries non-fatal warnings
+as fields.
 
 ## Compatibility
 
-Every JSON document contains `schema_version`. Version 1 is the contract in this
-document. Consumers must ignore unknown fields and reject schema versions they do
-not support.
+Every JSON document contains `schema_version`. This document defines version 1. Consumers must
+ignore unknown fields and reject a schema version that they do not support.
 
-A change to a field's meaning, scope, unit, required status, nullability, or closed
-enum requires a new schema version. A new optional field does not require a new
-version.
+A change to the meaning, scope, unit, required status, or nullability of a field, or to a closed
+enum, requires a new schema version. A new optional field does not. Every enum whose complete value
+list this document gives is closed.
 
-All fields shown without an `optional` label are present. This rule includes zero,
-`false`, empty strings, and empty arrays. Timestamps use RFC 3339 with an explicit
-offset and retain the offset from the source log. A missing source timestamp is
-`0001-01-01T00:00:00Z`.
+Every field that this document does not mark `optional` is present, also when its value is zero,
+`false`, an empty string, or an empty array. Timestamps use RFC 3339 with an explicit offset and
+keep the offset from the source log. A missing source timestamp is `0001-01-01T00:00:00Z`.
 
 ## Common syntax
 
@@ -35,36 +31,39 @@ agtlog show <selector> [flags]
 agtlog search <pattern> [flags]
 ```
 
-Flags can appear before or after the `show` selector or `search` pattern. `--` ends
-flag parsing, and every later token is an operand. Flags must precede `--`; for
-example, use `agtlog search --limit 5 -- -pattern`. The verb must be the first
-command-line token.
+The verb must be the first command-line token. Otherwise agtlog parses the arguments as terminal
+UI flags and writes no JSON. For example, `agtlog --offline list` writes the terminal UI usage
+text and `agtlog: unexpected argument "list"` to stderr and exits 1.
 
-Every subcommand accepts these flags:
+Flags can appear before or after the `show` selector or the `search` pattern. `--` ends flag
+parsing, and every later token is an operand, for example `agtlog search --limit 5 -- -pattern`.
 
-| Flag | Meaning |
-| --- | --- |
-| `--agent claude\|codex` | Keep one agent. |
-| `--claude-dir PATH` | Add a Claude home. Repeat the flag to add more homes. |
-| `--codex-dir PATH` | Add a Codex home. Repeat the flag to add more homes. |
-| `--format json\|text` | Select JSON or plain text. The default is `json`. |
-| `--offline` | Explicitly retain the default cached and embedded pricing behavior. |
-| `--refresh-prices` | Refresh the price cache before the command. |
+agtlog reads Claude logs from `projects` below the home that `CLAUDE_CONFIG_DIR` names. If that
+variable is unset, it reads `~/.config/claude/projects` and `~/.claude/projects`. It reads Codex
+logs from `sessions` below `CODEX_HOME`, or from `~/.codex/sessions` if that variable is unset. A
+missing directory among these yields no sessions and no error.
 
-Each directory flag names an agent home. agtlog appends `projects` for Claude
-and `sessions` for Codex. Configured homes are added to the home selected by
-`CLAUDE_CONFIG_DIR` or `CODEX_HOME`, or to agtlog's built-in defaults when that
-variable is unset.
+Each `--claude-dir` or `--codex-dir` value adds an agent home, and agtlog appends `projects` or
+`sessions` to it. An added home never replaces the homes above. To read only chosen homes, set
+`CLAUDE_CONFIG_DIR` and `CODEX_HOME` to them.
 
-If a directory flag is absent, `AGTLOG_CLAUDE_DIRS` or `AGTLOG_CODEX_DIRS` can
-supply a list with the platform path-list separator, the same separator as
-`PATH`. A directory flag overrides its matching environment variable. agtlog
-rejects a configured home that is missing or is not a directory. An `--agent`
-filter skips validation and discovery for the other agent.
+If a verb has no `--claude-dir`, the `AGTLOG_CLAUDE_DIRS` list supplies the added Claude homes, with
+the separator that `PATH` uses. `AGTLOG_CODEX_DIRS` works the same way for `--codex-dir`. If an
+added home is missing or is not a directory, the command fails with `usage`. `--agent` skips this
+check and discovery for the other agent.
 
-Subcommands do not start a background price refresh. `--offline` and
-`--refresh-prices` are mutually exclusive. `--theme` and `--no-watch` belong to
-the terminal UI and are usage errors on subcommands.
+Subcommands never start a background price refresh, so `--offline` only states the default.
+Combining `--offline` with `--refresh-prices` is a usage error.
+
+## Paging
+
+In every command, `--all` removes the count limit and sets `page.limit` to `0`. `--limit 0` is a
+usage error.
+
+Each command discovers the current logs. Event indices stay the same while a source timeline does
+not change. If a log changes between page requests, the caller must restart paging to get a
+consistent result. An append to the log of a live session is such a change, and no response field
+reports it.
 
 ## Session refs and selectors
 
@@ -75,28 +74,40 @@ A canonical ref identifies one node in a session graph:
 <agent>:<root-id>#<subagent-path>
 ```
 
-Claude Workflow runs use synthetic group nodes. A group ref ends in `#<runId>`,
-and each child transcript ref ends in `#<runId>/<agentId>`.
+`<root-id>` is the session ID of the top-level session. `<subagent-path>` has one or more segments
+separated by `/`:
 
-Every response uses canonical refs. Codex descendant refs use the logged agent
-path, so a ref stays unchanged when a later record supplies a thread ID. A Claude
-descendant ref can instead use its logged `agentId`; that Codex stability guarantee
-does not apply to Claude.
+- A Codex descendant uses its logged agent path without the leading `/root/`.
+- A Claude subagent uses its logged `agentId`, after the path of its parent subagent, if any.
+- A Claude Code Workflow run becomes a **group node** at `<run-id>`, the logged `runId`. The agents
+  of the run are its children at `<run-id>/<agent-id>`.
 
-The root ID and each subagent path segment are opaque strings derived from the
-source log. `/` separates nested path segments after `#`. Reserved or non-ASCII
-bytes inside a component use URL percent encoding, so log-derived `#`, `/`, and
-control characters cannot change ref structure.
+A group node has no log file and no events of its own. No JSON field marks it: its `path` is the
+log path of its parent plus `#<run-id>`, and `show` returns no events for it.
 
-Input selectors accept a canonical ref, a root ID, or a descendant ID recorded by
-either agent. They also accept a unique prefix of such an ID with at least six
-characters. A Codex thread ID is a descendant ID. An absolute path selects the
-session stored in that file.
-A bare path segment for an inline subagent is not a global selector.
+Every response uses canonical refs. A Codex descendant ref stays the same when a later record
+supplies the thread ID. If two Codex siblings log the same agent path, only one keeps that path,
+and the other uses its thread ID after the path of its parent. Which sibling keeps the path can
+change when the parent log announces another spawn on that path. This contract promises no
+stability for a Claude descendant ref.
 
-An exact ID wins over prefix matches. An ambiguous selector returns candidates in
-canonical-ref order. Each candidate contains `ref`, `agent`, `project`, `title`,
-and `updated_at`.
+The root ID and each path segment are opaque strings from the source log. agtlog percent-encodes
+each one as a URL path segment. A `#`, `/`, or control character from a log therefore cannot change
+the structure of a ref. The session objects carry these IDs only inside `ref`.
+
+A selector can be one of these:
+
+- a canonical ref
+- the absolute path of a log file
+- an ID: a top-level session ID, a Claude `agentId`, a Workflow `runId`, or a Codex thread ID
+- a unique prefix of such an ID with at least six characters
+
+An exact match wins over a prefix match. A selector shorter than six characters that matches
+nothing exactly fails with `usage`. A Codex child whose thread ID is not logged yet has only its
+agent name as an ID, and that name does not select it. Only its canonical ref does.
+
+An ambiguous selector fails with `ambiguous_ref`. Its `error.candidates` array lists the matches in
+canonical-ref order, each with `ref`, `agent`, `project`, `title`, and `updated_at`.
 
 ## Shared session fields
 
@@ -110,50 +121,50 @@ and `updated_at`.
 | `cwd` | string | Working directory from the log. |
 | `title` | string | Session title. |
 | `git_branch` | string | Logged Git branch. |
-| `models` | string array | Model names for this node in lexical order. |
-| `started_at` | timestamp | Start time for this node. |
-| `updated_at` | timestamp | Latest time for this node or any descendant. |
-| `messages` | integer | Message count for this node, excluding descendants. |
-| `turns` | integer, optional | User messages, agent messages, and tool calls for this node and all descendants, including Workflow children. Always emitted by current producers, absent from older v1 producers. |
-| `subagents` | integer | Recursive agent transcript count. Workflow group containers are excluded. |
-| `has_error` | boolean | Whether this node reports an API error. |
+| `models` | string array | Model names of this node in lexical order. |
+| `started_at` | timestamp | Start time of this node. |
+| `updated_at` | timestamp | Latest time of this node or any descendant. |
+| `messages` | integer | Messages of this node, without descendants. |
+| `turns` | integer, optional | User messages, agent messages, and tool calls of this node and all descendants, including Workflow children. |
+| `subagents` | integer | Recursive count of agent transcripts. Workflow group nodes do not count. |
+| `has_error` | boolean | `true` when this node logged an API error. Only Claude logs set it. |
 | `tokens` | token totals | Recursive owned token totals. |
 | `cost` | cost totals | Recursive owned API-equivalent cost. |
-| `path` | string | Source path. |
+| `path` | string | Log file of this node. A Workflow group, or a Codex child stored in its parent's log, has `<parent log>#<suffix>` instead. That value is not a file, and no selector matches it. |
 
-Owned totals subtract replayed Claude requests that share the same nonempty
-message ID and the same request ID. An empty request ID still participates; only
-an empty message ID bypasses deduplication. The earliest `started_at` owns a
-duplicate; equal starts use the lexically smallest root ID. Summing `tokens.total`
-or `cost.usd` across `list` rows therefore produces a corpus total without double
-counting.
+Owned totals leave out each request that another session owns. When several sessions log the same
+request, the session with the earliest `started_at` owns it. Equal start times go to the lexically
+smallest session ID. [Cross-session cost deduplication](ADR/20260724-cross-session-cost-dedup.md)
+defines when two log entries are the same request.
 
-Token totals use these required integer fields:
+agtlog assigns owners across all discovered sessions before the `list` filters run. A filtered list
+therefore leaves out each request whose owner is outside the filter. The rows of an unfiltered
+`list --all` without warnings sum to a corpus total that counts no request twice. With a warning,
+the sum can miss requests, because a session that `unaddressable_session` leaves out can still own
+them. Ownership never crosses agents, so the sum also holds for one agent under `--agent` alone.
+
+Token totals have these required integer fields:
 
 | Field | Meaning |
 | --- | --- |
-| `uncached_input` | Input tokens not read from or written to a prompt cache. |
+| `uncached_input` | Input tokens that were neither read from nor written to a prompt cache. |
 | `output` | Output tokens. |
 | `cache_write` | Prompt-cache creation tokens. |
 | `cache_read` | Prompt-cache read tokens. |
-| `total` | Sum of the four disjoint categories above. |
+| `total` | Sum of the four disjoint fields above. |
 
-Codex input counts include cache reads in the raw log, so agtlog subtracts that
-folded amount from `uncached_input`.
-
-Cost totals use these required fields:
+Cost totals have these required fields:
 
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `usd` | number | API-equivalent cost in US dollars. |
-| `complete` | boolean | It is `false` when any logged model lacks a published rate. |
-| `estimated` | boolean | It is `true` when agtlog used a published stand-in rate. |
+| `complete` | boolean | `false` when a logged model has no published rate. |
+| `estimated` | boolean | `true` when a Codex model has no published rate of its own and agtlog applied the rate of a [stand-in model](ADR/20260719-cost-model.md). |
 | `missing_pricing` | string array | Unpriced model names in lexical order. |
 
 ## `list`
 
-`list` returns top-level sessions only. The default order is `updated_at`
-descending, then agent and ID.
+`list` returns top-level sessions only.
 
 ```json
 {
@@ -172,65 +183,54 @@ descending, then agent and ID.
 }
 ```
 
-Filters:
+`--query` keeps a session when the characters of the query appear in order, not necessarily
+adjacent, in its agent, project, and title. The match ignores case. It reads these fields as a
+terminal shows them: escape sequences are removed, and control and format characters become
+spaces. The terminal UI filter uses the same match. `--query` does not change the row order.
 
-- `--project NAME` matches the project basename.
-- `--cwd PATH` matches that directory and its descendants.
-- `--query STRING` uses the terminal UI's fuzzy match over agent, project, and
-  title.
-- `--since VALUE` and `--until VALUE` filter `updated_at`.
+`--since` and `--until` filter on `updated_at`. A time value is an RFC 3339 timestamp, a local date
+such as `2026-08-01`, or a duration such as `7d`, `24h`, or `90m`. A duration counts back from the
+wall clock at command start. A local date means midnight in the local time zone of the machine.
+Because both bounds are inclusive, `--until 2026-08-05` includes midnight at the start of 5 August
+and excludes the rest of that day.
 
-A time value can be an RFC 3339 timestamp or a local date such as `2026-08-01`.
-It can also be a duration such as `7d`, `24h`, or `90m`. A duration means that
-amount of time before the wall clock at command start. Local dates use the
-machine's local time zone at midnight. Both `--since` and `--until` boundaries
-are inclusive. Consequently, `--until 2026-08-05` includes midnight at the start
-of 5 August but excludes the rest of that day. The next date also includes exactly
-its midnight because the boundary is inclusive; use an explicit final timestamp
-when that distinction matters.
-
-Use `--sort updated|started|tokens|cost|turns|messages` and `--order asc|desc` to set the
-order. Use `--limit N` and `--offset N` for pages. The default limit is 50.
-`--all` removes the limit. Equal sort values use agent and then root ID in
-ascending order. `turns` sorts the recursive count. `messages` sorts only this node’s messages.
-
-For `list`, `show`, and `search`, `--all` sets `page.limit` to `0`. This value is a
-sentinel for an unbounded count request, not the number of items returned.
-`--limit 0` is a usage error for every command.
+`--sort` orders rows by one field: `updated` by `updated_at`, `started` by `started_at`, `tokens`
+by `tokens.total`, `cost` by `cost.usd`, `turns` by `turns`, and `messages` by `messages`. The
+default is `--sort updated --order desc`. Rows with equal values fall back to agent and then
+session ID, both ascending under either `--order`.
 
 ## `show`
 
-`show` returns one session node, its direct subagent refs, its attribution split,
-and its event timeline.
+A `show` response holds `schema_version`, `command`, `session`, `subagent_refs`, `totals`,
+`events`, `page`, and `warnings`. `session` describes the selected node with the shared session
+fields. `subagent_refs` holds the canonical refs of its direct children in lexical order. `events`
+holds one page of its timeline. `page` has the integers `offset`, `limit`, `returned`, `total`, and
+`next_offset`, and the booleans `has_more` and `complete`.
 
-The `self` values under `totals.tokens`, `totals.cost`, and `totals.turns` cover the selected node.
-The `descendants` values cover its recursive children, and `total` is their sum.
-`totals.turns` contains integer counts and is optional for older v1 producers.
-Current producers always emit it, including zero counts. `session.turns` remains
-the recursive total. Text output adds `TURNS` after `COST`, followed by the total,
-`self=<own>`, and `descendants=<descendants>` as tab-separated fields.
+Under `totals.tokens`, `totals.cost`, and the optional `totals.turns`, `self` covers the selected
+node, `descendants` covers all nodes below it, and `total` is their sum. `totals.turns` holds
+integers.
 
-Each event always contains integer `index`, timestamp string `timestamp`, event-kind
-string `kind`, string `text`, string `model`, and string array `truncated`. The
-common empty-value and missing-timestamp rules apply. `truncated` names bounded
-fields: `text`, `tool.summary`, `tool.input`, `tool.diff`, or `tool.output`. Event
-kinds are
-`user`, `assistant-text`, `thinking`, `tool-call`, `tool-result`, `subagent`,
-`advisor`, `system`, `compact`, and `usage`.
+Every event contains integer `index`, timestamp `timestamp`, string `kind`, string `text`, string
+`model`, and string array `truncated`. The event kinds are `user`, `assistant-text`, `thinking`,
+`tool-call`, `tool-result`, `subagent`, `advisor`, `system`, `compact`, and `usage`. In `user` and
+`assistant-text` events, `text` omits the harness-only `system-reminder`, `permission-preamble`,
+and `local-command-caveat` blocks. `truncated` names each bounded field: `text`, `tool.summary`,
+`tool.input`, `tool.diff`, or `tool.output`.
 
 An event can also contain these fields:
 
 | Field | Type and presence | Meaning |
 | --- | --- | --- |
-| `tool` | optional object | Tool metadata defined below. |
-| `usage` | optional object | Normalized request tokens defined below. |
-| `cost` | optional object | Cost for the request represented by `usage`. |
-| `record` | optional object | Physical source record defined below. |
-| `harness` | optional boolean | Present as `true` on a harness-injected user turn. |
-| `subagent_ref` | optional string | Canonical ref for an event-linked child. |
-| `compact` | optional object | Compaction metadata defined below. |
+| `tool` | optional object | Tool metadata. |
+| `usage` | optional object | Normalized request tokens. |
+| `cost` | optional object | Cost of the request that `usage` describes. |
+| `record` | optional object | Physical source record. |
+| `harness` | optional boolean | `true` on a user turn that the harness injected. Absent otherwise. |
+| `subagent_ref` | optional string | Canonical ref of the child that the event links to. |
+| `compact` | optional object | Compaction metadata. |
 
-The nested event objects have these required fields when present:
+A nested event object that is present has all of its fields:
 
 | Object | Fields |
 | --- | --- |
@@ -240,39 +240,33 @@ The nested event objects have these required fields when present:
 | `record` | `path` string, `offset` integer byte offset, `length` integer byte length. |
 | `compact` | `trigger` string, `post_tokens` integer. |
 
-`usage.context` is the prompt size for the request. `usage.flow` is uncached input,
-cache writes, and output added by that request. Event usage is diagnostic. Use
-session `tokens`, not a sum of events, for totals.
+`usage.context` is the prompt size of the request. `usage.flow` is the uncached input, cache
+writes, and output that the request added. Event usage is diagnostic. For totals, use the session
+`tokens`, not a sum of events.
 
-Use `--kind K[,K...]` to keep selected event kinds. `--offset` refers to the full
-timeline before kind filtering. `event.index` therefore stays stable across
-filters. `page.next_offset` is one past the last returned full-timeline index.
-When no event is returned, it equals `page.offset`. The default event limit is
-200. `--all` removes the count limit.
+`--kind K[,K...]` keeps the selected event kinds. `--offset` is an index into the full timeline
+before kind filtering, so `event.index` stays the same across filters. `page.next_offset` is one
+past the last returned index. If no event is returned, it equals `page.offset`.
 
-`page.total` counts kind-matching events across the full timeline, including
-matching events before `page.offset`. `page.complete` is true when no later
-kind-matching event remains after this page. `page.has_more` is its inverse.
+`page.total` counts the events of the selected kinds in the full timeline, including events before
+`page.offset`. `page.complete` is `true` when no event of the selected kinds follows this page.
+`page.has_more` is its inverse.
 
-`--max-text N` limits each text-bearing event field to N runes. The default is
-2,000. Zero removes the per-field limit, and `--full` is shorthand for zero. A
-bounded field appears in `truncated`.
+`--max-text N` bounds each text field of an event to N runes, 2000 by default, and `--full`
+removes the bound. A bounded field keeps its first and last runes around a `…` that replaces the
+middle, and the `…` counts toward N.
 
-The complete event-page JSON response is limited to 256 KiB. The page normally
-stops before an event that crosses the limit. If the first event alone crosses the
-limit, agtlog bounds its text fields and returns it. This total limit also applies
-with `--full`. Resume at `page.next_offset`. If required non-text metadata alone
-exceeds the limit, the command fails with `internal` instead of emitting an
+The complete JSON response of an event page is limited to 256 KiB, also with `--full`. A page
+stops before the event that crosses the limit. If the first event alone crosses the limit,
+agtlog bounds its text fields and returns it. Resume at `page.next_offset`. If the required
+non-text metadata alone exceeds the limit, the command fails with `internal` instead of writing an
 oversized document.
 
-`--no-events` returns the summary, subagent refs, and attribution totals without
-opening the source timeline. Its page echoes the requested `offset` in `offset`
-and `next_offset`; `limit`, `returned`, and `total` are zero, `has_more` is false,
-and `complete` is true. The page does not describe event availability.
-`--no-events` and `--raw` are mutually exclusive.
+`--no-events` returns `session`, `subagent_refs`, and `totals` without reading the timeline.
+`events` is empty. Its `page` says nothing about which events exist, and its `limit` of `0` does
+not mean an unbounded request. Combining `--no-events` with `--raw` is a usage error.
 
-`--raw INDEX` selects a separate response variant and returns the exact source line
-for an event:
+`--raw INDEX` selects a separate response that holds the exact source line of one event:
 
 ```json
 {
@@ -289,20 +283,16 @@ for an event:
 }
 ```
 
-`raw_json` is a string. agtlog does not decode and re-encode its key order or
-spacing. `--raw` requires JSON format; combining it with `--format text` is a usage
-error. The event-page response budget does not apply because truncation would
-violate byte exactness. An event without an available physical source line returns
-`record_unavailable`. A changed source line returns `record_changed`.
+`raw_json` is a string. agtlog does not decode it, so its key order and spacing are those of the
+source. `--format text` with `--raw` is a usage error. The 256 KiB limit does not apply.
 
 ## `search`
 
-`search` matches cleaned event text, tool input, diff, output, and result summary.
-Cleaned text is the parsed timeline text after agtlog removes harness-only
-`system-reminder`, `permission-preamble`, and `local-command-caveat` blocks. The
-default match is a case-insensitive substring. `--case-sensitive` keeps case, and
-`--regex` treats the pattern as RE2. Case-insensitive literal matching uses Unicode
-simple case folding.
+`search` matches the pattern against five fields of each event: `text`, `tool.input`, `tool.diff`,
+`tool.output`, and `tool.summary`. Each one holds the text of the `show` field of the same name
+before any `--max-text` bound. By default, the pattern matches as a case-insensitive substring
+with Unicode simple case folding. `--regex` reads the pattern as RE2, also case-insensitive.
+`--case-sensitive` keeps case in both modes.
 
 ```json
 {
@@ -344,85 +334,68 @@ simple case folding.
 }
 ```
 
-Each hit contains:
+In a hit, `event.tool` is the tool name. `field` names the matching field, one of the five above.
+`range` is `[start, end]`, the half-open rune offsets of the first match in that field. `matches`
+counts the matches in that field.
 
-- `session`: `ref`, `agent`, `project`, `title`, and `updated_at`.
-- `event`: `index`, `timestamp`, `kind`, and tool name.
-- `field`: `text`, `tool.input`, `tool.diff`, `tool.output`, or `tool.summary`.
-- `range`: `[start, end]`, the first match's half-open rune offsets in that field.
-- `snippet`: text around the first match.
-- `matches`: the number of matches in that field.
+`snippet` is the field text from S runes before the first match to S runes after it. S is the
+`--snippet` value, 200 by default. A `…` replaces the text cut from either side. In `snippet`, the
+match therefore starts at rune offset `start`, or at S + 1 when `start` is greater than S.
 
-These fields use the same text projection as `show` before display bounds.
+`search` accepts the session filters of `list` except `--query`: `--agent`, `--project`, `--cwd`,
+`--since`, and `--until`. `--session SELECTOR` limits the search to one node. The filters test each
+top-level session, or the `--session` node, before agtlog reads any timeline. agtlog then searches
+each selected node and all nodes below it. `--kind K[,K...]` keeps the hits in events of those
+kinds.
 
-Search accepts the `list` filters except `--query`. `--kind` filters events.
-`--session SELECTOR` searches one node and its descendants.
+Hits are sorted by these keys in turn:
 
-Summary filters select top-level roots, or the selected `--session` node. After a
-root passes, search inspects all descendants; `--kind` applies to every inspected
-event.
+1. the `updated_at` of the top-level session, descending
+2. the top-level ref, which is the part of `session.ref` before `#`
+3. `session.ref`
+4. `event.index`
+5. the field, in the order `text`, `tool.input`, `tool.diff`, `tool.output`, `tool.summary`
 
-Summary filters run before agtlog opens any timeline. A project, directory, time,
-agent, or session scope is the fast path. A corpus-wide search parses every
-candidate graph.
+A hit in a descendant carries the `updated_at` of that descendant, which can be older than the
+top-level `updated_at` that orders it.
 
-Hits have one total order: root `updated_at` descending, canonical ref, event
-index, then `text`, `tool.input`, `tool.diff`, `tool.output`, and `tool.summary`.
+The complete JSON response is limited to 256 KiB, also with `--all`. When the limit stops a page,
+`next_offset` is the first hit that was left out, `has_more` is `true`, `complete` is `false`, and
+`total` is absent. Resume at that `next_offset`. If the required metadata of the response or of one
+hit exceeds the limit, the command fails with `internal`.
 
-Use `--limit N`, `--offset N`, and `--all` for hit pages. The default limit is 30.
-`--snippet N` sets the context runes on each side of the first match. The default
-is 200.
+Search stops reading timelines once it holds `offset + limit + 1` ordered hits. Under `--all` or a
+large `--limit`, `limit` here is an upper bound on the hits that fit in one response.
+`page.complete` is `true` only when search read every timeline that it selected and no warning
+occurred. `page.total` is an optional integer that is present only then. It counts all ordered
+hits, including hits before `page.offset`. A page with more hits after it therefore has no `total`.
 
-The complete JSON response is limited to 256 KiB, including `--all` responses.
-When that budget stops a page, `returned` is the number of emitted hits,
-`next_offset` is the first omitted ordered hit, `has_more` is true, `complete` is
-false, and `total` is absent. Resume with that `next_offset`. If required hit or
-response metadata alone exceeds the budget, the command fails with `internal`.
+`sessions_scanned` counts the nodes that search read before it stopped, and `sessions_matched`
+counts those among them with a hit. `page.has_more` is `true` when the scan found another ordered
+hit after the page, or when the 256 KiB limit stopped the page. If `complete` is `false`,
+`has_more: false` does not prove that an unreadable session holds no more hits.
 
-`page.complete` is true only after an exhaustive, warning-free scan, and
-`page.total` is an optional integer present only then. The total counts all ordered
-hits, including hits before `page.offset`. `sessions_scanned` counts session nodes
-inspected before ordered result collection stopped.
-`sessions_matched` counts those nodes that produced at least one hit.
-`page.has_more` is true only when the scan found an additional ordered hit beyond
-the page. If `complete` is false, `has_more: false` does not prove that unreadable
-sessions contain no further hits.
-
-Each invocation discovers the current logs. Event indices remain stable while a
-source timeline is unchanged. If a log changes between page requests, callers
-must restart paging to obtain a snapshot-consistent result.
-
-## Text pages and cost markers
-
-Paginated text output includes a `PAGE` row. It reports `returned`, `total`,
-`has_more`, and `next_offset`. Zero or more `WARNING` rows follow it. Each warning
-row contains its code, ref or path, and message. The `show` and `search` page rows
-also report `complete`; the search row reports its scan counters. Search uses
-`total=-` when the exhaustive total is unavailable.
-
-A cost prefixed with `~` uses a published stand-in price. A cost suffixed with
-`!` is incomplete because at least one model has no published price.
-
-Use this command to request a hit without the ordinary per-field bound. The 256
-KiB event-page budget can still bound an oversized first event:
+To read the whole event of a hit, pass its `session.ref` and `event.index` to `show`:
 
 ```bash
-agtlog show <ref> --offset <index> --limit 1 --full
+agtlog show <session.ref> --offset <event.index> --limit 1 --full
 ```
 
 ## Warnings and errors
 
-Non-fatal problems use warning objects with `code`, `message`, and either `ref` or
-`path`. Warning codes are `unreadable_session` for a log that could not be parsed
-or loaded and `unaddressable_session` for a parsed graph without a unique stable
-ref. Broad `list` and `search` commands continue past either condition. Any warning
-makes a search incomplete and omits `page.total`.
+A warning object has `code`, `message`, and either `ref` or `path`. Its code is one of these:
 
-If discovery already knows that a descendant of a scoped `--session` target is
-unreadable, search fails with `unreadable_session` instead of claiming a complete
-scan of that graph.
+- `unreadable_session`: agtlog could not load or parse a log.
+- `unaddressable_session`: a parsed session has an empty ID, or its canonical ref collides with
+  another, as with two diverged copies of one session.
 
-Errors always use JSON on stderr, even after `--format text`:
+`list`, and `search` without `--session`, leave such a session out, warn, and continue.
+
+If a log of the selected graph cannot be read, `search --session` fails with `unreadable_session`
+instead. A `search --session` response has no warnings. `show` always returns an empty `warnings`
+array.
+
+Errors go to stderr as JSON, also with `--format text`:
 
 ```json
 {
@@ -434,17 +407,15 @@ Errors always use JSON on stderr, even after `--format text`:
 }
 ```
 
-An `ambiguous_ref` error also contains `candidates`.
-
 | Error code | Exit | Meaning |
 | --- | --- | --- |
-| `usage` | 2 | Invalid syntax, flags, values, or flag combinations. |
-| `not_found` | 3 | No selector match, or no event at a requested `--raw` index. |
-| `ambiguous_ref` | 3 | More than one session matches a selector. |
-| `unreadable_session` | 1 | A selected log or required session graph could not be read. |
-| `unaddressable_session` | 1 | A parsed session has no unique stable canonical ref. |
-| `record_changed` | 1 | A raw source record changed after discovery. |
+| `usage` | 2 | Invalid syntax, flags, values, or flag combinations, a missing added home, or a selector shorter than six characters that matches nothing exactly. |
+| `not_found` | 3 | No session matches the selector, or no event exists at the `--raw` index. |
+| `ambiguous_ref` | 3 | More than one session matches the selector. |
+| `unreadable_session` | 1 | agtlog could not read a selected log or a required session graph. |
+| `unaddressable_session` | 1 | The selected session has an empty ID or a canonical ref that collides with another. |
+| `record_changed` | 1 | A raw source record changed after discovery, or agtlog can no longer read it. Run the command again. |
 | `record_unavailable` | 1 | An event has no physical source record. |
 | `internal` | 1 | An internal invariant or runtime operation failed. |
 
-Exit 0 means success, including help and an empty result.
+Exit 0 means success, including an empty result.
