@@ -218,6 +218,8 @@ func (options commonOptions) validate() error {
 
 func (options commonOptions) registryOptions() Options {
 	return Options{
+		// Subcommands never start a background price refresh. See
+		// docs/ADR/20260805-machine-readable-cli.md.
 		Offline:       !options.refreshPrices,
 		RefreshPrices: options.refreshPrices,
 		Agent:         options.agent,

@@ -15,6 +15,8 @@ import (
 	"github.com/motoki317/agtlog/internal/source"
 )
 
+// machineResponseBudgetBytes bounds an encoded show or search response, including
+// the trailing newline that writeJSON adds and MarshalIndent omits.
 const machineResponseBudgetBytes = 256 << 10
 
 type showOptions struct {

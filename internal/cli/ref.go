@@ -88,6 +88,8 @@ func appendChildNodes(nodes *[]graphNode, root, parent *model.Session, rootRef, 
 	usedPaths := make(map[string]bool, len(parent.Subagents))
 	for _, child := range parent.Subagents {
 		path := canonicalChildPath(child, parentPath)
+		// Codex can reuse one agent path for two child threads. The later child
+		// falls back to its ID so that both keep distinct refs.
 		if usedPaths[path] {
 			path = canonicalChildIDPath(child, parentPath)
 		}
@@ -100,6 +102,7 @@ func appendChildNodes(nodes *[]graphNode, root, parent *model.Session, rootRef, 
 func canonicalChildPath(child *model.Session, parentPath string) string {
 	if child.AgentPath != "" {
 		path := strings.Trim(child.AgentPath, "/")
+		// Codex agent paths start with the /root segment that every descendant shares.
 		path = strings.TrimPrefix(path, "root/")
 		if path != "" {
 			return escapeRefPath(path)
@@ -118,6 +121,7 @@ func canonicalChildPathFallback(child *model.Session, parentPath string) string 
 func canonicalChildIDPath(child *model.Session, parentPath string) string {
 	segment := child.ID
 	if segment == "" {
+		// Claude names a subagent transcript agent-<agentId>.jsonl.
 		segment = strings.TrimSuffix(strings.TrimPrefix(filepath.Base(child.Path), "agent-"), filepath.Ext(child.Path))
 	}
 	segment = escapeRefComponent(segment)
@@ -182,6 +186,9 @@ func resolveSelector(selector string, nodes []graphNode, diagnostics []commandDi
 	return graphNode{}, resolutionError("not_found", "no session matches the selector", nil)
 }
 
+// selectorEligible rejects an inline child whose ID only repeats its ref path
+// segment, such as a Codex agent name logged before its thread ID. That name is
+// local to its parent session, so only the canonical ref selects the child.
 func selectorEligible(node graphNode) bool {
 	if node.session.Group {
 		return true
@@ -190,7 +197,7 @@ func selectorEligible(node graphNode) bool {
 		return true
 	}
 	parts := strings.Split(node.path, "/")
-	return len(parts) == 0 || escapeRefComponent(node.session.ID) != parts[len(parts)-1]
+	return escapeRefComponent(node.session.ID) != parts[len(parts)-1]
 }
 
 func matchNodes(nodes []graphNode, matches func(graphNode) bool) []graphNode {

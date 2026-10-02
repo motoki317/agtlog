@@ -31,6 +31,9 @@ import (
 
 var version = "dev"
 
+// defaultMaxProcs caps the default GOMAXPROCS because discovery can leave the
+// runtime with an OS-thread pool sized for high-core machines. An explicitly set
+// GOMAXPROCS, even an empty one, disables the cap.
 const defaultMaxProcs = 8
 
 func main() {
@@ -71,6 +74,8 @@ func defaultRegistry(ctx context.Context, options cliOptions) (*source.Registry,
 	claudeRoots := claude.Roots(home, os.Getenv("CLAUDE_CONFIG_DIR"), claudeDirs)
 	codexRoots := codex.Roots(home, os.Getenv("CODEX_HOME"), codexDirs)
 	logRoots := append(append([]string(nil), claudeRoots...), codexRoots...)
+	// agtlog never writes to agent log or configuration directories, so the cache
+	// must not overlap a log root or the agent home above it.
 	cacheRoots := make([]string, 0, 2*len(logRoots))
 	for _, root := range logRoots {
 		cacheRoots = append(cacheRoots, root, filepath.Dir(root))
@@ -109,6 +114,8 @@ func defaultRegistry(ctx context.Context, options cliOptions) (*source.Registry,
 	return source.NewRegistry(adapters, source.Options{CacheDir: cacheDir}), nil
 }
 
+// defaultCacheDir ignores a relative XDG_CACHE_HOME because the XDG Base Directory
+// specification treats a relative path as invalid.
 func defaultCacheDir(home, xdg string) string {
 	if filepath.IsAbs(xdg) {
 		return filepath.Join(xdg, "agtlog")

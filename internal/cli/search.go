@@ -211,6 +211,7 @@ func hasUnreadableDescendant(selected graphNode, diagnostics []commandDiagnostic
 	if path == "" || strings.Contains(path, "#") {
 		return false
 	}
+	// Claude stores the subagent transcripts of <session>.jsonl below <session>/.
 	companion := strings.TrimSuffix(filepath.Clean(path), filepath.Ext(path))
 	for _, diagnostic := range diagnostics {
 		if diagnostic.code != "unreadable_session" || diagnostic.agent != selected.session.Agent {
@@ -293,6 +294,8 @@ func executeSearch(ctx context.Context, registry Registry, candidates []searchCa
 		close(results)
 	}()
 
+	// Workers finish out of order. Committing results in candidate order keeps
+	// the hit order and the stopping point deterministic.
 	pending := make(map[int]candidateResult)
 	nextCandidate := 0
 	orderedHits := make([]SearchHit, 0)
@@ -370,6 +373,9 @@ func searchPageLimit(options searchOptions) int {
 	return options.limit
 }
 
+// searchScanLimit returns how many ordered hits to collect: the page plus one hit
+// that proves has_more. --all and larger limits collect at most the hits that one
+// response can hold. Zero means no limit.
 func searchScanLimit(options searchOptions) int {
 	limit := options.limit
 	if options.all || limit > maximumSearchHitsWithinBudget() {
@@ -382,6 +388,8 @@ func searchScanLimit(options searchOptions) int {
 	return options.offset + limit + 1
 }
 
+// maximumSearchHitsWithinBudget is an upper bound because every encoded hit is at
+// least as large as an empty top-level hit.
 func maximumSearchHitsWithinBudget() int {
 	encoded, _ := json.MarshalIndent(SearchHit{}, "", "  ")
 	return machineResponseBudgetBytes/len(encoded) + 1
@@ -503,6 +511,8 @@ func scanCandidate(ctx context.Context, registry Registry, candidate searchCandi
 	return result
 }
 
+// physicalSessionPath strips the #suffix that marks an inline child stored in
+// its parent's file.
 func physicalSessionPath(path string) string {
 	path, _, _ = strings.Cut(path, "#")
 	return path
