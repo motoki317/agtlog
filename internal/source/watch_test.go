@@ -791,6 +791,61 @@ func TestFollowerKeepsNonMirroredClaudeRefreshIncremental(t *testing.T) {
 	}
 }
 
+func TestFollowerIndexIgnoresConsumerEditsToDeliveredSessions(t *testing.T) {
+	firstRoot := filepath.Join(t.TempDir(), "a-home")
+	secondRoot := filepath.Join(t.TempDir(), "z-home")
+	for _, root := range []string{firstRoot, secondRoot} {
+		if err := os.MkdirAll(root, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	firstMirror := filepath.Join(firstRoot, "mirror.jsonl")
+	secondMirror := filepath.Join(secondRoot, "mirror.jsonl")
+	soloPath := filepath.Join(firstRoot, "solo.jsonl")
+	mirrorContents := []byte("identical claude transcript\n")
+	for _, path := range []string{firstMirror, secondMirror} {
+		if err := os.WriteFile(path, mirrorContents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(soloPath, []byte("solo transcript\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	adapter := &mirroredFollowSource{
+		agent: model.AgentClaude,
+		roots: []string{firstRoot, secondRoot},
+		sessions: map[string]*model.Session{
+			firstMirror:  {ID: "session-mirror", Agent: model.AgentClaude, Path: firstMirror, SourceSize: int64(len(mirrorContents))},
+			secondMirror: {ID: "session-mirror", Agent: model.AgentClaude, Path: secondMirror, SourceSize: int64(len(mirrorContents))},
+			soloPath:     {ID: "solo", Agent: model.AgentClaude, Path: soloPath, Title: "parsed title"},
+		},
+		parses: make(map[string]int),
+	}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1})
+	if _, err := registry.Discover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	follower, err := registry.Follow(context.Background(), WatchOptions{Debounce: time.Hour, RescanInterval: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = follower.Close() }()
+
+	follower.watcher.events <- Change{Paths: []string{soloPath}}
+	incremental := nextFollowerUpdate(t, follower)
+	if len(incremental.Sessions) != 1 || incremental.Sessions[0].Path != soloPath {
+		t.Fatalf("incremental update = %#v, want the solo session only", incremental.Sessions)
+	}
+	incremental.Sessions[0].Title = "consumer edit"
+
+	follower.watcher.events <- Change{Paths: []string{secondMirror}}
+	snapshot := nextFollowerUpdate(t, follower)
+	solo := sessionWithID(snapshot.Sessions, "solo")
+	if solo == nil || solo.Title != "parsed title" {
+		t.Fatalf("snapshot solo session = %#v, want the parsed title unaffected by the consumer", solo)
+	}
+}
+
 func TestRefreshMaintainsOpaqueResumableCheckpoints(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "session.jsonl")

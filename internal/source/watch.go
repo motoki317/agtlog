@@ -201,7 +201,9 @@ func (r *Registry) Follow(ctx context.Context, options WatchOptions) (*Follower,
 				reconciledSnapshot := false
 				if sessionIndex != nil {
 					if !initialized {
-						sessionIndex.apply(sessions, change.RemovedPaths)
+						if err := sessionIndex.apply(followCtx, sessions, change.RemovedPaths); err != nil {
+							return
+						}
 					}
 					if codexIndexed || needsMirrorSnapshot {
 						var snapshotErr error
@@ -318,15 +320,24 @@ func indexFollowSessions(sessions []*model.Session) followSessionIndex {
 	return index
 }
 
-func (index followSessionIndex) apply(refreshed []*model.Session, removedPaths []string) {
+// apply stores copies. A flush without a snapshot delivers the refreshed
+// sessions themselves, and the consumer writes to them, for example through
+// AttributeOwnership.
+func (index followSessionIndex) apply(ctx context.Context, refreshed []*model.Session, removedPaths []string) error {
 	for _, path := range removedPaths {
 		delete(index, path)
 	}
 	for _, session := range refreshed {
-		if session != nil {
-			index[session.Path] = session
+		if session == nil {
+			continue
 		}
+		copied, err := copySessionTreeContext(ctx, session)
+		if err != nil {
+			return err
+		}
+		index[session.Path] = copied
 	}
+	return nil
 }
 
 func (index followSessionIndex) snapshot(ctx context.Context) ([]*model.Session, error) {
