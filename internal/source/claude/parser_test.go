@@ -1393,6 +1393,33 @@ func TestParseSkipsNegativeUsageRecord(t *testing.T) {
 	}
 }
 
+// A request without a message ID is never merged, so the advisor usage that it
+// carries must not be merged either.
+func TestParseKeepsAdvisorUsageWithoutMessageIDSeparate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-advisor-no-id.jsonl")
+	line := func(advisorInput int) string {
+		return `{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1,"iterations":[` +
+			`{"type":"advisor_message","model":"claude-fable-5","input_tokens":` + strconv.Itoa(advisorInput) + `}]}}}`
+	}
+	content := line(1000) + "\n" + line(2000) + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got := session.ModelCosts["claude-fable-5"]; got != 6000 {
+		t.Fatalf("advisor model cost = %v, want 6000 from both requests", got)
+	}
+	for _, request := range session.Requests {
+		if request.MessageID != "" {
+			t.Fatalf("Requests = %#v, want no synthetic message ID that cross-session dedup could match", session.Requests)
+		}
+	}
+}
+
 func TestLoadEventsBuildsLinkedClaudeTurn(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session-detail.jsonl")
 	content := strings.Join([]string{

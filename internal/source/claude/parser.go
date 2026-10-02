@@ -1377,8 +1377,12 @@ func (p Parser) parseFile(ctx context.Context, path string) (*model.Session, map
 				Usage:       usage,
 			})
 			for index, advisor := range claudeAdvisorUsages(record.Message.Usage) {
+				var messageID string
+				if record.Message.ID != "" {
+					messageID = fmt.Sprintf("%s\x00advisor\x00%d", record.Message.ID, index)
+				}
 				usageRecords = append(usageRecords, usageRecord{
-					MessageID:   fmt.Sprintf("%s\x00advisor\x00%d", record.Message.ID, index),
+					MessageID:   messageID,
 					RequestID:   record.RequestID,
 					IsSidechain: record.IsSidechain,
 					Usage:       advisor,
