@@ -54,8 +54,8 @@ func parseTieredSession(t *testing.T, events ...string) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); got != "codex-parser-v27" {
-		t.Fatalf("CacheFingerprint() = %q, want zero-usage ledger v27 fingerprint", got)
+	if got := testParser().CacheFingerprint(); got != "codex-parser-v28" {
+		t.Fatalf("CacheFingerprint() = %q, want sidecar boundary v28 fingerprint", got)
 	}
 }
 
@@ -208,6 +208,29 @@ func TestLoadEventsReadsSidecarBelowPlaceholderSubagent(t *testing.T) {
 	}
 	if len(mapper.Events) != 1 || mapper.Events[0].Text != "Ridge mapped" {
 		t.Fatalf("mapper events = %#v, want its own sidecar timeline", mapper.Events)
+	}
+}
+
+func TestParseLinksSidecarOnlyAtThreadIDBoundary(t *testing.T) {
+	dir := t.TempDir()
+	rootPath := filepath.Join(dir, "rollout-2026-01-02T03-00-00-thread-root.jsonl")
+	decoyPath := filepath.Join(dir, "rollout-2026-01-02T03-00-00-0c1e7f3a.jsonl")
+	sidecarPath := filepath.Join(dir, "rollout-2026-01-02T03-00-01-7f3a.jsonl")
+	root := `{"timestamp":"2026-01-02T03:00:01Z","type":"event_msg","payload":{"type":"sub_agent_activity","agent_thread_id":"7f3a","agent_path":"/root/scout","kind":"started"}}` + "\n"
+	for path, content := range map[string]string{rootPath: root, decoyPath: "", sidecarPath: ""} {
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	session, err := testParser().Parse(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Subagents) != 1 {
+		t.Fatalf("subagents = %d, want 1", len(session.Subagents))
+	}
+	if got := filepath.Base(session.Subagents[0].Path); got != filepath.Base(sidecarPath) {
+		t.Fatalf("subagent rollout = %q, want %q", got, filepath.Base(sidecarPath))
 	}
 }
 

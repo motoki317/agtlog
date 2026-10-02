@@ -27,7 +27,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v27"
+	return "codex-parser-v28"
 }
 
 type tokenUsage struct {
@@ -1017,7 +1017,9 @@ func siblingRollout(sourcePath, threadID string) string {
 	if err != nil {
 		return ""
 	}
-	want := threadID + ".jsonl"
+	// Codex names a rollout "rollout-<time>-<thread id>.jsonl". Without the dash, a
+	// short thread ID matches any rollout whose ID merely ends with it.
+	want := "-" + threadID + ".jsonl"
 	for _, entry := range entries {
 		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), want) {
 			continue
