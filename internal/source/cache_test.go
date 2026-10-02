@@ -1165,6 +1165,31 @@ func TestRegistryRoundTripsWorkflowGroupInCurrentCache(t *testing.T) {
 	}
 }
 
+func TestRegistryRoundTripsSpawnCallIDInCurrentCache(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &model.Session{ID: "session-garden", Agent: model.AgentClaude, Path: path, Subagents: []*model.Session{{
+		ID: "scout", Agent: model.AgentClaude, Path: filepath.Join(filepath.Dir(path), "agent-scout.jsonl"), SpawnCallID: "call-scout",
+	}}}
+	adapter := &countingSource{path: path}
+	registry := NewRegistry([]Source{adapter}, Options{Workers: 1, CacheDir: t.TempDir()})
+	fingerprint, err := sourceFingerprint(adapter, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry.storeCached(adapter, path, fingerprint, session, nil)
+
+	loaded, _, err := registry.discoverSession(adapter, path)
+	if err != nil || loaded == nil || len(loaded.Subagents) != 1 {
+		t.Fatalf("discoverSession() = %#v, %v", loaded, err)
+	}
+	if got := loaded.Subagents[0].SpawnCallID; got != "call-scout" || adapter.parses != 0 {
+		t.Fatalf("cached SpawnCallID = %q after %d parses, want call-scout from the cache", got, adapter.parses)
+	}
+}
+
 func TestRegistryDoesNotCacheFileChangedDuringParse(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "session.jsonl")

@@ -148,8 +148,8 @@ func parseFlatSidecarBaseline(t *testing.T) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); got != "claude-parser-v20" {
-		t.Fatalf("CacheFingerprint() = %q, want fast-mode v20 fingerprint", got)
+	if got := testParser().CacheFingerprint(); got != "claude-parser-v21" {
+		t.Fatalf("CacheFingerprint() = %q, want spawn-call v21 fingerprint", got)
 	}
 }
 
@@ -1689,6 +1689,133 @@ func TestLoadEventsUsesAgentIDToDisambiguateSpawn(t *testing.T) {
 	if session.Events[0].Subagent != scout {
 		t.Fatalf("spawn linked to %#v, want scout", session.Events[0].Subagent)
 	}
+}
+
+// writeSpawnFixture writes a session whose flat subagents carry the given
+// sidecars, keyed by agent ID. An empty sidecar writes no file.
+func writeSpawnFixture(t *testing.T, parentLines []string, sidecars map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session-garden.jsonl")
+	subagentDir := filepath.Join(dir, "session-garden", "subagents")
+	if err := os.MkdirAll(subagentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(parentLines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for id, sidecar := range sidecars {
+		content := `{"type":"user","agentId":` + strconv.Quote(id) + `,"message":{"content":"Walk the ` + id + ` path"}}` + "\n"
+		if err := os.WriteFile(filepath.Join(subagentDir, "agent-"+id+".jsonl"), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if sidecar == "" {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(subagentDir, "agent-"+id+".meta.json"), []byte(sidecar), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return path
+}
+
+func spawnLine(callID, description string) string {
+	return `{"type":"assistant","timestamp":"2026-01-02T03:00:01Z","message":{"content":[{"type":"tool_use","id":` + strconv.Quote(callID) + `,"name":"Agent","input":{"description":` + strconv.Quote(description) + `}}]}}`
+}
+
+// spawnAgentIDs returns the agent ID that each spawn event links, in
+// transcript order. An unlinked spawn yields "".
+func spawnAgentIDs(t *testing.T, path string) (*model.Session, []string) {
+	t.Helper()
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := testParser().LoadNodeEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, event := range session.Events {
+		if event.Kind != model.EventSubagent {
+			continue
+		}
+		if event.Subagent != nil && event.Subagent.ID != event.AgentID {
+			t.Fatalf("spawn %s links %q as %q, want matching IDs", event.CallID, event.Subagent.ID, event.AgentID)
+		}
+		ids = append(ids, event.AgentID)
+	}
+	return session, ids
+}
+
+func TestLoadEventsLinksSpawnByMetadataToolUseID(t *testing.T) {
+	path := writeSpawnFixture(t, []string{
+		spawnLine("call-hedge", "Trim hedges"),
+		spawnLine("call-pond", "Clear pond"),
+	}, map[string]string{
+		"alpha": `{"toolUseId":"call-pond"}`,
+		"beta":  `{"toolUseId":"call-hedge"}`,
+	})
+	if _, got := spawnAgentIDs(t, path); !reflect.DeepEqual(got, []string{"beta", "alpha"}) {
+		t.Fatalf("spawn links = %q, want call-hedge -> beta and call-pond -> alpha", got)
+	}
+}
+
+func TestLoadEventsKeepsClaimedSubagentFromUnmatchedSpawn(t *testing.T) {
+	// The rejected call-lost names beta, and the walk visits beta before
+	// omega, so either guess would take beta if it did not skip claimed
+	// subagents.
+	path := writeSpawnFixture(t, []string{
+		spawnLine("call-pond", "Clear pond"),
+		spawnLine("call-lost", "beta"),
+		`{"type":"user","timestamp":"2026-01-02T03:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-lost","content":"unknown agent type","is_error":true}]}}`,
+		spawnLine("call-hedge", "Trim hedges"),
+	}, map[string]string{
+		"alpha": `{"toolUseId":"call-pond"}`,
+		"beta":  `{"toolUseId":"call-hedge"}`,
+		"omega": "",
+	})
+	if _, got := spawnAgentIDs(t, path); !reflect.DeepEqual(got, []string{"alpha", "omega", "beta"}) {
+		t.Fatalf("spawn links = %q, want call-pond -> alpha, call-lost -> sidecar-free omega, call-hedge -> beta", got)
+	}
+}
+
+func TestLoadEventsIgnoresEmptySpawnCallID(t *testing.T) {
+	path := writeSpawnFixture(t, []string{
+		spawnLine("call-hedge", "alpha"),
+		spawnLine("", "Unnamed"),
+	}, map[string]string{"alpha": "", "beta": ""})
+	if _, got := spawnAgentIDs(t, path); !reflect.DeepEqual(got, []string{"alpha", "beta"}) {
+		t.Fatalf("spawn links = %q, want the ID-less spawn to take the free beta", got)
+	}
+}
+
+func TestParseDecodesEachSidecarFieldAlone(t *testing.T) {
+	t.Run("malformed toolUseId keeps parentAgentId", func(t *testing.T) {
+		path := writeSpawnFixture(t, []string{spawnLine("call-hedge", "Trim hedges")}, map[string]string{
+			"alpha": `{"toolUseId":"call-hedge"}`,
+			"beta":  `{"toolUseId":7,"parentAgentId":"alpha"}`,
+		})
+		session, got := spawnAgentIDs(t, path)
+		if len(session.Subagents) != 1 || len(session.Subagents[0].Subagents) != 1 || session.Subagents[0].Subagents[0].ID != "beta" {
+			t.Fatalf("root subagents = %#v, want beta nested under alpha", session.Subagents)
+		}
+		if !reflect.DeepEqual(got, []string{"alpha"}) {
+			t.Fatalf("spawn links = %q, want call-hedge -> alpha", got)
+		}
+	})
+	t.Run("malformed parentAgentId keeps toolUseId", func(t *testing.T) {
+		path := writeSpawnFixture(t, []string{spawnLine("call-hedge", "Trim hedges")}, map[string]string{
+			"alpha": "",
+			"beta":  `{"parentAgentId":7,"toolUseId":"call-hedge"}`,
+		})
+		session, got := spawnAgentIDs(t, path)
+		if len(session.Subagents) != 2 {
+			t.Fatalf("root subagents = %#v, want alpha and beta at root", session.Subagents)
+		}
+		if !reflect.DeepEqual(got, []string{"beta"}) {
+			t.Fatalf("spawn links = %q, want call-hedge -> beta", got)
+		}
+	})
 }
 
 func TestLoadEventsDropsHardNoise(t *testing.T) {

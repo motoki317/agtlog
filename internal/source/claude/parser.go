@@ -136,7 +136,7 @@ func NewParser(calculator cost.Calculator) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v20"
+	return "claude-parser-v21"
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
@@ -332,7 +332,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 				if block.Name == "Agent" || block.Name == "Task" || block.Name == "Workflow" {
 					event.Kind = model.EventSubagent
 					if block.Name != "Workflow" {
-						event.Subagent = matchClaudeSubagent(session.Subagents, block.Input, linkedSubagents)
+						event.Subagent = matchClaudeSubagent(session.Subagents, block.ID, block.Input, linkedSubagents)
 					}
 					if event.Subagent != nil {
 						event.AgentID = event.Subagent.ID
@@ -487,7 +487,14 @@ func toolResultWorkflowName(result json.RawMessage) string {
 	return fields.WorkflowName
 }
 
-func matchClaudeSubagent(subagents []*model.Session, input json.RawMessage, linked map[*model.Session]bool) *model.Session {
+func matchClaudeSubagent(subagents []*model.Session, callID string, input json.RawMessage, linked map[*model.Session]bool) *model.Session {
+	if callID != "" {
+		for _, subagent := range subagents {
+			if subagent.SpawnCallID == callID {
+				return subagent
+			}
+		}
+	}
 	// Named fields, not map[string]string: a Task input has non-string values,
 	// and the decoder stops at the first value that does not fit. A map can
 	// therefore lose the name that identifies the subagent.
@@ -498,8 +505,14 @@ func matchClaudeSubagent(subagents []*model.Session, input json.RawMessage, link
 	}
 	_ = jsonl.Unmarshal(input, &fields)
 	candidates := []string{fields.Name, fields.Description, fields.SubagentType}
+	// A subagent with a SpawnCallID belongs to that call alone. Otherwise a spawn
+	// with no transcript, such as a rejected call earlier in the log, would
+	// claim it first.
+	guessable := func(subagent *model.Session) bool {
+		return !linked[subagent] && subagent.SpawnCallID == ""
+	}
 	for _, subagent := range subagents {
-		if linked[subagent] {
+		if !guessable(subagent) {
 			continue
 		}
 		for _, candidate := range candidates {
@@ -509,7 +522,7 @@ func matchClaudeSubagent(subagents []*model.Session, input json.RawMessage, link
 		}
 	}
 	for _, subagent := range subagents {
-		if !subagent.Group && !linked[subagent] {
+		if !subagent.Group && guessable(subagent) {
 			return subagent
 		}
 	}
@@ -917,14 +930,12 @@ func (p Parser) parse(ctx context.Context, path string, depth int, visited map[s
 			if parentDir == subagentDir {
 				children = append(children, subagent)
 				metadataPath := strings.TrimSuffix(subagentPath, filepath.Ext(subagentPath)) + ".meta.json"
-				parentID, metadataErr := p.readClaudeSubagentParentID(metadataPath)
-				if metadataErr != nil {
-					parentID = ""
-				}
+				sidecar := p.readClaudeSubagentSidecar(metadataPath)
+				subagent.SpawnCallID = sidecar.toolUseID
 				flatChildren = append(flatChildren, flatClaudeSubagent{
 					session:    subagent,
 					transcript: subagentPath,
-					parentID:   parentID,
+					parentID:   sidecar.parentAgentID,
 				})
 				return nil
 			}
@@ -974,25 +985,34 @@ func (p Parser) parse(ctx context.Context, path string, depth int, visited map[s
 	return session, nil
 }
 
-func (p Parser) readClaudeSubagentParentID(path string) (string, error) {
+type claudeSubagentSidecar struct {
+	parentAgentID string
+	toolUseID     string
+}
+
+// readClaudeSubagentSidecar returns the zero sidecar for a missing or invalid
+// file. The sidecar is optional, and without it the transcript-only links apply.
+func (p Parser) readClaudeSubagentSidecar(path string) claudeSubagentSidecar {
 	readMetadata := p.readSubagentMetadata
 	if readMetadata == nil {
 		readMetadata = readClaudeSubagentMetadata
 	}
+	var sidecar claudeSubagentSidecar
 	content, err := readMetadata(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	}
 	if err != nil {
-		return "", err
+		return sidecar
 	}
-	var metadata struct {
-		ParentAgentID string `json:"parentAgentId"`
+	var fields struct {
+		ParentAgentID json.RawMessage `json:"parentAgentId"`
+		ToolUseID     json.RawMessage `json:"toolUseId"`
 	}
-	if err := json.Unmarshal(content, &metadata); err != nil {
-		return "", err
+	if json.Unmarshal(content, &fields) != nil {
+		return sidecar
 	}
-	return metadata.ParentAgentID, nil
+	// Each field decodes alone, so a malformed field drops only its own link.
+	_ = json.Unmarshal(fields.ParentAgentID, &sidecar.parentAgentID)
+	_ = json.Unmarshal(fields.ToolUseID, &sidecar.toolUseID)
+	return sidecar
 }
 
 func readClaudeSubagentMetadata(path string) ([]byte, error) {

@@ -292,10 +292,13 @@ type Session struct {
 	GitBranch  string
 	AgentPath  string
 	ParentID   string
-	HasError   bool
-	Messages   int
-	ToolCalls  int
-	Usage      []Usage
+	// SpawnCallID is the ID of the parent's tool call that started this
+	// subagent. Empty means that it is unknown.
+	SpawnCallID string
+	HasError    bool
+	Messages    int
+	ToolCalls   int
+	Usage       []Usage
 	// Requests is the billed-request ledger that the summary cache stores. Codex
 	// stores one entry per request for a clean partition. Otherwise it stores one
 	// authoritative aggregate per model.
