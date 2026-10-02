@@ -10,7 +10,6 @@ import (
 const (
 	readerBufferBytes = 64 * 1024
 	MaxLineBytes      = 16 * 1024 * 1024
-	maxLineBytes      = MaxLineBytes
 )
 
 type LineMetadata struct {
@@ -21,11 +20,7 @@ type LineMetadata struct {
 	Oversized  bool
 }
 
-// ForEach bounds memory per record and treats an oversized record like malformed JSON.
-func ForEach(reader io.Reader, visit func([]byte)) error {
-	return ForEachContext(context.Background(), reader, visit)
-}
-
+// ForEachContext bounds memory per record and treats an oversized record like malformed JSON.
 func ForEachContext(ctx context.Context, reader io.Reader, visit func([]byte)) error {
 	return ForEachContextWithOffset(ctx, reader, func(line []byte, _, _ int64) {
 		visit(line)
@@ -52,7 +47,7 @@ func ForEachContextWithMetadata(ctx context.Context, reader io.Reader, visit fun
 		fragment, err := buffered.ReadSlice('\n')
 		position += int64(len(fragment))
 		if !tooLong {
-			if len(line)+len(fragment) <= maxLineBytes {
+			if len(line)+len(fragment) <= MaxLineBytes {
 				line = append(line, fragment...)
 			} else {
 				tooLong = true

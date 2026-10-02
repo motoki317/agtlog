@@ -62,10 +62,6 @@ type Watcher struct {
 	group   sync.WaitGroup
 }
 
-func NewWatcher(roots []string, options WatchOptions) (*Watcher, error) {
-	return newWatcher(context.Background(), roots, options)
-}
-
 func newWatcher(ctx context.Context, roots []string, options WatchOptions) (*Watcher, error) {
 	if options.Debounce <= 0 {
 		options.Debounce = 300 * time.Millisecond
@@ -380,9 +376,7 @@ func (r *Registry) topLevelRemoved(ctx context.Context, paths []string) []string
 			}
 			if affected == path {
 				removed = append(removed, path)
-				if r.options.CacheDir != "" && r.cacheDirSafe() {
-					r.removeCached(adapter, path)
-				}
+				r.removeCached(adapter, path)
 			}
 			break
 		}

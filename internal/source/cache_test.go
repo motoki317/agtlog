@@ -60,6 +60,49 @@ type zeroWriter struct{}
 
 func (zeroWriter) Write([]byte) (int, error) { return 0, nil }
 
+func (r *Registry) loadCached(adapter Source, path, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool) {
+	root, ok := r.openCacheRoot()
+	if !ok {
+		return nil, nil, false
+	}
+	defer func() { _ = root.Close() }()
+	return loadCachedFromRootContext(context.Background(), root, adapter, path, fingerprint)
+}
+
+func (r *Registry) storeCached(adapter Source, path, fingerprint string, session *model.Session, diagnostics []DiscoveryDiagnostic) {
+	root, ok := r.openOrCreateCacheRoot()
+	if !ok {
+		return
+	}
+	defer func() { _ = root.Close() }()
+	storeCachedToRootContext(context.Background(), root, adapter, path, fingerprint, session, diagnostics)
+}
+
+func (r *Registry) discoverSession(adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
+	root, _ := r.openOrCreateCacheRoot()
+	if root != nil {
+		defer func() { _ = root.Close() }()
+	}
+	return r.discoverSessionWithCacheContext(context.Background(), root, adapter, path)
+}
+
+func sourceFingerprint(adapter Source, path string) (string, error) {
+	return sourceFingerprintContext(context.Background(), adapter, path)
+}
+
+func (r *Registry) cachePath(adapter Source, path string) string {
+	namespaceDir, ok := r.cacheNamespaceDir(adapter)
+	if !ok {
+		return ""
+	}
+	return filepath.Join(namespaceDir, cacheEntryName(adapter, path))
+}
+
+func (r *Registry) cacheNamespaceDir(adapter Source) (string, bool) {
+	namespace, ok := cacheNamespace(adapter)
+	return filepath.Join(r.options.CacheDir, namespace), ok
+}
+
 func TestContextReaderStopsBetweenChunks(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	reader := &contextReader{ctx: ctx, reader: bytes.NewReader(make([]byte, 256<<10))}

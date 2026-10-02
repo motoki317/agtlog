@@ -54,22 +54,6 @@ type contextFingerprinter interface {
 	FingerprintContext(context.Context, string) (string, error)
 }
 
-func (r *Registry) loadCached(adapter Source, path, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool) {
-	return r.loadCachedContext(context.Background(), adapter, path, fingerprint)
-}
-
-func (r *Registry) loadCachedContext(ctx context.Context, adapter Source, path, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool) {
-	if ctx.Err() != nil {
-		return nil, nil, false
-	}
-	root, ok := r.openCacheRoot()
-	if !ok {
-		return nil, nil, false
-	}
-	defer func() { _ = root.Close() }()
-	return loadCachedFromRootContext(ctx, root, adapter, path, fingerprint)
-}
-
 func loadCachedFromRootContext(ctx context.Context, root *os.Root, adapter Source, path, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool) {
 	if ctx.Err() != nil || root == nil {
 		return nil, nil, false
@@ -79,50 +63,42 @@ func loadCachedFromRootContext(ctx context.Context, root *os.Root, adapter Sourc
 		return nil, nil, false
 	}
 	info, err := root.Lstat(namespace)
-	if err == nil {
-		namespaceRoot, opened := openCacheDirectory(root, namespace, info)
-		if !opened {
-			return nil, nil, false
-		}
-		defer func() { _ = namespaceRoot.Close() }()
-		session, diagnostics, valid, exists := loadCacheEntryContext(ctx, namespaceRoot, cacheEntryName(adapter, path), path, adapter, fingerprint)
-		if valid {
-			return session, diagnostics, true
-		}
-		if exists {
-			return nil, nil, false
-		}
-	} else if !os.IsNotExist(err) {
+	if err != nil {
 		return nil, nil, false
 	}
-	return nil, nil, false
+	namespaceRoot, opened := openCacheDirectory(root, namespace, info)
+	if !opened {
+		return nil, nil, false
+	}
+	defer func() { _ = namespaceRoot.Close() }()
+	return loadCacheEntryContext(ctx, namespaceRoot, cacheEntryName(adapter, path), path, adapter, fingerprint)
 }
 
-func loadCacheEntryContext(ctx context.Context, root *os.Root, entryPath, sourcePath string, adapter Source, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool, bool) {
+func loadCacheEntryContext(ctx context.Context, root *os.Root, entryPath, sourcePath string, adapter Source, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool) {
 	if ctx.Err() != nil {
-		return nil, nil, false, false
+		return nil, nil, false
 	}
 	info, err := root.Lstat(entryPath)
 	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() > maxSummaryCacheBytes {
-		return nil, nil, false, !os.IsNotExist(err)
+		return nil, nil, false
 	}
 	data, err := readRootFileContext(ctx, root, entryPath, info.Size())
 	if err != nil {
-		return nil, nil, false, true
+		return nil, nil, false
 	}
 	var entry cacheEntry
 	decoder := cacheJSON.NewDecoder(&contextReader{ctx: ctx, reader: bytes.NewReader(data)})
 	if decoder.Decode(&entry) != nil || decoder.Decode(&struct{}{}) != io.EOF || entry.Version != cacheVersion || entry.Agent != adapter.Agent() || entry.Fingerprint != fingerprint || entry.Session == nil || entry.Session.Path != sourcePath {
-		return nil, nil, false, true
+		return nil, nil, false
 	}
 	diagnostics := make([]DiscoveryDiagnostic, 0, len(entry.Diagnostics))
 	for _, diagnostic := range entry.Diagnostics {
 		if ctx.Err() != nil {
-			return nil, nil, false, true
+			return nil, nil, false
 		}
 		diagnostics = append(diagnostics, DiscoveryDiagnostic{Agent: adapter.Agent(), Path: diagnostic.Path, Err: errors.New(diagnostic.Message)})
 	}
-	return entry.Session, diagnostics, true, true
+	return entry.Session, diagnostics, true
 }
 
 type contextReader struct {
@@ -164,22 +140,6 @@ func readRootFileContext(ctx context.Context, root *os.Root, path string, size i
 			return nil, readErr
 		}
 	}
-}
-
-func (r *Registry) storeCached(adapter Source, path, fingerprint string, session *model.Session, diagnostics []DiscoveryDiagnostic) {
-	r.storeCachedContext(context.Background(), adapter, path, fingerprint, session, diagnostics)
-}
-
-func (r *Registry) storeCachedContext(ctx context.Context, adapter Source, path, fingerprint string, session *model.Session, diagnostics []DiscoveryDiagnostic) {
-	if ctx.Err() != nil {
-		return
-	}
-	root, ok := r.openOrCreateCacheRoot()
-	if !ok {
-		return
-	}
-	defer func() { _ = root.Close() }()
-	storeCachedToRootContext(ctx, root, adapter, path, fingerprint, session, diagnostics)
 }
 
 func storeCachedToRootContext(ctx context.Context, root *os.Root, adapter Source, path, fingerprint string, session *model.Session, diagnostics []DiscoveryDiagnostic) {
@@ -597,18 +557,6 @@ func resolveExistingPath(path string) (string, error) {
 	}
 }
 
-func (r *Registry) discoverSession(adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
-	return r.discoverSessionContext(context.Background(), adapter, path)
-}
-
-func (r *Registry) discoverSessionContext(ctx context.Context, adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
-	root, _ := r.openOrCreateCacheRoot()
-	if root != nil {
-		defer func() { _ = root.Close() }()
-	}
-	return r.discoverSessionWithCacheContext(ctx, root, adapter, path)
-}
-
 func (r *Registry) discoverSessionWithCacheContext(ctx context.Context, root *os.Root, adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
 	if root == nil {
 		return parseAndCacheToRootContext(ctx, nil, adapter, path, "", false)
@@ -703,10 +651,6 @@ func parseSessionWithDiagnosticsContext(ctx context.Context, adapter Source, pat
 	return session, diagnostics, err
 }
 
-func sourceFingerprint(adapter Source, path string) (string, error) {
-	return sourceFingerprintContext(context.Background(), adapter, path)
-}
-
 func sourceFingerprintContext(ctx context.Context, adapter Source, path string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
@@ -718,19 +662,6 @@ func sourceFingerprintContext(ctx context.Context, adapter Source, path string) 
 		return custom.Fingerprint(path)
 	}
 	return fileFingerprint(path)
-}
-
-func (r *Registry) cachePath(adapter Source, path string) string {
-	namespaceDir, ok := r.cacheNamespaceDir(adapter)
-	if !ok {
-		return ""
-	}
-	return filepath.Join(namespaceDir, cacheEntryName(adapter, path))
-}
-
-func (r *Registry) cacheNamespaceDir(adapter Source) (string, bool) {
-	namespace, ok := cacheNamespace(adapter)
-	return filepath.Join(r.options.CacheDir, namespace), ok
 }
 
 func cacheNamespace(adapter Source) (string, bool) {

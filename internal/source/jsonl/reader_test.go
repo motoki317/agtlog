@@ -9,7 +9,7 @@ import (
 )
 
 func TestForEachContextWithOffsetRoundTripsAcrossOversizedLine(t *testing.T) {
-	oversized := strings.Repeat("x", maxLineBytes+1)
+	oversized := strings.Repeat("x", MaxLineBytes+1)
 	input := []byte("first\r\n" + oversized + "\nlast")
 	type record struct {
 		line           string
@@ -38,27 +38,27 @@ func TestForEachContextWithOffsetRoundTripsAcrossOversizedLine(t *testing.T) {
 	}
 }
 
-func TestForEachSkipsOversizedLineAndContinues(t *testing.T) {
-	input := "first\n" + strings.Repeat("x", maxLineBytes+1) + "\nlast\n"
+func TestForEachContextSkipsOversizedLineAndContinues(t *testing.T) {
+	input := "first\n" + strings.Repeat("x", MaxLineBytes+1) + "\nlast\n"
 	var got []string
 
-	if err := ForEach(strings.NewReader(input), func(line []byte) {
+	if err := ForEachContext(context.Background(), strings.NewReader(input), func(line []byte) {
 		got = append(got, string(line))
 	}); err != nil {
-		t.Fatalf("ForEach() error = %v", err)
+		t.Fatalf("ForEachContext() error = %v", err)
 	}
 	if strings.Join(got, ",") != "first,last" {
-		t.Fatalf("ForEach() lines = %v, want first,last", got)
+		t.Fatalf("ForEachContext() lines = %v, want first,last", got)
 	}
 }
 
-func TestForEachVisitsFinalLineWithoutNewline(t *testing.T) {
+func TestForEachContextVisitsFinalLineWithoutNewline(t *testing.T) {
 	var got string
-	if err := ForEach(strings.NewReader("final"), func(line []byte) { got = string(line) }); err != nil {
-		t.Fatalf("ForEach() error = %v", err)
+	if err := ForEachContext(context.Background(), strings.NewReader("final"), func(line []byte) { got = string(line) }); err != nil {
+		t.Fatalf("ForEachContext() error = %v", err)
 	}
 	if got != "final" {
-		t.Fatalf("ForEach() line = %q, want final", got)
+		t.Fatalf("ForEachContext() line = %q, want final", got)
 	}
 }
 

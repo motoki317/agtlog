@@ -309,7 +309,7 @@ func TestWatcherEmitsDebouncedAppend(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	watcher, err := NewWatcher([]string{root}, WatchOptions{Debounce: 20 * time.Millisecond, RescanInterval: time.Hour})
+	watcher, err := newWatcher(context.Background(), []string{root}, WatchOptions{Debounce: 20 * time.Millisecond, RescanInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -401,7 +401,7 @@ func TestWatcherRescanFindsMissedAppend(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	watcher, err := NewWatcher([]string{root}, WatchOptions{Debounce: 5 * time.Millisecond, RescanInterval: 20 * time.Millisecond})
+	watcher, err := newWatcher(context.Background(), []string{root}, WatchOptions{Debounce: 5 * time.Millisecond, RescanInterval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1313,7 +1313,7 @@ func TestWatcherEmitsRemovedSession(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	watcher, err := NewWatcher([]string{root}, WatchOptions{Debounce: 10 * time.Millisecond, RescanInterval: 20 * time.Millisecond})
+	watcher, err := newWatcher(context.Background(), []string{root}, WatchOptions{Debounce: 10 * time.Millisecond, RescanInterval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,6 +8,11 @@ import (
 	"github.com/motoki317/agtlog/internal/model"
 )
 
+func linkSessionGraphs(sessions []*model.Session) map[*model.Session]bool {
+	linked, _ := linkSessionGraphsContext(context.Background(), sessions)
+	return linked
+}
+
 func TestBuildSessionSnapshotCopiesInputsBeforeLinking(t *testing.T) {
 	parentUpdated := time.Date(2026, 8, 22, 9, 0, 0, 0, time.UTC)
 	childUpdated := parentUpdated.Add(time.Minute)

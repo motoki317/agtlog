@@ -362,11 +362,6 @@ func copySessionTreeContext(ctx context.Context, session *model.Session) (*model
 	return &copy, nil
 }
 
-func linkSessionGraphs(sessions []*model.Session) map[*model.Session]bool {
-	linked, _ := linkSessionGraphsContext(context.Background(), sessions)
-	return linked
-}
-
 func linkSessionGraphsContext(ctx context.Context, sessions []*model.Session) (map[*model.Session]bool, error) {
 	// Newer Codex sidecars carry ParentID without a parent-side spawn announcement,
 	// so graph ownership must be recoverable from parsed sessions alone.
