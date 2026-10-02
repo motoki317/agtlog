@@ -302,8 +302,6 @@ func TestRowCounterTracksTimelineCursorNotScroll(t *testing.T) {
 		t.Fatalf("expected several focusable rows, got %d", rows)
 	}
 
-	// Opening a session lands the cursor on the last row, so the counter reads
-	// last/last — not the scroll-top line a viewport-based counter would show.
 	detail.gotoBottom()
 	if c, total := detail.rowCounter(); c != rows || total != rows {
 		t.Fatalf("last-row counter = %d/%d, want %d/%d", c, total, rows, rows)
@@ -312,7 +310,6 @@ func TestRowCounterTracksTimelineCursorNotScroll(t *testing.T) {
 		t.Fatalf("last-row border missing %d/%d counter:\n%s", rows, rows, view)
 	}
 
-	// Each cursor step walks the counter by exactly one row.
 	detail.update(tea.KeyMsg{Type: tea.KeyUp})
 	if c, total := detail.rowCounter(); c != rows-1 || total != rows {
 		t.Fatalf("after one up counter = %d/%d, want %d/%d", c, total, rows-1, rows)
@@ -329,8 +326,6 @@ func TestRowCounterCountsSubagentRowsExcludingHeader(t *testing.T) {
 	detail.rebuild()
 	detail.gotoBottom()
 
-	// The header row is not navigable, so the count is the subagent total and the
-	// last subagent reads n/n.
 	if c, total := detail.rowCounter(); c != len(subs) || total != len(subs) {
 		t.Fatalf("last-subagent counter = %d/%d, want %d/%d", c, total, len(subs), len(subs))
 	}
@@ -2032,9 +2027,9 @@ func TestWrappedAssistantProseDoesNotColorLabelTextOnContinuation(t *testing.T) 
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
 	styleSet := newStyles(themes["default"])
-	// Long enough to fold, so the reply text renders as wrapping body rows below the
-	// nowrap head. A run of filler wider than the body pushes the embedded "codex:"
-	// intact onto a wrapped continuation, where it must stay neutral prose.
+	// The reply exceeds the preview cap, so its text renders as body rows below the
+	// head. The filler is wider than the body, so the embedded "codex:" wraps onto a
+	// continuation row, where it must keep the neutral style.
 	session := &model.Session{ID: "lunar", Agent: model.AgentCodex, Events: []model.Event{{
 		Kind: model.EventAssistantText, Text: strings.Repeat("x", 80) + " codex: still ordinary prose past the preview cap",
 	}}}
@@ -2153,10 +2148,6 @@ func TestUserPromptFoldRevealsTheFullPrompt(t *testing.T) {
 	assert(glyphExpanded, true)
 }
 
-// TestTimelineFoldGlyphMatchesExpandableRows guards the invariant that broke user
-// prompts: a focusable timeline row shows the ▸/▾ affordance if and only if it is
-// actually wired to expand. Any future row that prints the glyph without setting
-// expandable (or the reverse) fails here.
 func TestTimelineFoldGlyphMatchesExpandableRows(t *testing.T) {
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/lunar/session.jsonl", Events: []model.Event{
 		{Kind: model.EventUser, Text: "Single line prompt"},
@@ -2170,7 +2161,7 @@ func TestTimelineFoldGlyphMatchesExpandableRows(t *testing.T) {
 
 	for _, line := range detail.lines {
 		if line.key == "" {
-			continue // passive body/summary rows are not focusable
+			continue // body rows are not focusable
 		}
 		trimmed := strings.TrimLeft(line.text, " ")
 		hasGlyph := strings.HasPrefix(trimmed, glyphCollapsed) || strings.HasPrefix(trimmed, glyphExpanded)
@@ -2188,10 +2179,6 @@ func timelineLineTexts(lines []detailLine) []string {
 	return texts
 }
 
-// TestTimelineIsOneFlatChronologicalList pins the shape of the timeline: one row
-// per event in log order, no aggregate row above them, and every row carrying its
-// own request's figures. The prompt reports only the window the request it
-// triggered was sent with, since a user message bills nothing itself.
 func TestTimelineIsOneFlatChronologicalList(t *testing.T) {
 	child := &model.Session{ID: "scout", Agent: model.AgentClaude, Title: "Scout ridge", Models: []string{"claude-opus-4-8"},
 		Usage: []model.Usage{{InputTokens: 40_000, OutputTokens: 5_000}}, Cost: model.Cost{USD: 0.32}}
@@ -2212,9 +2199,9 @@ func TestTimelineIsOneFlatChronologicalList(t *testing.T) {
 	for _, line := range detail.lines {
 		got = append(got, row{strings.TrimSpace(line.text), line.metrics})
 	}
-	// Every event is a sibling at one indent, and each row states its own request:
-	// the tool ending at 26k of context, the reply ending at 44k. The subagent
-	// keeps its own session totals, which the parent log never bills.
+	// The prompt shows the starting context of the request that it triggered. Each
+	// request row shows its context after the output. The subagent row shows the
+	// child's own totals because the parent log does not bill them.
 	want := []row{
 		{"you: Chart the route", "ctx 25k"},
 		{"◇ thinking: Compare routes", ""},
@@ -2282,10 +2269,7 @@ func TestHarnessPromptKeepsNextRequestContext(t *testing.T) {
 	}
 }
 
-// TestContextColumnNeverShrinksDownAnExpandedTimeline pins how a sequential
-// expanded timeline reads: each prompt reports the next request's starting
-// context, followed by each request's post-output total.
-func TestContextColumnNeverShrinksDownAnExpandedTimeline(t *testing.T) {
+func TestContextColumnShowsPromptStartAndRequestTotals(t *testing.T) {
 	request := func(kind model.EventKind, context int64) model.Event {
 		return model.Event{Kind: kind, ToolName: "Read", Text: "Route ready",
 			Usage: &model.Usage{InputTokens: 1_000, OutputTokens: 1_000, CacheReadTokens: context - 1_000}}
@@ -2308,18 +2292,14 @@ func TestContextColumnNeverShrinksDownAnExpandedTimeline(t *testing.T) {
 		}
 		got = append(got, context)
 	}
-	// Each prompt borrows the starting context of the request it triggered, then
-	// each request reports its post-output total.
+	// A prompt shows the starting context of the request that it triggered. A
+	// request shows its context after the output.
 	want := []string{"10k", "11k", "21k", "30k", "31k", "41k"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("context column = %v, want %v:\n%s", got, want, strings.Join(timelineLineTexts(detail.lines), "\n"))
 	}
 }
 
-// TestEventRowsShowTheirOwnRequestMetrics verifies each request's usage renders on
-// the event that carries it — a tool call and an assistant reply here — with the
-// context it reached, so an expanded turn shows per-request tokens, cost, and
-// context, not only the turn aggregate.
 func TestEventRowsShowTheirOwnRequestMetrics(t *testing.T) {
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Path: "/workspace/lunar/session.jsonl", Events: []model.Event{
 		{Kind: model.EventUser, Text: "Chart the route"},
@@ -2339,8 +2319,8 @@ func TestEventRowsShowTheirOwnRequestMetrics(t *testing.T) {
 			reply = line
 		}
 	}
-	// Each request's metrics ride its row's right-aligned column. The tool call ends
-	// at 60k of context after rounding; the reply ends at 73k.
+	// humanTokens rounds the tool's 60,402 context tokens to 60k and the reply's
+	// 73,136 to 73k.
 	for _, want := range []string{"↓400", "ctx 60k"} {
 		if !strings.Contains(tool.metrics, want) {
 			t.Fatalf("tool metrics = %q, want %q", tool.metrics, want)
@@ -4568,8 +4548,8 @@ func TestCursorMovedOffTheNewestEventStopsTailFollowing(t *testing.T) {
 		updated, _ := m.Update(msg)
 		m = updated.(Model)
 	}
-	// Moving the cursor up inside the last screenful leaves the viewport at the
-	// bottom, so tail-following must key off the cursor rather than the viewport.
+	// The cursor moved up within the last screenful, so the viewport is still at
+	// the bottom. Tail-following must depend on the cursor, not the viewport.
 	before := detailStateFromScreen(t, m.detail)
 	offset, focusKey := before.viewport.YOffset, before.focusables[before.focus].key
 	if !before.pinnedToBottom() {
@@ -4657,8 +4637,8 @@ func TestPinnedDetailTimelineStaysPinnedAcrossResize(t *testing.T) {
 	m = updated.(Model)
 	detail := detailStateFromScreen(t, m.detail)
 	view := ansi.Strip(m.View())
-	// The newest reply appends to the last turn, whose header previews it at the very
-	// bottom; tail-following holds if that preview stays on screen after the resize.
+	// The appended reply is the last row, so it is on screen only if the resized
+	// Timeline still follows the tail.
 	if !detail.pinnedToBottom() || !strings.Contains(view, "Final") {
 		t.Fatalf("post-resize tail-follow bottom=%t:\n%s", detail.pinnedToBottom(), view)
 	}
@@ -5026,8 +5006,8 @@ func TestCollapseAllKeepsFocusWhereItWas(t *testing.T) {
 		t.Fatalf("first tool row not found: %#v", detail.focusables)
 	}
 
-	// A flat timeline folds only a row's own body, so no focusable can disappear
-	// under the cursor and focus stays put.
+	// A fold hides only body rows, which are not focusable, so the focused row
+	// survives the collapse.
 	detail.update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'C'}})
 
 	if got := detail.focusables[detail.focus].key; got != wantKey {
@@ -6506,10 +6486,8 @@ func TestWrapToggleWrapsBodyRowsAndHighlightsSelectedHead(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor)
 	t.Cleanup(func() { lipgloss.SetColorProfile(profile) })
 
-	// Metrics-bearing heads are nowrap and stay one row, so wrapping happens on the
-	// body. A long single-line reply folds open by default; its full text renders as
-	// body rows that wrap or truncate with the wrap toggle, while the focused head
-	// stays a single highlighted row.
+	// A long single-line reply is open by default. Its head never wraps, so the wrap
+	// toggle changes only the body rows.
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{{
 		Kind: model.EventAssistantText, Text: strings.Repeat("charted route ", 12),
 	}}}
@@ -6564,8 +6542,8 @@ func TestWrapToggleWrapsBodyRowsAndHighlightsSelectedHead(t *testing.T) {
 }
 
 func TestWrappedEdgeNavigationUsesFlatRowOffsets(t *testing.T) {
-	// The reply folds open into wrapped body rows; navigation counts rendered rows,
-	// not detail lines. G lands on the reply head at the bottom, g on the prompt top.
+	// The open reply wraps into several body rows, so offsets count rendered rows,
+	// not detail lines.
 	session := &model.Session{ID: "lunar", Agent: model.AgentClaude, Events: []model.Event{
 		{Kind: model.EventUser, Text: "Start the survey"},
 		{Kind: model.EventAssistantText, Text: strings.Repeat("charted southern route ", 4)},
@@ -6616,7 +6594,7 @@ func TestSessionOverviewUnattributedUsage(t *testing.T) {
 		{Offset: -1, Usage: model.Usage{Model: "gpt-5.6-sol", InputTokens: 200, CacheReadTokens: 60, OutputTokens: 30, InputIncludesCacheRead: true}, USD: 0.20},
 		{Offset: -1, Usage: model.Usage{Model: "gpt-5.3", InputTokens: 500, InputIncludesCacheRead: true}},
 	}}
-	// Each model carries its own pricing outcome: substituted rate, exact rate, missing pricing.
+	// The three models cover a substituted rate, an exact rate, and missing pricing.
 	want := []string{
 		"unattributed: gpt-5.6-sol · ↑100/0/200 ↓50 · ~$0.30",
 		"unattributed: gpt-5.4 · ↑0/0/300 ↓50 · $0.30",
