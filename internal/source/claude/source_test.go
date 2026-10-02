@@ -190,6 +190,19 @@ func TestAffectedPathMapsSubagentToParent(t *testing.T) {
 	}
 }
 
+// The parser reads a subagent's own subagents from a companion directory, so a
+// change there belongs to the top-level session, not to the subagent transcript.
+func TestAffectedPathMapsNestedSubagentToTopLevelSession(t *testing.T) {
+	root := filepath.Join("fictional", "projects")
+	session := filepath.Join(root, "project-alpha", "session-main")
+	path := filepath.Join(session, "subagents", "workflows", "run-river", "agent-mapper", "subagents", "agent-reviewer.jsonl")
+	source := NewSource(testParser(), []string{root})
+
+	if got, want := source.AffectedPath(path), session+".jsonl"; got != want {
+		t.Fatalf("AffectedPath() = %q, want %q", got, want)
+	}
+}
+
 func TestSourceLinksLegacyAgentFileToParent(t *testing.T) {
 	root := tempRoot(t)
 	project := filepath.Join(root, "project-legacy")

@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -176,10 +177,8 @@ func (s Source) AffectedPathContext(ctx context.Context, path string) (string, e
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	for dir := filepath.Dir(path); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if filepath.Base(dir) == "subagents" {
-			return filepath.Dir(dir) + ".jsonl", nil
-		}
+	if owner := s.subagentTreeOwner(path); owner != "" {
+		return owner, nil
 	}
 	if isLegacyAgentFile(path) {
 		parentID := sessionIDFromFileContext(ctx, path)
@@ -197,6 +196,19 @@ func (s Source) AffectedPathContext(ctx context.Context, path string) (string, e
 		}
 	}
 	return path, nil
+}
+
+// subagentTreeOwner returns the transcript beside the outermost subagents
+// directory below a root. Discover skips every subagents directory, so only
+// that transcript is a top-level session.
+func (s Source) subagentTreeOwner(path string) string {
+	owner := ""
+	for dir := filepath.Dir(path); dir != filepath.Dir(dir) && !slices.Contains(s.roots, dir); dir = filepath.Dir(dir) {
+		if filepath.Base(dir) == "subagents" {
+			owner = filepath.Dir(dir) + ".jsonl"
+		}
+	}
+	return owner
 }
 
 func isLegacyAgentFile(path string) bool {
