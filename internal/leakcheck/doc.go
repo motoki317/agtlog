@@ -1,8 +1,11 @@
-// Package leakcheck guards the repository against committed machine-local or
-// environment-specific identifiers. The forbidden set is derived at test time
-// from the local environment and an optional gitignored denylist, so the test
-// contains no private names and reads identically on every machine.
+// Package leakcheck fails when a committable file contains a local identifier.
+// Committable files are tracked files and untracked files that Git does not
+// ignore, so the scan finds a leak before it is staged.
 //
-// The scan includes untracked files that Git does not ignore, catching leaks
-// before they are staged. See AGENTS.md for the repository leakage policy.
+// The test builds the forbidden set at run time, so its source names nothing
+// private. The set has kubeconfig context, cluster, user, and namespace names,
+// plus the AWS account IDs and ARN tails in those names. It also has the tokens
+// in the gitignored .leakcheck file and in AGTLOG_LEAKCHECK_EXTRA. Machine-local
+// paths, hostnames, and project names reach the guard only through those two
+// lists. AGENTS.md states the policy.
 package leakcheck
