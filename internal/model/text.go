@@ -84,10 +84,6 @@ func cleanTitleLine(line string) string {
 	return result
 }
 
-func IsHardNoise(value string) bool {
-	return CleanTimelineText(value) == ""
-}
-
 func CleanTimelineText(value string) string {
 	tags := []string{"system-reminder", "permission-preamble", "local-command-caveat"}
 	lower := asciiLower(value)
