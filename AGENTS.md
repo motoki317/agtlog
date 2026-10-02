@@ -1,48 +1,49 @@
 # Agent guide
 
-agtlog reads local Claude Code and Codex JSONL logs, normalizes sessions, and
-estimates API-equivalent cost. It never writes to agent configuration or log
-directories. The keyboard-first terminal UI lists top-level sessions and opens
-lazy detail timelines with nested subagents.
+agtlog reads local Claude Code and Codex JSONL logs, normalizes sessions, and estimates
+API-equivalent cost. It never writes to agent configuration or log directories. The
+keyboard-first terminal UI lists top-level sessions and loads a detail timeline with nested
+subagents when the user opens a session. The `list`, `show`, and `search` subcommands give
+scripts the same sessions as JSON.
 
 ## Repository map
 
-- `cmd/agtlog` contains the executable entry point.
 - `internal/model` contains the unified session and usage model.
-- `internal/cost` embeds LiteLLM pricing, overlays the XDG pricing cache, refreshes
-  stale data for the next launch, and calculates per-record cost.
-- `internal/source/claude` and `internal/source/codex` parse agent-specific logs.
-- `internal/source` discovers sessions and follows filesystem changes.
-- `internal/tui` contains the list, detail timeline, key map, help, and styles.
+- `internal/cost` embeds LiteLLM pricing, overlays the XDG pricing cache, refreshes stale data
+  for the next launch, and calculates per-record cost.
+- `internal/source` discovers sessions, caches their summaries, and follows filesystem changes.
+- `internal/source/claude` and `internal/source/codex` are the adapters that parse each agent's
+  logs. If a change alters what an adapter stores in a session summary, bump the adapter's
+  `CacheFingerprint` so that agtlog parses cached sessions again.
+- `internal/source/jsonl` reads size-bounded JSONL lines with their byte offsets and decodes
+  records.
+- `internal/cli` implements the subcommands. `docs/cli.md` is their versioned JSON contract.
+- `internal/tui` contains the session list, detail screens, key map, help, and styles.
+  `docs/design.md` records the rules that a new screen, column, or key must follow.
 - `internal/leakcheck` guards committable files against local identifiers.
-- `docs/ADR` records durable design decisions.
-- `docs/design.md` records the terminal interface vocabulary.
 - `docs/plans` is gitignored planning scratch.
 
 ## Build and test
 
-```bash
-just build
-just test
-just check
-just leakcheck
-just pre-commit
-just test-race
-```
+Run `just` to list the recipes. Every commit must pass `just pre-commit`: the build, `gofmt`,
+`go vet`, the leak check, and `go test ./...`. The Nix dev shell installs a Git hook that runs
+it. If a commit changes `go.mod`, `go.sum`, `flake.nix`, or `flake.lock`, the hook also runs
+`just nix-build`. If that build reports a hash mismatch after a dependency change, update
+`vendorHash` in `flake.nix`. CI runs `just pre-commit` and `just test-race`.
 
-The module targets Go 1.26.2 and all release builds set `CGO_ENABLED=0`.
+Builds set `CGO_ENABLED=0`, so a dependency must not need cgo. Only `just test-race` enables cgo,
+because the race detector needs it.
 
 ## Conventions
 
-- Use Conventional Commits in English and keep each commit green.
-- Keep agent logs read-only. Tests create fictional fixtures in temporary or
+- Use Conventional Commits in English.
+- Runtime writes stay beneath the XDG cache directory. Tests create fixtures in temporary or
   `testdata` directories.
-- Runtime writes stay beneath the XDG cache directory. `--offline` disables the
-  pricing fetch but still uses the embedded snapshot and a valid cached overlay.
-- Never commit machine-local paths, hostnames, account IDs, project names, or
-  other environment identifiers. Use fictional values in tests and examples.
-- Put private local terms in the gitignored `.leakcheck` denylist and run
-  `just leakcheck` before every commit.
-- Comments explain constraints or rejected alternatives, not nearby code.
+- Never commit machine-local paths, hostnames, account IDs, local project names, or other
+  environment identifiers. Use fictional values in tests and examples.
+- The leak check finds local paths, hostnames, and project names only when the gitignored
+  `.leakcheck` file lists them. Copy `.leakcheck.example` to `.leakcheck` and add yours.
+- Comments explain a constraint or a rejected alternative at that spot in the code, not what the
+  code does. Record a decision that shapes more than one place in a dated ADR.
+  `docs/ADR/README.md` describes the format.
 - Use TDD for pure logic and fixture-driven tests for adapters.
-- Record design rationale in dated ADRs instead of code comments.
