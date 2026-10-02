@@ -11,10 +11,9 @@ import (
 	"github.com/motoki317/agtlog/internal/cost"
 )
 
-// tempRoot returns a temporary directory with symlinks resolved so it matches
-// the canonical form NewSource stores. On macOS t.TempDir lives under a
-// /var → /private/var symlink that Discover resolves, so the raw path would
-// never equal the discovered one.
+// tempRoot resolves symlinks in t.TempDir, because NewSource stores canonical
+// roots and Discover returns paths below them. On macOS, /var is a symlink to
+// /private/var.
 func tempRoot(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())

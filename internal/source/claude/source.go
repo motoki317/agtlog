@@ -89,6 +89,8 @@ func (s Source) Discover(ctx context.Context) ([]string, error) {
 	return paths, nil
 }
 
+// normalizeRoots resolves symlinks because filepath.WalkDir does not descend
+// into a root that is a symlink.
 func normalizeRoots(roots []string) []string {
 	seen := make(map[string]bool)
 	normalized := make([]string, 0, len(roots))

@@ -1202,7 +1202,7 @@ func TestParseBuildsUnifiedSessionMetadata(t *testing.T) {
 	if session.GitBranch != "orbit/alpha" || !session.StartedAt.Equal(started) || !session.UpdatedAt.Equal(updated) {
 		t.Errorf("Parse() metadata = branch %q, started %v, updated %v", session.GitBranch, session.StartedAt, session.UpdatedAt)
 	}
-	// One user text turn; the assistant records carry usage only, no text blocks.
+	// The fixture has one user prompt, and its assistant records have no content.
 	if session.Messages != 1 {
 		t.Errorf("Parse().Messages = %d, want 1", session.Messages)
 	}
@@ -1225,8 +1225,8 @@ func TestParseCountsMessagesAndToolCalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	// 1 user prompt + 2 assistant text replies. The tool-result-only user record
-	// and the tool-only assistant record are turns of tooling, not messages.
+	// One user prompt and two assistant text replies. A tool result, a tool
+	// call, and blank text are not messages.
 	if session.Messages != 3 {
 		t.Errorf("Parse().Messages = %d, want 3", session.Messages)
 	}
@@ -1497,8 +1497,6 @@ func TestLoadEventsAttachesRequestUsageToAssistantTurn(t *testing.T) {
 			withUsage = append(withUsage, index)
 		}
 	}
-	// Usage lands on the first block of the assistant line only, so a turn sums each
-	// billed request exactly once rather than per rendered block.
 	if len(withUsage) != 1 || session.Events[withUsage[0]].Kind != model.EventThinking {
 		t.Fatalf("events carrying usage = %v, want the single thinking block", withUsage)
 	}
@@ -1508,11 +1506,6 @@ func TestLoadEventsAttachesRequestUsageToAssistantTurn(t *testing.T) {
 	}
 }
 
-// TestLoadEventsAttributesStreamedRequestOnceAtMaxUsage guards the fix for the
-// double count: one API response is written across content-block lines that share
-// a message id and request id, and streaming re-logs it with growing output. It
-// must land on a single head event at the highest usage, so a turn totals the
-// request once and in full.
 func TestLoadEventsAttributesStreamedRequestOnceAtMaxUsage(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session-stream.jsonl")
 	content := strings.Join([]string{
@@ -1645,9 +1638,6 @@ func TestLoadEventsKeepsInflightWorkflowEventWithoutGroup(t *testing.T) {
 	t.Fatalf("in-flight events = %#v, want Workflow subagent event", session.Events)
 }
 
-// A Task input carries keys beyond the identifying ones, and their values are
-// not all strings. Decoding stops at the first value that does not fit the
-// target, so a non-string ahead of subagent_type must not cost the match.
 func TestLoadEventsMatchesSpawnPastNonStringToolInput(t *testing.T) {
 	dir := t.TempDir()
 	parentPath := filepath.Join(dir, "session-detail.jsonl")
@@ -2057,12 +2047,6 @@ func TestLoadEventsKeepsCompactionBoundary(t *testing.T) {
 	}
 }
 
-// The Advisor tool runs a separate model server-side; its tokens ride in
-// usage.iterations[type=advisor_message], excluded from the top-level usage
-// because they bill at the advisor model's rates. The advisor block is logged
-// when the call opens but its usage completes on a later line, so the row must
-// pick the cost up across lines, count it once despite re-logs, and price it at
-// the advisor's own model.
 func TestLoadEventsCostsAdvisorSubInference(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session-advisor.jsonl")
 	const exec = `"input_tokens":100,"output_tokens":50`

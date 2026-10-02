@@ -58,10 +58,7 @@ type claudeUsageJSON struct {
 		Ephemeral1hInputTokens int64 `json:"ephemeral_1h_input_tokens"`
 		Ephemeral5mInputTokens int64 `json:"ephemeral_5m_input_tokens"`
 	} `json:"cache_creation"`
-	// Iterations reports the per-step usage when one Messages request runs
-	// sub-inferences server-side. The Advisor tool emits an "advisor_message"
-	// step on its own model; the top-level fields deliberately exclude it because
-	// it bills at that model's rates, so it must be counted separately.
+	// Iterations lists the usage of each server-side inference in the request.
 	Iterations []claudeIterationJSON `json:"iterations"`
 }
 
@@ -71,10 +68,9 @@ type claudeIterationJSON struct {
 	claudeUsageJSON
 }
 
-// claudeAdvisorUsages returns the billed usage of each Advisor sub-inference in a
-// request. Anthropic excludes these tokens from the top-level usage because they
-// bill at the advisor model's rates, so ignoring them undercounts every advisor
-// turn. See docs/ADR/20260724-advisor-tool-cost.md.
+// claudeAdvisorUsages reads the advisor usage that the top-level usage
+// excludes. Advisor tokens bill at the advisor model's rates. See
+// docs/ADR/20260724-advisor-tool-cost.md.
 func claudeAdvisorUsages(tokens claudeUsageJSON) []model.Usage {
 	var advisor []model.Usage
 	for _, iteration := range tokens.Iterations {
@@ -108,8 +104,6 @@ func claudeUsage(modelName string, tokens claudeUsageJSON) model.Usage {
 	return usage
 }
 
-// claudeRequestUsage returns the billable usage an assistant line reports, or
-// false for synthetic and empty lines that carry none.
 func claudeRequestUsage(modelName string, tokens claudeUsageJSON) (model.Usage, bool) {
 	if modelName == "" || modelName == "<synthetic>" {
 		return model.Usage{}, false
@@ -121,8 +115,6 @@ func claudeRequestUsage(modelName string, tokens claudeUsageJSON) (model.Usage, 
 	return usage, true
 }
 
-// setEventUsage records a request's usage and priced cost on the event that heads
-// it, so the timeline can total a turn's flow and cost and read its latest context.
 func (p Parser) setEventUsage(event *model.Event, usage model.Usage) {
 	event.Usage = &usage
 	event.Cost = p.calculator.Breakdown(usage)
@@ -215,16 +207,13 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 	session.Events = nil
 	calls := make(map[string]int)
 	linkedSubagents := make(map[*model.Session]bool)
-	// One API response is written across several lines (thinking, text, each
-	// tool_use) that repeat its usage, and streaming re-logs the same request with
-	// growing counts. Attribute each request to a single head event, keeping the
-	// highest-token report, so a turn totals each billed request once and in full.
+	// Claude Code writes one line per content block of a response, and each line
+	// repeats the usage. Streaming re-logs a request with growing counts. Each
+	// request therefore gets one head event, which keeps the highest count.
 	headOf := make(map[string]int)
-	// advisorCount tracks how many Advisor calls a message has already yielded a
-	// row for, so the Nth advisor block maps to the Nth advisor_message iteration.
-	// Advisor usage completes on a later line than the server_tool_use block that
-	// opened the call, so collect the fullest set per message and attach it to the
-	// rows once the pass finishes.
+	// The Nth advisor block of a message maps to its Nth advisor_message
+	// iteration. The usage completes on a later line than the block, so the rows
+	// get their usage after the pass.
 	advisorCount := make(map[string]int)
 	advisorUsagesByMsg := make(map[string][]model.Usage)
 	type advisorRef struct {
@@ -252,8 +241,8 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 				PostTokens int64  `json:"postTokens"`
 			} `json:"compactMetadata"`
 		}
-		// One decode per record on the hot path: a record carries the tool's whole
-		// output, so every extra pass over the line rescans all of it.
+		// Decode each record once. A record can carry a whole tool output, and
+		// each extra decode scans all of it again.
 		if jsonl.Unmarshal(line, &record) != nil {
 			return
 		}
@@ -277,10 +266,9 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 		}
 		if record.Type == "user" {
 			if text := userText(record.Message.Content); text != "" {
-				// Markers are read in their own pass, and only here: a malformed
-				// marker must not drop an otherwise readable record. Tool results
-				// are user records too but yield no text, so the records that reach
-				// this second pass are prompts — small, and a minority of the log.
+				// A separate decode keeps a malformed marker from dropping a
+				// readable record. Tool results have no text, so only prompts
+				// reach this decode, and prompts are small.
 				var markers struct {
 					IsMeta           bool            `json:"isMeta"`
 					IsCompactSummary bool            `json:"isCompactSummary"`
@@ -360,9 +348,9 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 					if call.Detail != nil && block.ToolUseID != "" {
 						call.Detail.Output = model.ElideEncrypted(claudeResultText(block.Content))
 					}
-					// Only a subagent result carries an agentId, and toolUseResult holds
-					// the tool's whole output — scanning it for every tool result would
-					// re-read most of the log.
+					// Decode toolUseResult only for a subagent call. It holds the
+					// whole tool output, and only a subagent result carries an agent
+					// ID or a run ID.
 					if call.Kind == model.EventSubagent {
 						if call.ToolName == "Workflow" {
 							if runID := toolResultRunID(record.ToolUseResult); runID != "" {
@@ -390,12 +378,9 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 					}
 				}
 			case "server_tool_use":
-				// The Advisor tool is the only server tool agtlog surfaces; it runs a
-				// separate model whose usage rides in usage.iterations, so it earns its
-				// own row and its own cost. Unlike reasoning blocks it is not re-logged,
-				// but the guard keeps a stray re-log from doubling the row. Advisor
-				// blocks follow the turn's reasoning, so the head-usage attribution
-				// below never lands the executor usage on this event.
+				// The ID check keeps a re-logged block from adding a second row.
+				// An advisor block follows the reasoning of its turn, so the head
+				// usage below never lands on this row.
 				if record.Type != "assistant" || block.Name != "advisor" {
 					continue
 				}
@@ -499,9 +484,9 @@ func toolResultWorkflowName(result json.RawMessage) string {
 }
 
 func matchClaudeSubagent(subagents []*model.Session, input json.RawMessage, linked map[*model.Session]bool) *model.Session {
-	// Named fields rather than map[string]string: a Task input carries other keys
-	// whose values are not strings, and decoding stops at the first one that does
-	// not fit the target, which would lose the name that identifies the subagent.
+	// Named fields, not map[string]string: a Task input has non-string values,
+	// and the decoder stops at the first value that does not fit. A map can
+	// therefore lose the name that identifies the subagent.
 	var fields struct {
 		Name         string `json:"name"`
 		Description  string `json:"description"`
@@ -757,7 +742,8 @@ func claudeMultiEditDiff(edits json.RawMessage) (string, bool) {
 }
 
 func writeReplaceBlock(output *strings.Builder, oldText, newText string) {
-	// Whole-block output is not a minimal diff; add a line-level LCS if noisy replacements make that ceiling limiting.
+	// The output replaces whole blocks and is not a minimal diff. If noisy
+	// replacements make that a problem, add a line-level LCS.
 	if oldText != "" {
 		writePrefixedLines(output, '-', oldText)
 	}
@@ -1423,8 +1409,9 @@ func retainedTitlePrompt(prompt string) string {
 	return prompt
 }
 
-// Empty text blocks do not produce timeline messages. Tool spawns count like
-// other tool calls even though the timeline renders them as subagent rows.
+// assistantBlockCounts counts a subagent spawn as a tool call, although the
+// timeline shows it as a subagent row. A text block that cleans to nothing is
+// not a message, because the timeline drops it.
 func assistantBlockCounts(content json.RawMessage) (messages, toolCalls int) {
 	var blocks []struct {
 		Type string `json:"type"`
