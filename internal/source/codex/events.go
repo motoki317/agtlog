@@ -105,13 +105,10 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				ThreadSource string           `json:"thread_source"`
 				Content      []codexTextBlock `json:"content"`
 				Item         codexItemRecord  `json:"item"`
-				// Codex reuses "summary" across payload variants with different
-				// shapes: an array of blocks under reasoning, a bare string under
-				// turn_context. Decoding it lazily keeps a turn_context line from
-				// failing the whole record, which would lose the model and
-				// mis-price the session. encoding/json does not guarantee the
-				// remaining fields are filled after a type error, so the shape
-				// must not conflict in the first place.
+				// "summary" is an array of blocks under reasoning and a string under
+				// turn_context. jsonl.Unmarshal stops at the first field whose shape
+				// does not match, so a typed field drops every turn_context record
+				// and the model that prices later usage.
 				Summary json.RawMessage `json:"summary"`
 			} `json:"payload"`
 		}
@@ -278,8 +275,8 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				if summary == "" {
 					summary = codexResultSummary(output)
 				}
-				// An apply_patch result is exit-code and wall-time boilerplate that never
-				// names what changed. Summarize it by the files the patch touches instead.
+				// An apply_patch result holds only the exit code and wall time, so the
+				// summary names the files that the patch touches.
 				if linked && pending.applyPatch {
 					if call := &session.Events[pending.eventIndex]; call.Detail != nil {
 						if files := codexPatchFiles(call.Detail.Diff); len(files) > 0 {
@@ -447,8 +444,8 @@ func appendCodexMessage(session *model.Session, event model.Event, preferred boo
 		if existingKey != dedupKey {
 			continue
 		}
-		// Codex logs the human-facing copy of a prompt before or after its
-		// model-input copy, and either copy proves that a human wrote it.
+		// Codex logs a prompt's human-facing copy before or after its model-input
+		// copy. The human-facing copy decides the classification in both orders.
 		if event.Kind == model.EventUser {
 			event.Harness = event.Harness && existing.Harness
 			session.Events[index].Harness = event.Harness
@@ -670,12 +667,9 @@ func codexExecToolPresentation(input string) (string, *model.ToolDetail) {
 	return strings.SplitN(command, "\n", 2)[0], &model.ToolDetail{Input: codexElideEncrypted(command)}
 }
 
-// codexPatchFiles returns the basenames of the files a Codex apply_patch envelope
-// touches, in first-seen order. Each file section begins with an "*** Update File:",
-// "*** Add File:", or "*** Delete File:" header; a rename adds a "*** Move to:" line
-// that names the same file again, so only the section headers are collected. The
-// names summarize the edit for the timeline in place of the tool's exit-code and
-// wall-time output.
+// codexPatchFiles returns the base names of the files that an apply_patch
+// envelope touches, in first-seen order. It reads only section headers, so a
+// renamed file appears once, under the name in its "*** Update File:" header.
 func codexPatchFiles(patch string) []string {
 	prefixes := []string{"*** Update File: ", "*** Add File: ", "*** Delete File: "}
 	var files []string
@@ -697,13 +691,12 @@ func codexPatchFiles(patch string) []string {
 	return files
 }
 
-// codexApplyPatchBegin marks the start of an apply_patch envelope.
 const codexApplyPatchBegin = "*** Begin Patch"
 
-// codexApplyPatchBody returns the decoded patch envelope handed to a wrapped
-// tools.apply_patch call. The wrapper assigns the patch to a JS string literal —
-// often a variable referenced by the call rather than an inline argument — so the
-// literal is located by its envelope marker instead of by the call's argument.
+// codexApplyPatchBody returns the patch from a wrapped tools.apply_patch call.
+// The wrapper often assigns the patch to a variable and passes the variable, so
+// the search finds the string literal that holds the envelope marker, not the
+// call argument.
 func codexApplyPatchBody(input string) (string, bool) {
 	for index := 0; index < len(input); {
 		switch input[index] {

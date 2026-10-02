@@ -128,8 +128,7 @@ func TestLoadEventsAttachesTokenCountUsageToAssistantTurn(t *testing.T) {
 			withUsage = append(withUsage, index)
 		}
 	}
-	// The token_count closing the request attaches to the assistant reply, not the
-	// user prompt. Context stays the whole prompt, and output already includes reasoning.
+	// Codex counts reasoning inside output_tokens, so reasoning adds nothing to the flow.
 	if len(withUsage) != 1 || session.Events[withUsage[0]].Kind != model.EventAssistantText {
 		t.Fatalf("events carrying usage = %v, want the single assistant reply", withUsage)
 	}
@@ -1104,7 +1103,7 @@ func TestParseBuildsUnifiedSessionMetadata(t *testing.T) {
 	if session.Title != "Design a rover" || session.GitBranch != "orbit/alpha" {
 		t.Errorf("Parse() label = title %q, branch %q", session.Title, session.GitBranch)
 	}
-	// One user prompt plus one agent reply — the session's own conversation turns.
+	// The fixture has one user prompt and one agent reply.
 	if !reflect.DeepEqual(session.Models, []string{"gpt-5.6-sol"}) || session.Messages != 2 {
 		t.Errorf("Parse() models/messages = %v, %d", session.Models, session.Messages)
 	}

@@ -191,7 +191,7 @@ func (a *summaryAccumulator) ingest(line []byte, offset int64) {
 	inReplayPrefix := a.replayActive && validSecond && second == a.replaySecond
 	isTokenCount := record.Type == "event_msg" && record.Payload.Type == "token_count"
 	validTotal := isTokenCount && record.Payload.Info.Total != nil && validTokenUsage(record.Payload.Info.Total)
-	// Newer Codex embeds the parent's session_meta after the child's in subagent sidecars.
+	// A subagent sidecar can repeat the parent's session_meta after its own.
 	if record.Type == "session_meta" && !a.metaSeen {
 		a.metaSeen = true
 		a.session.ID = record.Payload.ID
@@ -305,8 +305,9 @@ func (a *summaryAccumulator) segmentRecords() []tokenUsageRecord {
 			ownTotal = &candidate
 		}
 	}
-	// Per-turn pricing is safe only when Codex's cumulative total confirms that
-	// the Last records form a clean partition; every other path stays lumped.
+	// Per-request pricing is valid only when the accepted last_token_usage records
+	// sum to the segment's own cumulative total. Every other segment keeps
+	// aggregate entries.
 	cleanPartition := ownTotal != nil && a.hasLast && a.summedLast == *ownTotal
 	usageByModel := a.usageByModel
 	usageOrder := a.usageOrder
@@ -569,8 +570,9 @@ func scanSummaryPrefix(ctx context.Context, file *os.File) (string, bool, error)
 		return "", false, err
 	}
 	var replaySecond string
-	// Ceiling: spaced replay timestamps disable detection; the real-log oracle is
-	// the signal to revisit this without adding cross-file parent reads.
+	// Detection needs the first two token_count records in one second, so a replay
+	// with spaced timestamps counts as child usage. Revisit this when real logs
+	// show such replays, and do not read the parent rollout to find the boundary.
 	if isForked && !replayCandidateInvalid && len(replayCandidates) == 2 && replayCandidates[0] == replayCandidates[1] {
 		replaySecond = replayCandidates[0]
 	}
