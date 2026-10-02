@@ -99,8 +99,12 @@ func TestRootsDeduplicatesAbsoluteAndRelativeCodexHomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	canonicalHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got := Roots("unused", home, []string{relative})
-	want := []string{filepath.Join(home, "sessions")}
+	want := []string{filepath.Join(canonicalHome, "sessions")}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Roots() = %v, want %v", got, want)
 	}

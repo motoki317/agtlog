@@ -107,8 +107,12 @@ func TestRootsDeduplicatesAbsoluteAndRelativeClaudeHomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	canonicalHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got := Roots("unused", home, []string{relative})
-	want := []string{filepath.Join(home, "projects")}
+	want := []string{filepath.Join(canonicalHome, "projects")}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Roots() = %v, want %v", got, want)
 	}
