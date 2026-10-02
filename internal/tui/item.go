@@ -518,7 +518,9 @@ func hasLowerHexPrefix(text []byte, size int) bool {
 		return false
 	}
 	for _, char := range text[:size] {
-		if !('0' <= char && char <= '9' || 'a' <= char && char <= 'f') {
+		isDigit := '0' <= char && char <= '9'
+		isLowerHex := 'a' <= char && char <= 'f'
+		if !isDigit && !isLowerHex {
 			return false
 		}
 	}
@@ -528,15 +530,15 @@ func hasLowerHexPrefix(text []byte, size int) bool {
 func itemEventLines(event model.Event, agent model.AgentKind) []detailLine {
 	if event.Kind != model.EventToolCall {
 		role := detailSecondary
-		if event.Kind == model.EventUser {
+		switch event.Kind {
+		case model.EventUser:
+			role = detailUserPrompt
 			if event.Harness {
 				role = detailSystemPrompt
-			} else {
-				role = detailUserPrompt
 			}
-		} else if event.Kind == model.EventAssistantText {
+		case model.EventAssistantText:
 			role = detailRow
-		} else if event.Kind == model.EventSystem || event.Kind == model.EventCompact || event.Kind == model.EventUsage {
+		case model.EventSystem, model.EventCompact, model.EventUsage:
 			role = detailSystemPrompt
 		}
 		return itemTextLines(event.Text, role, agent)
