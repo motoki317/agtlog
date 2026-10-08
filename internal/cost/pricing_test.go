@@ -27,7 +27,8 @@ func TestEmbeddedTableContainsSupportedModels(t *testing.T) {
 	}
 
 	models := []string{
-		"claude-opus-4-8", "claude-fable-5", "claude-sonnet-5", "gpt-5.6", "gpt-5.6-sol",
+		"claude-opus-4-8", "claude-opus-5-5", "claude-fable-5", "claude-fable-5-1", "claude-sonnet-5", "claude-sonnet-5-5",
+		"claude-haiku-5-5", "gpt-5.6", "gpt-5.6-sol", "gpt-6-astra",
 		// The Codex parser prices a model without its own entry as gpt-5.
 		"gpt-5",
 	}
@@ -35,6 +36,18 @@ func TestEmbeddedTableContainsSupportedModels(t *testing.T) {
 		if _, ok := table[name]; !ok {
 			t.Errorf("EmbeddedTable() missing %q", name)
 		}
+	}
+}
+
+func TestEmbeddedTableDecodesHaiku100KTier(t *testing.T) {
+	table, err := EmbeddedTable()
+	if err != nil {
+		t.Fatalf("EmbeddedTable() error = %v", err)
+	}
+
+	want := []PriceTier{{Threshold: 100_000, Input: 5e-7, Output: new(2.5e-6), CacheWrite: new(6.25e-7), CacheRead: new(5e-8)}}
+	if got := table["claude-haiku-5-5"].Tiers; !reflect.DeepEqual(got, want) {
+		t.Fatalf("claude-haiku-5-5 Tiers = %s, want %s", tiersJSON(t, got), tiersJSON(t, want))
 	}
 }
 
