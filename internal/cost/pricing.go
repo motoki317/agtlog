@@ -299,20 +299,20 @@ func (t Table) Resolve(modelName string) (string, Pricing, bool) {
 
 // ResolveCodex reports exact only for the logged model's own published rate. A
 // rate from a base model or from defaultModel is an estimate.
-func (t Table) ResolveCodex(modelName, defaultModel string) (key string, pricing Pricing, exact, ok bool) {
-	if key, pricing, ok := t.Resolve(modelName); ok {
-		return key, pricing, true, true
+func (t Table) ResolveCodex(modelName, defaultModel string) (key string, exact, ok bool) {
+	if key, _, ok := t.Resolve(modelName); ok {
+		return key, true, true
 	}
 	codexModelName := strings.TrimPrefix(modelName, "openai/")
 	if strings.HasPrefix(codexModelName, "gpt-5") {
 		for _, suffix := range []string{"-sol", "-terra", "-luna"} {
 			if base, found := strings.CutSuffix(modelName, suffix); found {
-				if key, pricing, ok := t.Resolve(base); ok {
-					return key, pricing, false, true
+				if key, _, ok := t.Resolve(base); ok {
+					return key, false, true
 				}
 			}
 		}
 	}
-	key, pricing, ok = t.Resolve(defaultModel)
-	return key, pricing, false, ok
+	key, _, ok = t.Resolve(defaultModel)
+	return key, false, ok
 }

@@ -115,7 +115,7 @@ func applySession(session *model.Session, pricer sessionPricer) {
 }
 
 func (c Calculator) CalculateCodex(usage model.Usage, defaultModel string) model.Cost {
-	pricingModel, _, exact, ok := c.table.ResolveCodex(usage.Model, defaultModel)
+	pricingModel, exact, ok := c.table.ResolveCodex(usage.Model, defaultModel)
 	if !ok {
 		return model.Cost{Estimated: true, MissingPricingModels: []string{usage.Model}}
 	}
@@ -130,7 +130,7 @@ func (c Calculator) CalculateCodex(usage model.Usage, defaultModel string) model
 }
 
 func (c Calculator) BreakdownCodex(usage model.Usage, defaultModel string) model.CostBreakdown {
-	pricingModel, _, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
+	pricingModel, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
 	if !ok {
 		return model.CostBreakdown{}
 	}
@@ -140,7 +140,7 @@ func (c Calculator) BreakdownCodex(usage model.Usage, defaultModel string) model
 }
 
 func (c Calculator) HasCodexPricing(usage model.Usage, defaultModel string) bool {
-	_, _, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
+	_, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
 	return ok
 }
 

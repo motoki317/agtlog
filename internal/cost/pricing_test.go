@@ -596,9 +596,9 @@ func TestCodexResolutionUsesOwnPublishedSolRate(t *testing.T) {
 		"gpt-5.6-sol": {Input: 3},
 	}
 
-	key, pricing, _, ok := table.ResolveCodex("gpt-5.6-sol", "gpt-5")
-	if !ok || key != "gpt-5.6-sol" || pricing.Input != 3 {
-		t.Fatalf("ResolveCodex() = %q, %#v, %v", key, pricing, ok)
+	key, _, ok := table.ResolveCodex("gpt-5.6-sol", "gpt-5")
+	if !ok || key != "gpt-5.6-sol" {
+		t.Fatalf("ResolveCodex() = %q, _, %v, want own sol entry", key, ok)
 	}
 }
 
@@ -629,7 +629,7 @@ func TestCodexResolutionReportsExactness(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			key, _, exact, ok := table.ResolveCodex(test.model, "gpt-5")
+			key, exact, ok := table.ResolveCodex(test.model, "gpt-5")
 			if !ok || key != test.wantKey || exact != test.wantExact {
 				t.Fatalf("ResolveCodex(%q) = %q, exact %t, ok %t; want %q, exact %t, ok true",
 					test.model, key, exact, ok, test.wantKey, test.wantExact)
@@ -641,7 +641,7 @@ func TestCodexResolutionReportsExactness(t *testing.T) {
 func TestCodexResolutionKeepsPublicGPT5Models(t *testing.T) {
 	table := Table{"gpt-5.4": {Input: 2}}
 
-	key, _, _, ok := table.ResolveCodex("gpt-5.4", "gpt-5")
+	key, _, ok := table.ResolveCodex("gpt-5.4", "gpt-5")
 	if !ok || key != "gpt-5.4" {
 		t.Fatalf("ResolveCodex() = %q, _, %v, want public model", key, ok)
 	}
@@ -650,7 +650,7 @@ func TestCodexResolutionKeepsPublicGPT5Models(t *testing.T) {
 func TestCodexResolutionStripsPrivateGPT5Variant(t *testing.T) {
 	table := Table{"gpt-5.4": {Input: 2}}
 
-	key, _, _, ok := table.ResolveCodex("gpt-5.4-sol", "gpt-5")
+	key, _, ok := table.ResolveCodex("gpt-5.4-sol", "gpt-5")
 	if !ok || key != "gpt-5.4" {
 		t.Fatalf("ResolveCodex() = %q, _, %v, want base public model", key, ok)
 	}
@@ -659,7 +659,7 @@ func TestCodexResolutionStripsPrivateGPT5Variant(t *testing.T) {
 func TestCodexResolutionUsesConfiguredDefault(t *testing.T) {
 	table := Table{"gpt-5": {Input: 2}}
 
-	key, _, _, ok := table.ResolveCodex("future-codex-model", "gpt-5")
+	key, _, ok := table.ResolveCodex("future-codex-model", "gpt-5")
 	if !ok || key != "gpt-5" {
 		t.Fatalf("ResolveCodex() = %q, _, %v, want configured default", key, ok)
 	}
