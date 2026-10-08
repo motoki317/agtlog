@@ -3,6 +3,7 @@ package cost
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
@@ -442,8 +443,18 @@ func TestPricingTableDecodesContextLengthTiers(t *testing.T) {
 		{Threshold: 272_000, Input: 6},
 	}
 	if got := table["model-a"].Tiers; !reflect.DeepEqual(got, want) {
-		t.Fatalf("Tiers = %#v, want %#v", got, want)
+		t.Fatalf("Tiers = %s, want %s", tiersJSON(t, got), tiersJSON(t, want))
 	}
+}
+
+// tiersJSON shows rates where %#v would show the addresses of the *float64 fields.
+func tiersJSON(t *testing.T, tiers []PriceTier) string {
+	t.Helper()
+	data, err := json.Marshal(tiers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestPricingTableRejectsInvalidTiers(t *testing.T) {
