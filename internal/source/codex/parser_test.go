@@ -31,9 +31,8 @@ func testParser() Parser {
 }
 
 func tieredTestParser() Parser {
-	above := 2.0
 	return NewParser(cost.NewCalculator(cost.Table{
-		"gpt-5.6": {Input: 1, Output: 3, InputAbove272K: &above},
+		"gpt-5.6": {Input: 1, Output: 3, Tiers: []cost.PriceTier{{Threshold: 272_000, Input: 2}}},
 	}), "gpt-5")
 }
 
@@ -1731,8 +1730,8 @@ func TestParsePricesOnlyLargeTurnAboveTier(t *testing.T) {
 		`{"timestamp":"2026-01-02T03:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":450000},"last_token_usage":{"input_tokens":300000}}}}`,
 	)
 	want := model.CostBuckets{
-		{RatePerToken: 1, Tokens: 422_000},
-		{RatePerToken: 2, Tokens: 28_000, AboveThreshold: true},
+		{RatePerToken: 1, Tokens: 150_000},
+		{RatePerToken: 2, Tokens: 300_000, AboveThreshold: true},
 	}
 	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want only the large turn above tier %#v", got, want)

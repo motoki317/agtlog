@@ -324,11 +324,7 @@ func validPricing(pricing Pricing) bool {
 	if !validRate(pricing.Input) || !validRate(pricing.Output) || !validRate(pricing.ProviderSpecificEntry.Fast) {
 		return false
 	}
-	rates := []*float64{
-		pricing.CacheWrite, pricing.CacheRead,
-		pricing.InputAbove200K, pricing.OutputAbove200K, pricing.CacheWriteAbove200K, pricing.CacheReadAbove200K,
-		pricing.InputAbove272K, pricing.OutputAbove272K, pricing.CacheWriteAbove272K, pricing.CacheReadAbove272K,
-	}
+	rates := []*float64{pricing.CacheWrite, pricing.CacheRead}
 	for _, tier := range pricing.Tiers {
 		rates = append(rates, &tier.Input, tier.Output, tier.CacheWrite, tier.CacheRead)
 	}

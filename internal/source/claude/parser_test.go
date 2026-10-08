@@ -1164,10 +1164,9 @@ func TestParseDoesNotInventBreakdownForRecordedCostWithoutPricing(t *testing.T) 
 }
 
 func TestParseBreakdownTotalMatchesMultiRowModelCostToDisplayedPrecision(t *testing.T) {
-	inputAbove272K, outputAbove272K := 1e-5, 4.5e-5
 	calculator := cost.NewCalculator(cost.Table{"model-a": {
 		Input: 5e-6, Output: 3e-5,
-		InputAbove272K: &inputAbove272K, OutputAbove272K: &outputAbove272K,
+		Tiers: []cost.PriceTier{{Threshold: 272_000, Input: 1e-5, Output: new(4.5e-5)}},
 	}})
 	path := filepath.Join(t.TempDir(), "session-multi-row.jsonl")
 	lines := []string{

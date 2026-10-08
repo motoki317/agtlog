@@ -1,6 +1,7 @@
 package cost
 
 import (
+	"cmp"
 	"slices"
 	"strings"
 
@@ -8,18 +9,10 @@ import (
 )
 
 type Pricing struct {
-	Input               float64  `json:"input_cost_per_token"`
-	Output              float64  `json:"output_cost_per_token"`
-	CacheWrite          *float64 `json:"cache_creation_input_token_cost"`
-	CacheRead           *float64 `json:"cache_read_input_token_cost"`
-	InputAbove200K      *float64 `json:"input_cost_per_token_above_200k_tokens"`
-	OutputAbove200K     *float64 `json:"output_cost_per_token_above_200k_tokens"`
-	CacheWriteAbove200K *float64 `json:"cache_creation_input_token_cost_above_200k_tokens"`
-	CacheReadAbove200K  *float64 `json:"cache_read_input_token_cost_above_200k_tokens"`
-	InputAbove272K      *float64 `json:"input_cost_per_token_above_272k_tokens"`
-	OutputAbove272K     *float64 `json:"output_cost_per_token_above_272k_tokens"`
-	CacheWriteAbove272K *float64 `json:"cache_creation_input_token_cost_above_272k_tokens"`
-	CacheReadAbove272K  *float64 `json:"cache_read_input_token_cost_above_272k_tokens"`
+	Input      float64  `json:"input_cost_per_token"`
+	Output     float64  `json:"output_cost_per_token"`
+	CacheWrite *float64 `json:"cache_creation_input_token_cost"`
+	CacheRead  *float64 `json:"cache_read_input_token_cost"`
 	// Tiers ascend by Threshold. decodePricingTable builds them from the raw
 	// keys, because LiteLLM spells each threshold into the key name.
 	Tiers                 []PriceTier `json:"-"`
@@ -176,11 +169,11 @@ func (c Calculator) calculate(usage model.Usage, tiered bool) model.Cost {
 	if usage.CostUSD != nil {
 		return model.Cost{USD: *usage.CostUSD}
 	}
-	pricing, ok := c.card(usage, tiered)
+	card, ok := c.card(usage, tiered)
 	if !ok {
 		return model.Cost{MissingPricingModels: []string{usage.Model}}
 	}
-	return model.Cost{USD: rateCostsFor(usage, pricing).total()}
+	return model.Cost{USD: card.cost(usage)}
 }
 
 // Breakdown prices usage from the rate table and ignores CostUSD. If a record
@@ -191,30 +184,16 @@ func (c Calculator) Breakdown(usage model.Usage) model.CostBreakdown {
 }
 
 func (c Calculator) breakdown(usage model.Usage, tiered bool) model.CostBreakdown {
-	pricing, ok := c.card(usage, tiered)
+	card, ok := c.card(usage, tiered)
 	if !ok {
 		return model.CostBreakdown{}
 	}
-	return bucketBreakdownFor(usage, pricing)
+	return card.breakdown(usage)
 }
 
 func (c Calculator) HasPricing(usage model.Usage) bool {
 	_, ok := c.resolvePricing(usage)
 	return ok
-}
-
-// card is the one place that decides whether tiers apply, so the cost and the
-// breakdown of a record always use the same rates.
-func (c Calculator) card(usage model.Usage, tiered bool) (Pricing, bool) {
-	pricing, ok := c.resolvePricing(usage)
-	if !tiered {
-		pricing = Pricing{
-			Input: pricing.Input, Output: pricing.Output,
-			CacheWrite: pricing.CacheWrite, CacheRead: pricing.CacheRead,
-			ProviderSpecificEntry: pricing.ProviderSpecificEntry,
-		}
-	}
-	return pricing, ok
 }
 
 func (c Calculator) resolvePricing(usage model.Usage) (Pricing, bool) {
@@ -229,115 +208,96 @@ func (c Calculator) resolvePricing(usage model.Usage) (Pricing, bool) {
 	return pricing, ok
 }
 
-type rateCosts struct {
-	input        float64
-	output       float64
-	cacheWrite5m float64
-	cacheRead    float64
-	cacheWrite1h float64
-	multiplier   float64
-}
+type rateCard struct {
+	input, output, cacheWrite5m, cacheWrite1h, cacheRead float64
 
-type pricingTerms struct {
-	cacheWriteRate float64
-	cacheReadRate  float64
-	inputTokens    int64
 	multiplier     float64
+	aboveThreshold bool
 }
 
-func pricingTermsFor(usage model.Usage, pricing Pricing) pricingTerms {
-	terms := pricingTerms{
-		cacheWriteRate: pricing.Input * 1.25,
-		cacheReadRate:  pricing.Input * 0.1,
-		inputTokens:    usage.InputTokens,
-		multiplier:     1,
+// card is the one place that selects the rates for a usage record, so its cost
+// and its breakdown read the same rates.
+func (c Calculator) card(usage model.Usage, tiered bool) (rateCard, bool) {
+	pricing, ok := c.resolvePricing(usage)
+	if !ok {
+		return rateCard{}, false
 	}
-	if pricing.CacheWrite != nil {
-		terms.cacheWriteRate = *pricing.CacheWrite
+	card := rateCard{
+		input:        pricing.Input,
+		output:       pricing.Output,
+		cacheWrite5m: rateOr(pricing.CacheWrite, pricing.Input*1.25),
+		cacheRead:    rateOr(pricing.CacheRead, pricing.Input*0.1),
+		multiplier:   1,
 	}
-	if pricing.CacheRead != nil {
-		terms.cacheReadRate = *pricing.CacheRead
+	// As in LiteLLM, a category that the tier leaves out keeps its base rate. The
+	// 1-hour write has no rate of its own: it costs twice the selected input rate.
+	if tiered {
+		if tier, above := pricing.tier(usage.PromptTokens()); above {
+			card.input = tier.Input
+			card.output = rateOr(tier.Output, card.output)
+			card.cacheWrite5m = rateOr(tier.CacheWrite, card.cacheWrite5m)
+			card.cacheRead = rateOr(tier.CacheRead, card.cacheRead)
+			card.aboveThreshold = true
+		}
 	}
-	if usage.InputIncludesCacheRead {
-		terms.inputTokens = max(0, usage.InputTokens-usage.CacheReadTokens)
-	}
+	card.cacheWrite1h = card.input * 2
 	if usage.Speed == "fast" && pricing.ProviderSpecificEntry.Fast != 0 {
-		terms.multiplier = pricing.ProviderSpecificEntry.Fast
+		card.multiplier = pricing.ProviderSpecificEntry.Fast
 	}
-	return terms
+	return card, true
 }
 
-func rateCostsFor(usage model.Usage, pricing Pricing) rateCosts {
-	terms := pricingTermsFor(usage, pricing)
-	return rateCosts{
-		input:        priceTokens(terms.inputTokens, pricing.Input, pricing.InputAbove200K, pricing.InputAbove272K),
-		output:       priceTokens(usage.OutputTokens, pricing.Output, pricing.OutputAbove200K, pricing.OutputAbove272K),
-		cacheWrite5m: priceTokens(usage.CacheCreation5mTokens, terms.cacheWriteRate, pricing.CacheWriteAbove200K, pricing.CacheWriteAbove272K),
-		cacheRead:    priceTokens(usage.CacheReadTokens, terms.cacheReadRate, pricing.CacheReadAbove200K, pricing.CacheReadAbove272K),
-		cacheWrite1h: priceTokens(usage.CacheCreation1hTokens, pricing.Input*2, doubled(pricing.InputAbove200K), doubled(pricing.InputAbove272K)),
-		multiplier:   terms.multiplier,
+// tier returns the highest tier that the prompt exceeds. A fetched payload
+// decides how many tiers an entry has, so a binary search bounds the work that
+// every request pays.
+func (p Pricing) tier(promptTokens int64) (PriceTier, bool) {
+	// Every tier before index has a threshold below promptTokens.
+	index, _ := slices.BinarySearchFunc(p.Tiers, promptTokens, func(tier PriceTier, tokens int64) int {
+		return cmp.Compare(tier.Threshold, tokens)
+	})
+	if index == 0 {
+		return PriceTier{}, false
 	}
+	return p.Tiers[index-1], true
 }
 
-func (r rateCosts) total() float64 {
-	return (r.input + r.output + r.cacheWrite5m + r.cacheRead + r.cacheWrite1h) * r.multiplier
-}
-
-func bucketBreakdownFor(usage model.Usage, pricing Pricing) model.CostBreakdown {
-	terms := pricingTermsFor(usage, pricing)
-	cacheWrite5mBase, cacheWrite5mAbove := priceTokenBucketTiers(
-		usage.CacheCreation5mTokens, terms.cacheWriteRate, pricing.CacheWriteAbove200K, pricing.CacheWriteAbove272K, terms.multiplier,
-	)
-	cacheWrite1hBase, cacheWrite1hAbove := priceTokenBucketTiers(
-		usage.CacheCreation1hTokens, pricing.Input*2, doubled(pricing.InputAbove200K), doubled(pricing.InputAbove272K), terms.multiplier,
-	)
-	cacheWriteBuckets := cacheWrite5mBase.Add(cacheWrite1hBase)
-	cacheWriteBuckets = cacheWriteBuckets.Add(cacheWrite5mAbove)
-	cacheWriteBuckets = cacheWriteBuckets.Add(cacheWrite1hAbove)
-	return model.CostBreakdown{
-		Input:      priceTokenBuckets(terms.inputTokens, pricing.Input, pricing.InputAbove200K, pricing.InputAbove272K, terms.multiplier),
-		Output:     priceTokenBuckets(usage.OutputTokens, pricing.Output, pricing.OutputAbove200K, pricing.OutputAbove272K, terms.multiplier),
-		CacheWrite: cacheWriteBuckets,
-		CacheRead:  priceTokenBuckets(usage.CacheReadTokens, terms.cacheReadRate, pricing.CacheReadAbove200K, pricing.CacheReadAbove272K, terms.multiplier),
-	}
-}
-
-func priceTokenBuckets(tokens int64, base float64, above200K, above272K *float64, multiplier float64) model.CostBuckets {
-	baseBuckets, aboveBuckets := priceTokenBucketTiers(tokens, base, above200K, above272K, multiplier)
-	return baseBuckets.Add(aboveBuckets)
-}
-
-func priceTokenBucketTiers(tokens int64, base float64, above200K, above272K *float64, multiplier float64) (model.CostBuckets, model.CostBuckets) {
-	if tokens <= 0 {
-		return nil, nil
-	}
-	threshold, above := marginalTier(above200K, above272K)
-	if above == nil || tokens <= threshold {
-		return model.CostBuckets{{RatePerToken: base * multiplier, Tokens: tokens}}, nil
-	}
-	return model.CostBuckets{{RatePerToken: base * multiplier, Tokens: threshold}},
-		model.CostBuckets{{RatePerToken: *above * multiplier, Tokens: tokens - threshold, AboveThreshold: true}}
-}
-
-func priceTokens(tokens int64, base float64, above200K, above272K *float64) float64 {
-	threshold, above := marginalTier(above200K, above272K)
-	if above == nil || tokens <= threshold {
-		return float64(tokens) * base
-	}
-	return float64(threshold)*base + float64(tokens-threshold)**above
-}
-
-func marginalTier(above200K, above272K *float64) (int64, *float64) {
-	if above200K == nil && above272K != nil {
-		return 272_000, above272K
-	}
-	return 200_000, above200K
-}
-
-func doubled(rate *float64) *float64 {
+func rateOr(rate *float64, fallback float64) float64 {
 	if rate == nil {
+		return fallback
+	}
+	return *rate
+}
+
+func (c rateCard) cost(usage model.Usage) float64 {
+	// Each conversion rounds its product, which keeps arm64 from fusing it into
+	// the sum. A cost then has the same bits on every platform.
+	usd := float64(float64(uncachedInputTokens(usage))*c.input) +
+		float64(float64(usage.OutputTokens)*c.output) +
+		float64(float64(usage.CacheCreation5mTokens)*c.cacheWrite5m) +
+		float64(float64(usage.CacheReadTokens)*c.cacheRead) +
+		float64(float64(usage.CacheCreation1hTokens)*c.cacheWrite1h)
+	return usd * c.multiplier
+}
+
+func (c rateCard) breakdown(usage model.Usage) model.CostBreakdown {
+	return model.CostBreakdown{
+		Input:      c.buckets(uncachedInputTokens(usage), c.input),
+		Output:     c.buckets(usage.OutputTokens, c.output),
+		CacheWrite: c.buckets(usage.CacheCreation5mTokens, c.cacheWrite5m).Add(c.buckets(usage.CacheCreation1hTokens, c.cacheWrite1h)),
+		CacheRead:  c.buckets(usage.CacheReadTokens, c.cacheRead),
+	}
+}
+
+func (c rateCard) buckets(tokens int64, rate float64) model.CostBuckets {
+	if tokens <= 0 {
 		return nil
 	}
-	value := *rate * 2
-	return &value
+	return model.CostBuckets{{RatePerToken: rate * c.multiplier, Tokens: tokens, AboveThreshold: c.aboveThreshold}}
+}
+
+func uncachedInputTokens(usage model.Usage) int64 {
+	if usage.InputIncludesCacheRead {
+		return max(0, usage.InputTokens-usage.CacheReadTokens)
+	}
+	return usage.InputTokens
 }

@@ -502,8 +502,7 @@ func TestRegistryCachedCodexPricingKeepsRequestTiers(t *testing.T) {
 	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	above := 2.0
-	calculator := cost.NewCalculator(cost.Table{"gpt-5.6": {Input: 1, InputAbove272K: &above}})
+	calculator := cost.NewCalculator(cost.Table{"gpt-5.6": {Input: 1, Tiers: []cost.PriceTier{{Threshold: 272_000, Input: 2}}}})
 	concrete := codex.NewSource(codex.NewParser(calculator, "gpt-5"), []string{root})
 	adapter := &parseCountingSource{Source: concrete}
 	registry := source.NewRegistry([]source.Source{adapter}, source.Options{Workers: 1, CacheDir: t.TempDir()})
