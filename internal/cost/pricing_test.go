@@ -590,22 +590,11 @@ func TestTableResolveUsesProviderQualifiedModel(t *testing.T) {
 	}
 }
 
-func TestCodexResolutionUsesOwnPublishedSolRate(t *testing.T) {
-	table := Table{
-		"gpt-5.6":     {Input: 2},
-		"gpt-5.6-sol": {Input: 3},
-	}
-
-	key, _, ok := table.ResolveCodex("gpt-5.6-sol", "gpt-5")
-	if !ok || key != "gpt-5.6-sol" {
-		t.Fatalf("ResolveCodex() = %q, _, %v, want own sol entry", key, ok)
-	}
-}
-
 func TestCodexResolutionReportsExactness(t *testing.T) {
 	table := Table{
 		"gpt-5":          {Input: 1},
 		"gpt-5.7":        {Input: 2},
+		"gpt-5.6":        {Input: 8},
 		"gpt-5.6-sol":    {Input: 3},
 		"openai/gpt-5.5": {Input: 4},
 		"gpt-5.3-codex":  {Input: 5},
@@ -618,7 +607,8 @@ func TestCodexResolutionReportsExactness(t *testing.T) {
 		wantKey   string
 		wantExact bool
 	}{
-		{name: "sol entry", model: "gpt-5.6-sol", wantKey: "gpt-5.6-sol", wantExact: true},
+		{name: "public entry", model: "gpt-5.6", wantKey: "gpt-5.6", wantExact: true},
+		{name: "own sol entry over base", model: "gpt-5.6-sol", wantKey: "gpt-5.6-sol", wantExact: true},
 		{name: "provider-prefixed entry", model: "gpt-5.5", wantKey: "openai/gpt-5.5", wantExact: true},
 		{name: "codex entry", model: "gpt-5.3-codex", wantKey: "gpt-5.3-codex", wantExact: true},
 		{name: "luna entry", model: "gpt-5.6-luna", wantKey: "gpt-5.6-luna", wantExact: true},
@@ -635,32 +625,5 @@ func TestCodexResolutionReportsExactness(t *testing.T) {
 					test.model, key, exact, ok, test.wantKey, test.wantExact)
 			}
 		})
-	}
-}
-
-func TestCodexResolutionKeepsPublicGPT5Models(t *testing.T) {
-	table := Table{"gpt-5.4": {Input: 2}}
-
-	key, _, ok := table.ResolveCodex("gpt-5.4", "gpt-5")
-	if !ok || key != "gpt-5.4" {
-		t.Fatalf("ResolveCodex() = %q, _, %v, want public model", key, ok)
-	}
-}
-
-func TestCodexResolutionStripsPrivateGPT5Variant(t *testing.T) {
-	table := Table{"gpt-5.4": {Input: 2}}
-
-	key, _, ok := table.ResolveCodex("gpt-5.4-sol", "gpt-5")
-	if !ok || key != "gpt-5.4" {
-		t.Fatalf("ResolveCodex() = %q, _, %v, want base public model", key, ok)
-	}
-}
-
-func TestCodexResolutionUsesConfiguredDefault(t *testing.T) {
-	table := Table{"gpt-5": {Input: 2}}
-
-	key, _, ok := table.ResolveCodex("future-codex-model", "gpt-5")
-	if !ok || key != "gpt-5" {
-		t.Fatalf("ResolveCodex() = %q, _, %v, want configured default", key, ok)
 	}
 }
