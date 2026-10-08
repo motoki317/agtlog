@@ -2,6 +2,7 @@ package cost
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -11,6 +12,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -240,7 +243,11 @@ func decodePricingTable(data []byte, strict bool) (Table, error) {
 			continue
 		}
 		var pricing Pricing
-		if err := json.Unmarshal(entry, &pricing); err != nil || !validPricing(pricing) {
+		err := json.Unmarshal(entry, &pricing)
+		if err == nil {
+			pricing.Tiers, err = decodeTiers(fields)
+		}
+		if err != nil || !validPricing(pricing) {
 			if strict {
 				return nil, fmt.Errorf("invalid pricing rates for %q", name)
 			}
@@ -254,15 +261,78 @@ func decodePricingTable(data []byte, strict bool) (Table, error) {
 	return table, nil
 }
 
+// decodeTiers reads LiteLLM's input_cost_per_token_above_<N>_tokens family.
+// The input key defines a tier, and the other rates must spell the same <N>.
+// Exact keys leave out variants with a further suffix, such as _priority,
+// which price another service tier.
+func decodeTiers(fields map[string]json.RawMessage) ([]PriceTier, error) {
+	var tiers []PriceTier
+	for key, raw := range fields {
+		n, isInput := strings.CutPrefix(key, "input_cost_per_token_above_")
+		n, isTokens := strings.CutSuffix(n, "_tokens")
+		if !isInput || !isTokens {
+			continue
+		}
+		threshold, valid := tierThreshold(n)
+		if !valid {
+			continue
+		}
+		var input *float64
+		if err := json.Unmarshal(raw, &input); err != nil {
+			return nil, err
+		}
+		if input == nil {
+			continue
+		}
+		tier := PriceTier{Threshold: threshold, Input: *input}
+		for prefix, rate := range map[string]**float64{
+			"output_cost_per_token_above_":           &tier.Output,
+			"cache_creation_input_token_cost_above_": &tier.CacheWrite,
+			"cache_read_input_token_cost_above_":     &tier.CacheRead,
+		} {
+			if value, ok := fields[prefix+n+"_tokens"]; ok {
+				if err := json.Unmarshal(value, rate); err != nil {
+					return nil, err
+				}
+			}
+		}
+		tiers = append(tiers, tier)
+	}
+	slices.SortFunc(tiers, func(a, b PriceTier) int { return cmp.Compare(a.Threshold, b.Threshold) })
+	// Two spellings of one threshold, such as 100k and 100000, would leave the
+	// choice between their rates to map order.
+	for index := 1; index < len(tiers); index++ {
+		if tiers[index].Threshold == tiers[index-1].Threshold {
+			return nil, fmt.Errorf("duplicate tier threshold %d", tiers[index].Threshold)
+		}
+	}
+	return tiers, nil
+}
+
+// tierThreshold parses digits with an optional k for thousands. The 32-bit
+// limit keeps N × 1000 inside int64.
+func tierThreshold(n string) (int64, bool) {
+	scale := uint64(1)
+	if digits, ok := strings.CutSuffix(n, "k"); ok {
+		n, scale = digits, 1000
+	}
+	value, err := strconv.ParseUint(n, 10, 32)
+	return int64(value * scale), err == nil
+}
+
 func validPricing(pricing Pricing) bool {
 	if !validRate(pricing.Input) || !validRate(pricing.Output) || !validRate(pricing.ProviderSpecificEntry.Fast) {
 		return false
 	}
-	for _, rate := range []*float64{
+	rates := []*float64{
 		pricing.CacheWrite, pricing.CacheRead,
 		pricing.InputAbove200K, pricing.OutputAbove200K, pricing.CacheWriteAbove200K, pricing.CacheReadAbove200K,
 		pricing.InputAbove272K, pricing.OutputAbove272K, pricing.CacheWriteAbove272K, pricing.CacheReadAbove272K,
-	} {
+	}
+	for _, tier := range pricing.Tiers {
+		rates = append(rates, &tier.Input, tier.Output, tier.CacheWrite, tier.CacheRead)
+	}
+	for _, rate := range rates {
 		if rate != nil && !validRate(*rate) {
 			return false
 		}

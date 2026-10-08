@@ -8,21 +8,34 @@ import (
 )
 
 type Pricing struct {
-	Input                 float64  `json:"input_cost_per_token"`
-	Output                float64  `json:"output_cost_per_token"`
-	CacheWrite            *float64 `json:"cache_creation_input_token_cost"`
-	CacheRead             *float64 `json:"cache_read_input_token_cost"`
-	InputAbove200K        *float64 `json:"input_cost_per_token_above_200k_tokens"`
-	OutputAbove200K       *float64 `json:"output_cost_per_token_above_200k_tokens"`
-	CacheWriteAbove200K   *float64 `json:"cache_creation_input_token_cost_above_200k_tokens"`
-	CacheReadAbove200K    *float64 `json:"cache_read_input_token_cost_above_200k_tokens"`
-	InputAbove272K        *float64 `json:"input_cost_per_token_above_272k_tokens"`
-	OutputAbove272K       *float64 `json:"output_cost_per_token_above_272k_tokens"`
-	CacheWriteAbove272K   *float64 `json:"cache_creation_input_token_cost_above_272k_tokens"`
-	CacheReadAbove272K    *float64 `json:"cache_read_input_token_cost_above_272k_tokens"`
+	Input               float64  `json:"input_cost_per_token"`
+	Output              float64  `json:"output_cost_per_token"`
+	CacheWrite          *float64 `json:"cache_creation_input_token_cost"`
+	CacheRead           *float64 `json:"cache_read_input_token_cost"`
+	InputAbove200K      *float64 `json:"input_cost_per_token_above_200k_tokens"`
+	OutputAbove200K     *float64 `json:"output_cost_per_token_above_200k_tokens"`
+	CacheWriteAbove200K *float64 `json:"cache_creation_input_token_cost_above_200k_tokens"`
+	CacheReadAbove200K  *float64 `json:"cache_read_input_token_cost_above_200k_tokens"`
+	InputAbove272K      *float64 `json:"input_cost_per_token_above_272k_tokens"`
+	OutputAbove272K     *float64 `json:"output_cost_per_token_above_272k_tokens"`
+	CacheWriteAbove272K *float64 `json:"cache_creation_input_token_cost_above_272k_tokens"`
+	CacheReadAbove272K  *float64 `json:"cache_read_input_token_cost_above_272k_tokens"`
+	// Tiers ascend by Threshold. decodePricingTable builds them from the raw
+	// keys, because LiteLLM spells each threshold into the key name.
+	Tiers                 []PriceTier `json:"-"`
 	ProviderSpecificEntry struct {
 		Fast float64 `json:"fast"`
 	} `json:"provider_specific_entry"`
+}
+
+// PriceTier is a context-length rate card. A nil rate keeps the base rate.
+type PriceTier struct {
+	// Threshold is exclusive: the tier applies when Usage.PromptTokens() exceeds it.
+	Threshold  int64
+	Input      float64
+	Output     *float64
+	CacheWrite *float64
+	CacheRead  *float64
 }
 
 type Table map[string]Pricing

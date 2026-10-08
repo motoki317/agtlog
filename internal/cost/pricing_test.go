@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -407,6 +408,70 @@ func TestRuntimeTableMalformedCacheFallsBackToEmbedded(t *testing.T) {
 	}
 	if _, ok := table["gpt-5.6"]; !ok {
 		t.Fatal("malformed cache removed embedded gpt-5.6 pricing")
+	}
+}
+
+func TestPricingTableDecodesContextLengthTiers(t *testing.T) {
+	table, err := runtimePricingTable([]byte(`{"model-a":{
+		"input_cost_per_token":1,
+		"input_cost_per_token_above_100k_tokens":2,
+		"output_cost_per_token_above_100k_tokens":3,
+		"cache_creation_input_token_cost_above_100k_tokens":4,
+		"cache_read_input_token_cost_above_100k_tokens":5,
+		"input_cost_per_token_above_272k_tokens":6,
+		"output_cost_per_token_above_272k_tokens":null,
+		"input_cost_per_token_above_50000_tokens":7,
+		"input_cost_per_token_above_64k_tokens":null,
+		"input_cost_per_token_above_9223372036854776k_tokens":9,
+		"output_cost_per_token_above_512k_tokens":9,
+		"input_cost_per_token_above_128k_tokens_priority":9,
+		"output_cost_per_token_above_100k_tokens_flex":9,
+		"cache_creation_input_token_cost_above_1hr":9,
+		"cache_creation_input_token_cost_above_1hr_above_100k_tokens":9,
+		"input_cost_per_token_above_k_tokens":9,
+		"input_cost_per_token_above_+5k_tokens":9,
+		"input_cost_per_image_above_100k_tokens":9
+	}}`))
+	if err != nil {
+		t.Fatalf("runtimePricingTable() error = %v", err)
+	}
+
+	want := []PriceTier{
+		{Threshold: 50_000, Input: 7},
+		{Threshold: 100_000, Input: 2, Output: new(3.0), CacheWrite: new(4.0), CacheRead: new(5.0)},
+		{Threshold: 272_000, Input: 6},
+	}
+	if got := table["model-a"].Tiers; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Tiers = %#v, want %#v", got, want)
+	}
+}
+
+func TestPricingTableRejectsInvalidTiers(t *testing.T) {
+	tests := []struct{ name, payload string }{
+		{"negative input", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":-1}}`},
+		{"string input", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":"cheap"}}`},
+		{"negative output", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"output_cost_per_token_above_100k_tokens":-1}}`},
+		{"string output", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"output_cost_per_token_above_100k_tokens":"cheap"}}`},
+		{"negative cache write", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"cache_creation_input_token_cost_above_100k_tokens":-1}}`},
+		{"string cache write", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"cache_creation_input_token_cost_above_100k_tokens":"cheap"}}`},
+		{"negative cache read", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"cache_read_input_token_cost_above_100k_tokens":-1}}`},
+		{"string cache read", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"cache_read_input_token_cost_above_100k_tokens":"cheap"}}`},
+		{"duplicate threshold", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"input_cost_per_token_above_100000_tokens":3}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := []byte(test.payload)
+			if _, err := runtimePricingTable(payload); err == nil {
+				t.Fatal("runtimePricingTable() error = nil, want the invalid tier rejected")
+			}
+			table, err := pricingTable(payload)
+			if err != nil {
+				t.Fatalf("pricingTable() error = %v", err)
+			}
+			if _, ok := table["model-a"]; ok {
+				t.Fatal("pricingTable() kept a model with an invalid tier")
+			}
+		})
 	}
 }
 
