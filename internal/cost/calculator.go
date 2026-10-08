@@ -36,26 +36,26 @@ func NewCalculator(table Table) Calculator {
 }
 
 type sessionPricer struct {
-	calculate  func(model.Usage) model.Cost
-	breakdown  func(model.Usage) model.CostBreakdown
+	calculate  func(usage model.Usage, tiered bool) model.Cost
+	breakdown  func(usage model.Usage, tiered bool) model.CostBreakdown
 	hasPricing func(model.Usage) bool
 }
 
 func (c Calculator) ApplySession(session *model.Session) {
 	applySession(session, sessionPricer{
-		calculate:  c.Calculate,
-		breakdown:  c.Breakdown,
+		calculate:  c.calculate,
+		breakdown:  c.breakdown,
 		hasPricing: c.HasPricing,
 	})
 }
 
 func (c Calculator) ApplySessionCodex(session *model.Session, defaultModel string) {
 	applySession(session, sessionPricer{
-		calculate: func(usage model.Usage) model.Cost {
-			return c.CalculateCodex(usage, defaultModel)
+		calculate: func(usage model.Usage, tiered bool) model.Cost {
+			return c.calculateCodex(usage, defaultModel, tiered)
 		},
-		breakdown: func(usage model.Usage) model.CostBreakdown {
-			return c.BreakdownCodex(usage, defaultModel)
+		breakdown: func(usage model.Usage, tiered bool) model.CostBreakdown {
+			return c.breakdownCodex(usage, defaultModel, tiered)
 		},
 		hasPricing: func(usage model.Usage) bool {
 			return c.HasCodexPricing(usage, defaultModel)
@@ -76,7 +76,10 @@ func applySession(session *model.Session, pricer sessionPricer) {
 	session.ModelCostBreakdowns = nil
 	for index := range session.Requests {
 		request := &session.Requests[index]
-		calculated := pricer.calculate(request.Usage)
+		// A negative offset marks an aggregate ledger entry. It sums many requests,
+		// so its size says nothing about the prompt size that selects a tier.
+		tiered := request.Offset >= 0
+		calculated := pricer.calculate(request.Usage, tiered)
 		request.USD = calculated.USD
 		if session.ModelCosts == nil {
 			session.ModelCosts = make(map[string]float64)
@@ -87,7 +90,7 @@ func applySession(session *model.Session, pricer sessionPricer) {
 				session.ModelCostBreakdowns = make(map[string]model.CostBreakdown)
 			}
 			current := session.ModelCostBreakdowns[request.Usage.Model]
-			session.ModelCostBreakdowns[request.Usage.Model] = current.Add(pricer.breakdown(request.Usage))
+			session.ModelCostBreakdowns[request.Usage.Model] = current.Add(pricer.breakdown(request.Usage, tiered))
 		}
 		session.Cost.USD += calculated.USD
 		session.Cost.Estimated = session.Cost.Estimated || calculated.Estimated
@@ -115,13 +118,17 @@ func applySession(session *model.Session, pricer sessionPricer) {
 }
 
 func (c Calculator) CalculateCodex(usage model.Usage, defaultModel string) model.Cost {
+	return c.calculateCodex(usage, defaultModel, true)
+}
+
+func (c Calculator) calculateCodex(usage model.Usage, defaultModel string, tiered bool) model.Cost {
 	pricingModel, exact, ok := c.table.ResolveCodex(usage.Model, defaultModel)
 	if !ok {
 		return model.Cost{Estimated: true, MissingPricingModels: []string{usage.Model}}
 	}
 	mapped := usage
 	mapped.Model = pricingModel
-	calculated := c.Calculate(mapped)
+	calculated := c.calculate(mapped, tiered)
 	calculated.Estimated = !exact
 	if !exact {
 		calculated.EstimatedRates = []model.EstimatedRate{{Model: usage.Model, PricingModel: pricingModel}}
@@ -130,13 +137,17 @@ func (c Calculator) CalculateCodex(usage model.Usage, defaultModel string) model
 }
 
 func (c Calculator) BreakdownCodex(usage model.Usage, defaultModel string) model.CostBreakdown {
+	return c.breakdownCodex(usage, defaultModel, true)
+}
+
+func (c Calculator) breakdownCodex(usage model.Usage, defaultModel string, tiered bool) model.CostBreakdown {
 	pricingModel, _, ok := c.table.ResolveCodex(usage.Model, defaultModel)
 	if !ok {
 		return model.CostBreakdown{}
 	}
 	mapped := usage
 	mapped.Model = pricingModel
-	return c.Breakdown(mapped)
+	return c.breakdown(mapped, tiered)
 }
 
 func (c Calculator) HasCodexPricing(usage model.Usage, defaultModel string) bool {
@@ -145,10 +156,14 @@ func (c Calculator) HasCodexPricing(usage model.Usage, defaultModel string) bool
 }
 
 func (c Calculator) Calculate(usage model.Usage) model.Cost {
+	return c.calculate(usage, true)
+}
+
+func (c Calculator) calculate(usage model.Usage, tiered bool) model.Cost {
 	if usage.CostUSD != nil {
 		return model.Cost{USD: *usage.CostUSD}
 	}
-	pricing, ok := c.resolvePricing(usage)
+	pricing, ok := c.card(usage, tiered)
 	if !ok {
 		return model.Cost{MissingPricingModels: []string{usage.Model}}
 	}
@@ -159,7 +174,11 @@ func (c Calculator) Calculate(usage model.Usage) model.Cost {
 // carries CostUSD, the breakdown total can differ from Calculate. No measured
 // Claude log carried one.
 func (c Calculator) Breakdown(usage model.Usage) model.CostBreakdown {
-	pricing, ok := c.resolvePricing(usage)
+	return c.breakdown(usage, true)
+}
+
+func (c Calculator) breakdown(usage model.Usage, tiered bool) model.CostBreakdown {
+	pricing, ok := c.card(usage, tiered)
 	if !ok {
 		return model.CostBreakdown{}
 	}
@@ -169,6 +188,20 @@ func (c Calculator) Breakdown(usage model.Usage) model.CostBreakdown {
 func (c Calculator) HasPricing(usage model.Usage) bool {
 	_, ok := c.resolvePricing(usage)
 	return ok
+}
+
+// card is the one place that decides whether tiers apply, so the cost and the
+// breakdown of a record always use the same rates.
+func (c Calculator) card(usage model.Usage, tiered bool) (Pricing, bool) {
+	pricing, ok := c.resolvePricing(usage)
+	if !tiered {
+		pricing = Pricing{
+			Input: pricing.Input, Output: pricing.Output,
+			CacheWrite: pricing.CacheWrite, CacheRead: pricing.CacheRead,
+			ProviderSpecificEntry: pricing.ProviderSpecificEntry,
+		}
+	}
+	return pricing, ok
 }
 
 func (c Calculator) resolvePricing(usage model.Usage) (Pricing, bool) {

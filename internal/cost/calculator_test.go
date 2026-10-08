@@ -275,6 +275,53 @@ func TestApplySessionCodexPricesStoredRequestsIndividually(t *testing.T) {
 	}
 }
 
+func TestApplySessionCodexPricesAggregatesAtBaseCard(t *testing.T) {
+	// The cache-read rate differs from its 0.1 × input default, so the base card
+	// must carry it over.
+	inputAbove, cacheRead, cacheReadAbove := 2.0, 0.5, 0.75
+	calculator := NewCalculator(Table{"gpt-5.6": {
+		Input: 1, CacheRead: &cacheRead,
+		InputAbove272K: &inputAbove, CacheReadAbove272K: &cacheReadAbove,
+	}})
+	cached := model.CostBuckets{{RatePerToken: 0.5, Tokens: 100_000}}
+	for _, test := range []struct {
+		name    string
+		offset  int64
+		wantUSD float64
+		want    model.CostBreakdown
+	}{
+		{
+			name: "request", offset: 0, wantUSD: 378_000,
+			want: model.CostBreakdown{
+				Input:     model.CostBuckets{{RatePerToken: 1, Tokens: 272_000}, {RatePerToken: 2, Tokens: 28_000, AboveThreshold: true}},
+				CacheRead: cached,
+			},
+		},
+		{
+			name: "aggregate", offset: -1, wantUSD: 350_000,
+			want: model.CostBreakdown{Input: model.CostBuckets{{RatePerToken: 1, Tokens: 300_000}}, CacheRead: cached},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := &model.Session{Requests: []model.RequestUsage{{
+				Offset: test.offset,
+				Usage: model.Usage{
+					Model: "gpt-5.6", InputTokens: 400_000, CacheReadTokens: 100_000, InputIncludesCacheRead: true,
+				},
+			}}}
+
+			calculator.ApplySessionCodex(session, "gpt-5")
+
+			if session.Cost.USD != test.wantUSD || session.Requests[0].USD != test.wantUSD {
+				t.Fatalf("ApplySessionCodex() cost = %#v, requests %#v, want USD %v", session.Cost, session.Requests, test.wantUSD)
+			}
+			if got := session.ModelCostBreakdowns["gpt-5.6"]; !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("ApplySessionCodex() breakdown = %#v, want %#v", got, test.want)
+			}
+		})
+	}
+}
+
 func TestApplySessionCodexRebuildsMetadataInRequestOrder(t *testing.T) {
 	calculator := NewCalculator(Table{"fallback": {Input: 1}})
 	requests := []model.RequestUsage{
