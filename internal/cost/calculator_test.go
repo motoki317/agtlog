@@ -23,63 +23,10 @@ func TestCalculateUsesBaseInputAndOutputRates(t *testing.T) {
 	}
 }
 
-func TestCalculateUsesExplicitCacheRates(t *testing.T) {
-	cacheWrite := 4.0
-	cacheRead := 0.5
-	calculator := NewCalculator(Table{
-		"model-a": {Input: 1, CacheWrite: &cacheWrite, CacheRead: &cacheRead},
-	})
-
-	usage := model.Usage{Model: "model-a", InputTokens: 10, CacheCreation5mTokens: 2, CacheReadTokens: 3}
-	got := calculator.Calculate(usage)
-	want := 19.5
-	if math.Abs(got.USD-want) > 1e-12 {
-		t.Fatalf("Calculate().USD = %v, want %v", got.USD, want)
-	}
-}
-
-func TestCalculatePricesOneHourCacheAtTwiceInputRate(t *testing.T) {
-	cacheWrite := 9.0
-	calculator := NewCalculator(Table{
-		"model-a": {Input: 2, CacheWrite: &cacheWrite},
-	})
-
-	got := calculator.Calculate(model.Usage{Model: "model-a", CacheCreation1hTokens: 3})
-	want := 12.0
-	if math.Abs(got.USD-want) > 1e-12 {
-		t.Fatalf("Calculate().USD = %v, want %v", got.USD, want)
-	}
-}
-
-func TestCalculateDefaultsMissingCacheRatesFromInput(t *testing.T) {
-	calculator := NewCalculator(Table{
-		"model-a": {Input: 2},
-	})
-
-	usage := model.Usage{Model: "model-a", CacheCreation5mTokens: 4, CacheReadTokens: 5}
-	got := calculator.Calculate(usage)
-	want := 11.0
-	if math.Abs(got.USD-want) > 1e-12 {
-		t.Fatalf("Calculate().USD = %v, want %v", got.USD, want)
-	}
-}
-
 func TestCalculateUsesFastModelAndMultiplier(t *testing.T) {
 	pricing := Pricing{Input: 1}
 	pricing.ProviderSpecificEntry.Fast = 3
 	calculator := NewCalculator(Table{"model-a-fast": pricing})
-
-	got := calculator.Calculate(model.Usage{Model: "model-a", InputTokens: 2, Speed: "fast"})
-	want := 6.0
-	if math.Abs(got.USD-want) > 1e-12 {
-		t.Fatalf("Calculate().USD = %v, want %v", got.USD, want)
-	}
-}
-
-func TestCalculateFallsBackToBaseFastPricing(t *testing.T) {
-	pricing := Pricing{Input: 1}
-	pricing.ProviderSpecificEntry.Fast = 3
-	calculator := NewCalculator(Table{"model-a": pricing})
 
 	got := calculator.Calculate(model.Usage{Model: "model-a", InputTokens: 2, Speed: "fast"})
 	want := 6.0
@@ -340,23 +287,6 @@ func pricingSnapshot(session *model.Session) sessionPricingSnapshot {
 	return result
 }
 
-func TestCalculateSubtractsCachedTokensFromInclusiveInput(t *testing.T) {
-	cacheRead := 0.1
-	calculator := NewCalculator(Table{"model-a": {Input: 1, CacheRead: &cacheRead}})
-	usage := model.Usage{
-		Model:                  "model-a",
-		InputTokens:            10,
-		CacheReadTokens:        4,
-		InputIncludesCacheRead: true,
-	}
-
-	got := calculator.Calculate(usage)
-	want := 6.4
-	if math.Abs(got.USD-want) > 1e-12 {
-		t.Fatalf("Calculate().USD = %v, want %v", got.USD, want)
-	}
-}
-
 func TestCalculateCodexMarksMappedCostEstimated(t *testing.T) {
 	calculator := NewCalculator(Table{"gpt-5.6": {Input: 2}})
 
@@ -381,11 +311,12 @@ func TestCalculateCodexLeavesOwnPublishedRateExact(t *testing.T) {
 
 func TestPricingAppliesOneCardToTheWholeRequest(t *testing.T) {
 	fullTier := Pricing{
-		Input: 1, Output: 4, CacheWrite: new(1.25), CacheRead: new(0.125),
+		Input: 1, Output: 4, CacheWrite: new(1.5), CacheRead: new(0.125),
 		Tiers: []PriceTier{{Threshold: 100_000, Input: 2, Output: new(8.0), CacheWrite: new(2.5), CacheRead: new(0.25)}},
 	}
 	fullTier.ProviderSpecificEntry.Fast = 2
 	calculator := NewCalculator(Table{
+		// No model has a -fast entry, so a fast row prices from the base entry.
 		"full-tier": fullTier,
 		"two-tiers": {Input: 1, Tiers: []PriceTier{{Threshold: 100_000, Input: 2}, {Threshold: 200_000, Input: 3}}},
 		// input-only-tier lists no cache rate on either card, so both fall back to the base defaults.
@@ -405,6 +336,22 @@ func TestPricingAppliesOneCardToTheWholeRequest(t *testing.T) {
 		usage model.Usage
 		want  model.CostBreakdown
 	}{
+		{
+			name: "explicit cache rates, and the 1-hour write at twice the input rate",
+			usage: model.Usage{
+				Model: "full-tier", InputTokens: 10, CacheCreation5mTokens: 2, CacheCreation1hTokens: 3, CacheReadTokens: 4,
+			},
+			want: model.CostBreakdown{
+				Input:      buckets(1, 10, false),
+				CacheWrite: model.CostBuckets{{RatePerToken: 1.5, Tokens: 2}, {RatePerToken: 2, Tokens: 3}},
+				CacheRead:  buckets(0.125, 4, false),
+			},
+		},
+		{
+			name:  "missing cache rates default from the input rate",
+			usage: model.Usage{Model: "input-only-tier", CacheCreation5mTokens: 4, CacheReadTokens: 5},
+			want:  model.CostBreakdown{CacheWrite: buckets(2.5, 4, false), CacheRead: buckets(0.2, 5, false)},
+		},
 		{
 			// No category alone passes 100K, but the prompt does.
 			name: "split prompt crosses the tier",
@@ -472,7 +419,7 @@ func TestPricingAppliesOneCardToTheWholeRequest(t *testing.T) {
 			},
 		},
 		{
-			name: "fast multiplier scales the base card",
+			name: "fast request without a -fast entry takes the base entry and its multiplier",
 			usage: model.Usage{
 				Model: "full-tier", Speed: "fast", InputTokens: 10, OutputTokens: 3, CacheReadTokens: 4, InputIncludesCacheRead: true,
 			},
