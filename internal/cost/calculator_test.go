@@ -147,12 +147,8 @@ func TestCalculatePrefersRecordedCost(t *testing.T) {
 }
 
 func TestCalculatePreservesLegacyFloatingPointOrder(t *testing.T) {
-	inputAbove272K := 1e-5
-	outputAbove272K := 4.5e-5
-	pricing := Pricing{
-		Input: 5e-6, Output: 3e-5,
-		InputAbove272K: &inputAbove272K, OutputAbove272K: &outputAbove272K,
-	}
+	// The base card keeps these bits independent of context-length tiers.
+	pricing := Pricing{Input: 5e-6, Output: 3e-5}
 	fastPricing := pricing
 	fastPricing.ProviderSpecificEntry.Fast = 2.3
 	calculator := NewCalculator(Table{"gpt-5.6": pricing, "gpt-5.6-fast": fastPricing})
@@ -167,8 +163,8 @@ func TestCalculatePreservesLegacyFloatingPointOrder(t *testing.T) {
 		speed    string
 		wantBits uint64
 	}{
-		{name: "ordinary", wantBits: 0x40abdb70ef911cf4},
-		{name: "fast", speed: "fast", wantBits: 0x40c004942359d70c},
+		{name: "ordinary", wantBits: 0x40a16aab73c92578},
+		{name: "fast", speed: "fast", wantBits: 0x40b407785ec0eb16},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			usage.Speed = test.speed
