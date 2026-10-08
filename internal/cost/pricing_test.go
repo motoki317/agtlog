@@ -26,7 +26,11 @@ func TestEmbeddedTableContainsSupportedModels(t *testing.T) {
 		t.Fatalf("EmbeddedTable() error = %v", err)
 	}
 
-	models := []string{"claude-opus-4-8", "claude-fable-5", "claude-sonnet-5", "gpt-5.6", "gpt-5.6-sol"}
+	models := []string{
+		"claude-opus-4-8", "claude-fable-5", "claude-sonnet-5", "gpt-5.6", "gpt-5.6-sol",
+		// The Codex parser prices a model without its own entry as gpt-5.
+		"gpt-5",
+	}
 	for _, name := range models {
 		if _, ok := table[name]; !ok {
 			t.Errorf("EmbeddedTable() missing %q", name)
