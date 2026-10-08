@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -48,6 +49,30 @@ func TestEmbeddedTableDecodesHaiku100KTier(t *testing.T) {
 	want := []PriceTier{{Threshold: 100_000, Input: 5e-7, Output: new(2.5e-6), CacheWrite: new(6.25e-7), CacheRead: new(5e-8)}}
 	if got := table["claude-haiku-5-5"].Tiers; !reflect.DeepEqual(got, want) {
 		t.Fatalf("claude-haiku-5-5 Tiers = %s, want %s", tiersJSON(t, got), tiersJSON(t, want))
+	}
+}
+
+// The calculator ignores LiteLLM's _above_1hr keys because each equals twice
+// the input rate with the same suffix. A snapshot that breaks the equality needs
+// the calculator to read them instead.
+func TestEmbeddedOneHourCacheWriteRatesAreTwiceInput(t *testing.T) {
+	var entries map[string]map[string]any
+	if err := json.Unmarshal(embeddedPricing, &entries); err != nil {
+		t.Fatalf("decode embedded pricing: %v", err)
+	}
+	for model, fields := range entries {
+		for key, value := range fields {
+			suffix, isOneHour := strings.CutPrefix(key, "cache_creation_input_token_cost_above_1hr")
+			if !isOneHour {
+				continue
+			}
+			inputKey := "input_cost_per_token" + suffix
+			rate, isRate := value.(float64)
+			input, hasInput := fields[inputKey].(float64)
+			if !isRate || !hasInput || math.Abs(rate-2*input) > 1e-9*rate {
+				t.Errorf("%s: %s = %v, want 2 × %s (%v)", model, key, value, inputKey, fields[inputKey])
+			}
+		}
 	}
 }
 
