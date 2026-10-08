@@ -54,3 +54,4 @@ links to the later record, and the later record names what it replaces.
 | 2026-10-01 | [Overview tab](./20261001-overview-tab.md) | Combine own and delegated activity, model costs, and the Subagents table in one tab |
 | 2026-10-02 | [Collapsed Timeline start](./20261002-collapsed-timeline-start.md) | Start Timeline rows collapsed so readers can scan events before opening bodies |
 | 2026-10-02 | [Detail line cursor](./20261002-detail-line-cursor.md) | Move through text lines on both detail tabs, with event actions on Timeline and row-only subagent activation on Overview |
+| 2026-10-08 | [Context-length price tiers](./20261008-context-length-price-tiers.md) | Price each request at the one rate card its prompt size selects, and Codex aggregates at base rates |

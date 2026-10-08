@@ -78,8 +78,8 @@ often a partition is unclean.
 We rejected keeping a selection predicate in both passes. Partition cleanliness is known only at the
 end of the file, and duplicated selection already caused a pricing defect.
 
-We rejected distributing aggregate residuals across request rows because marginal price tiers make
-the result depend on an invented distribution.
+We rejected distributing aggregate residuals across request rows because per-request price tiers
+make the result depend on an invented distribution.
 
 We rejected a second file scan to find a missing bridge because detail loading already makes one
 full pass. Speculative processing keeps the one-pass bound.
