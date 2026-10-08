@@ -234,12 +234,7 @@ func rateCostsFor(usage model.Usage, pricing Pricing) rateCosts {
 }
 
 func (r rateCosts) total() float64 {
-	usd := r.input
-	usd += r.output
-	usd += r.cacheWrite5m
-	usd += r.cacheRead
-	usd += r.cacheWrite1h
-	return usd * r.multiplier
+	return (r.input + r.output + r.cacheWrite5m + r.cacheRead + r.cacheWrite1h) * r.multiplier
 }
 
 func bucketBreakdownFor(usage model.Usage, pricing Pricing) model.CostBreakdown {
