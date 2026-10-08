@@ -1,6 +1,7 @@
 package cost
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/motoki317/agtlog/internal/model"
@@ -73,8 +74,6 @@ func applySession(session *model.Session, pricer sessionPricer) {
 	session.Cost = model.Cost{}
 	session.ModelCosts = nil
 	session.ModelCostBreakdowns = nil
-	missingPricing := make(map[string]bool)
-	estimatedRates := make(map[model.EstimatedRate]bool)
 	for index := range session.Requests {
 		request := &session.Requests[index]
 		calculated := pricer.calculate(request.Usage)
@@ -93,15 +92,13 @@ func applySession(session *model.Session, pricer sessionPricer) {
 		session.Cost.USD += calculated.USD
 		session.Cost.Estimated = session.Cost.Estimated || calculated.Estimated
 		for _, rate := range calculated.EstimatedRates {
-			if !estimatedRates[rate] {
+			if !slices.Contains(session.Cost.EstimatedRates, rate) {
 				session.Cost.EstimatedRates = append(session.Cost.EstimatedRates, rate)
-				estimatedRates[rate] = true
 			}
 		}
 		for _, name := range calculated.MissingPricingModels {
-			if !missingPricing[name] {
+			if !slices.Contains(session.Cost.MissingPricingModels, name) {
 				session.Cost.MissingPricingModels = append(session.Cost.MissingPricingModels, name)
-				missingPricing[name] = true
 			}
 		}
 	}
