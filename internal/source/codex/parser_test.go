@@ -31,9 +31,8 @@ func testParser() Parser {
 }
 
 func tieredTestParser() Parser {
-	above := 2.0
 	return NewParser(cost.NewCalculator(cost.Table{
-		"gpt-5.6": {Input: 1, Output: 3, InputAbove272K: &above},
+		"gpt-5.6": {Input: 1, Output: 3, Tiers: []cost.PriceTier{{Threshold: 272_000, Input: 2}}},
 	}), "gpt-5")
 }
 
@@ -51,6 +50,37 @@ func parseTieredSession(t *testing.T, events ...string) *model.Session {
 		t.Fatalf("Parse() error = %v", err)
 	}
 	return session
+}
+
+// assertLumpedAggregate checks the ledger, not the breakdown: at the base card,
+// one 300,000-token aggregate and two clean 150,000-token requests produce the
+// same buckets.
+func assertLumpedAggregate(t *testing.T, session *model.Session) {
+	t.Helper()
+	want := []model.RequestUsage{{
+		Offset: -1,
+		Usage:  model.Usage{Model: "gpt-5.6", InputTokens: 300_000, InputIncludesCacheRead: true},
+		USD:    300_000,
+	}}
+	if !reflect.DeepEqual(session.Requests, want) {
+		t.Fatalf("Parse().Requests = %#v, want one base-card aggregate %#v", session.Requests, want)
+	}
+}
+
+// assertCleanRequests is the converse of assertLumpedAggregate. Offsets depend
+// on line lengths, so it checks only that each entry is a real request.
+func assertCleanRequests(t *testing.T, session *model.Session, want ...model.Usage) {
+	t.Helper()
+	got := make([]model.Usage, len(session.Requests))
+	for index, request := range session.Requests {
+		if request.Offset < 0 {
+			t.Fatalf("Parse().Requests[%d] = %#v, want a real request", index, request)
+		}
+		got[index] = request.Usage
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Parse() request usages = %#v, want clean requests %#v", got, want)
+	}
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
@@ -1392,6 +1422,8 @@ func TestParseDoesNotAlterCleanRootAccounting(t *testing.T) {
 		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000,"output_tokens":100,"reasoning_output_tokens":40},"last_token_usage":{"input_tokens":150000,"output_tokens":100,"reasoning_output_tokens":40}}}}`,
 		`{"timestamp":"2026-01-02T03:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000,"output_tokens":200,"reasoning_output_tokens":80},"last_token_usage":{"input_tokens":150000,"output_tokens":100,"reasoning_output_tokens":40}}}}`,
 	)
+	request := model.Usage{Model: "gpt-5.6", InputTokens: 150_000, OutputTokens: 100, InputIncludesCacheRead: true}
+	assertCleanRequests(t, session, request, request)
 	wantInput := model.CostBuckets{{RatePerToken: 1, Tokens: 300_000}}
 	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, wantInput) {
 		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want only base-rate bucket %#v", got, wantInput)
@@ -1422,6 +1454,8 @@ func TestParseExcludesForkReplayFromUsageAndCost(t *testing.T) {
 	if !reflect.DeepEqual(session.Usage, wantUsage) {
 		t.Fatalf("Parse().Usage = %#v, want fork-owned aggregate %#v", session.Usage, wantUsage)
 	}
+	request := model.Usage{Model: "gpt-5.6", InputTokens: 150_000, InputIncludesCacheRead: true}
+	assertCleanRequests(t, session, request, request)
 	wantBuckets := model.CostBuckets{{RatePerToken: 1, Tokens: 300_000}}
 	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, wantBuckets) {
 		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want fork-owned base tier %#v", got, wantBuckets)
@@ -1578,13 +1612,7 @@ func TestParseForkFallbackUsesBaselineSubtractedCumulative(t *testing.T) {
 	if !reflect.DeepEqual(session.Usage, wantUsage) {
 		t.Fatalf("Parse().Usage = %#v, want baseline-subtracted fallback %#v", session.Usage, wantUsage)
 	}
-	wantBuckets := model.CostBuckets{
-		{RatePerToken: 1, Tokens: 272_000},
-		{RatePerToken: 2, Tokens: 28_000, AboveThreshold: true},
-	}
-	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, wantBuckets) {
-		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want child-only fallback %#v", got, wantBuckets)
-	}
+	assertLumpedAggregate(t, session)
 }
 
 func TestParseStopsReplaySkipAtFirstLaterSecond(t *testing.T) {
@@ -1693,13 +1721,7 @@ func TestParseTracksCumulativeOnlyRecordForRelogDedup(t *testing.T) {
 		`{"timestamp":"2026-01-02T03:05:10Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000},"last_token_usage":{"input_tokens":150000}}}}`,
 	)
 
-	want := model.CostBuckets{
-		{RatePerToken: 1, Tokens: 272_000},
-		{RatePerToken: 2, Tokens: 28_000, AboveThreshold: true},
-	}
-	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, want) {
-		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want cumulative fallback %#v", got, want)
-	}
+	assertLumpedAggregate(t, session)
 }
 
 func TestParsePricesOnlyLargeTurnAboveTier(t *testing.T) {
@@ -1708,8 +1730,8 @@ func TestParsePricesOnlyLargeTurnAboveTier(t *testing.T) {
 		`{"timestamp":"2026-01-02T03:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":450000},"last_token_usage":{"input_tokens":300000}}}}`,
 	)
 	want := model.CostBuckets{
-		{RatePerToken: 1, Tokens: 422_000},
-		{RatePerToken: 2, Tokens: 28_000, AboveThreshold: true},
+		{RatePerToken: 1, Tokens: 150_000},
+		{RatePerToken: 2, Tokens: 300_000, AboveThreshold: true},
 	}
 	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, want) {
 		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want only the large turn above tier %#v", got, want)
@@ -1721,15 +1743,12 @@ func TestParsePricesMismatchedDeltasAsCumulativeFallback(t *testing.T) {
 		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150000},"last_token_usage":{"input_tokens":150000}}}}`,
 		`{"timestamp":"2026-01-02T03:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300000,"output_tokens":400000},"last_token_usage":{"input_tokens":150000}}}}`,
 	)
-	want := model.CostBuckets{
-		{RatePerToken: 1, Tokens: 272_000},
-		{RatePerToken: 2, Tokens: 28_000, AboveThreshold: true},
-	}
+	want := model.CostBuckets{{RatePerToken: 1, Tokens: 300_000}}
 	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, want) {
-		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want cumulative fallback %#v", got, want)
+		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want base-card fallback %#v", got, want)
 	}
-	if session.ModelCosts["gpt-5.6"] != 1_528_000 || session.Cost.USD != 1_528_000 {
-		t.Fatalf("Parse() fallback costs = model %v, session %v; want 1528000", session.ModelCosts["gpt-5.6"], session.Cost.USD)
+	if session.ModelCosts["gpt-5.6"] != 1_500_000 || session.Cost.USD != 1_500_000 {
+		t.Fatalf("Parse() fallback costs = model %v, session %v; want 1500000", session.ModelCosts["gpt-5.6"], session.Cost.USD)
 	}
 	wantUsage := []model.Usage{{Model: "gpt-5.6", InputTokens: 300_000, OutputTokens: 400_000, InputIncludesCacheRead: true}}
 	if !reflect.DeepEqual(session.Usage, wantUsage) {
@@ -1742,13 +1761,7 @@ func TestParsePricesDeltasWithoutCumulativeAsAggregateFallback(t *testing.T) {
 		`{"timestamp":"2026-01-02T03:05:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":150000}}}}`,
 		`{"timestamp":"2026-01-02T03:06:00Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":150000}}}}`,
 	)
-	want := model.CostBuckets{
-		{RatePerToken: 1, Tokens: 272_000},
-		{RatePerToken: 2, Tokens: 28_000, AboveThreshold: true},
-	}
-	if got := session.ModelCostBreakdowns["gpt-5.6"].Input; !reflect.DeepEqual(got, want) {
-		t.Fatalf("Parse().ModelCostBreakdowns input = %#v, want unverified deltas lumped %#v", got, want)
-	}
+	assertLumpedAggregate(t, session)
 }
 
 func TestParseBuildsInlineSubagentTree(t *testing.T) {

@@ -31,10 +31,9 @@ defaults to `inputRate * 0.1`. If a Claude record contains the structured cache 
 5-minute and 1-hour fields replace the legacy flat cache-creation count. A `costUSD` value in a
 Claude record takes precedence over the formula. The Codex parser reads no recorded cost.
 
-LiteLLM lists a higher rate above 200,000 tokens, above 272,000 tokens, or both for some models. We
-apply the higher rate as a marginal tier within one usage record. Each token category counts only
-its own tokens against the threshold. It uses the base rate up to the threshold and the higher rate
-above it. If a category lists both thresholds, the 200,000-token tier applies.
+LiteLLM lists higher rates above a prompt-size threshold for some models.
+[Context-length price tiers](./20261008-context-length-price-tiers.md) decides how they apply: the
+prompt size of a request selects one rate card for all of its tokens.
 
 A record whose `speed` is `fast` uses the model's `-fast` entry if one exists and the base entry
 otherwise. If the entry in use has a `provider_specific_entry.fast` multiplier, that multiplier

@@ -36,9 +36,10 @@ subagents before their parent. A [workflow group](./20260805-workflow-subagent-g
 synthetic `Session` node with `Group` set and no requests, so it takes each child's `ModelCosts`
 after the children are priced. Child-first traversal keeps Claude group totals correct.
 
-Pricing `Requests` instead of `Session.Usage` keeps Codex request-tier boundaries. The exception is
-a Codex [counter segment](./20260905-codex-counter-segments.md) whose request usage does not
-reconcile with its cumulative total. Its `Requests` entries are aggregates.
+Pricing `Requests` instead of `Session.Usage` lets each Codex request select its own tier. The
+exception is a Codex [counter segment](./20260905-codex-counter-segments.md) whose request usage
+does not reconcile with its cumulative total. Its `Requests` entries are aggregates, which the
+[context-length tier rule](./20261008-context-length-price-tiers.md) prices at base rates.
 
 Every source adapter implements the required `Source.Reprice` method. Discovery calls it immediately
 after a summary cache hit, before graph linking and cross-session ownership attribution. A missing

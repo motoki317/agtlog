@@ -3,10 +3,13 @@ package cost
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -24,10 +27,51 @@ func TestEmbeddedTableContainsSupportedModels(t *testing.T) {
 		t.Fatalf("EmbeddedTable() error = %v", err)
 	}
 
-	models := []string{"claude-opus-4-8", "claude-fable-5", "claude-sonnet-5", "gpt-5.6", "gpt-5.6-sol"}
+	models := []string{
+		"claude-opus-4-8", "claude-opus-5-5", "claude-fable-5", "claude-fable-5-1", "claude-sonnet-5", "claude-sonnet-5-5",
+		"claude-haiku-5-5", "gpt-5.6", "gpt-5.6-sol", "gpt-6-astra",
+		// The Codex parser prices a model without its own entry as gpt-5.
+		"gpt-5",
+	}
 	for _, name := range models {
 		if _, ok := table[name]; !ok {
 			t.Errorf("EmbeddedTable() missing %q", name)
+		}
+	}
+}
+
+func TestEmbeddedTableDecodesHaiku100KTier(t *testing.T) {
+	table, err := EmbeddedTable()
+	if err != nil {
+		t.Fatalf("EmbeddedTable() error = %v", err)
+	}
+
+	want := []PriceTier{{Threshold: 100_000, Input: 5e-7, Output: new(2.5e-6), CacheWrite: new(6.25e-7), CacheRead: new(5e-8)}}
+	if got := table["claude-haiku-5-5"].Tiers; !reflect.DeepEqual(got, want) {
+		t.Fatalf("claude-haiku-5-5 Tiers = %s, want %s", tiersJSON(t, got), tiersJSON(t, want))
+	}
+}
+
+// The calculator ignores LiteLLM's _above_1hr keys because each equals twice
+// the input rate with the same suffix. A snapshot that breaks the equality needs
+// the calculator to read them instead.
+func TestEmbeddedOneHourCacheWriteRatesAreTwiceInput(t *testing.T) {
+	var entries map[string]map[string]any
+	if err := json.Unmarshal(embeddedPricing, &entries); err != nil {
+		t.Fatalf("decode embedded pricing: %v", err)
+	}
+	for model, fields := range entries {
+		for key, value := range fields {
+			suffix, isOneHour := strings.CutPrefix(key, "cache_creation_input_token_cost_above_1hr")
+			if !isOneHour {
+				continue
+			}
+			inputKey := "input_cost_per_token" + suffix
+			rate, isRate := value.(float64)
+			input, hasInput := fields[inputKey].(float64)
+			if !isRate || !hasInput || math.Abs(rate-2*input) > 1e-9*rate {
+				t.Errorf("%s: %s = %v, want 2 × %s (%v)", model, key, value, inputKey, fields[inputKey])
+			}
 		}
 	}
 }
@@ -410,6 +454,80 @@ func TestRuntimeTableMalformedCacheFallsBackToEmbedded(t *testing.T) {
 	}
 }
 
+func TestPricingTableDecodesContextLengthTiers(t *testing.T) {
+	table, err := runtimePricingTable([]byte(`{"model-a":{
+		"input_cost_per_token":1,
+		"input_cost_per_token_above_100k_tokens":2,
+		"output_cost_per_token_above_100k_tokens":3,
+		"cache_creation_input_token_cost_above_100k_tokens":4,
+		"cache_read_input_token_cost_above_100k_tokens":5,
+		"input_cost_per_token_above_272k_tokens":6,
+		"output_cost_per_token_above_272k_tokens":null,
+		"input_cost_per_token_above_50000_tokens":7,
+		"input_cost_per_token_above_64k_tokens":null,
+		"input_cost_per_token_above_9223372036854776k_tokens":9,
+		"output_cost_per_token_above_512k_tokens":9,
+		"input_cost_per_token_above_128k_tokens_priority":9,
+		"output_cost_per_token_above_100k_tokens_flex":9,
+		"cache_creation_input_token_cost_above_1hr":9,
+		"cache_creation_input_token_cost_above_1hr_above_100k_tokens":9,
+		"input_cost_per_token_above_k_tokens":9,
+		"input_cost_per_token_above_+5k_tokens":9,
+		"input_cost_per_image_above_100k_tokens":9
+	}}`))
+	if err != nil {
+		t.Fatalf("runtimePricingTable() error = %v", err)
+	}
+
+	want := []PriceTier{
+		{Threshold: 50_000, Input: 7},
+		{Threshold: 100_000, Input: 2, Output: new(3.0), CacheWrite: new(4.0), CacheRead: new(5.0)},
+		{Threshold: 272_000, Input: 6},
+	}
+	if got := table["model-a"].Tiers; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Tiers = %s, want %s", tiersJSON(t, got), tiersJSON(t, want))
+	}
+}
+
+// tiersJSON shows rates where %#v would show the addresses of the *float64 fields.
+func tiersJSON(t *testing.T, tiers []PriceTier) string {
+	t.Helper()
+	data, err := json.Marshal(tiers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestPricingTableRejectsInvalidTiers(t *testing.T) {
+	tests := []struct{ name, payload string }{
+		{"negative input", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":-1}}`},
+		{"string input", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":"cheap"}}`},
+		{"negative output", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"output_cost_per_token_above_100k_tokens":-1}}`},
+		{"string output", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"output_cost_per_token_above_100k_tokens":"cheap"}}`},
+		{"negative cache write", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"cache_creation_input_token_cost_above_100k_tokens":-1}}`},
+		{"string cache write", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"cache_creation_input_token_cost_above_100k_tokens":"cheap"}}`},
+		{"negative cache read", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"cache_read_input_token_cost_above_100k_tokens":-1}}`},
+		{"string cache read", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"cache_read_input_token_cost_above_100k_tokens":"cheap"}}`},
+		{"duplicate threshold", `{"model-a":{"input_cost_per_token":1,"input_cost_per_token_above_100k_tokens":2,"input_cost_per_token_above_100000_tokens":3}}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload := []byte(test.payload)
+			if _, err := runtimePricingTable(payload); err == nil {
+				t.Fatal("runtimePricingTable() error = nil, want the invalid tier rejected")
+			}
+			table, err := pricingTable(payload)
+			if err != nil {
+				t.Fatalf("pricingTable() error = %v", err)
+			}
+			if _, ok := table["model-a"]; ok {
+				t.Fatal("pricingTable() kept a model with an invalid tier")
+			}
+		})
+	}
+}
+
 func TestRuntimeTableRejectsUnpricedCachedEntries(t *testing.T) {
 	embedded, err := EmbeddedTable()
 	if err != nil {
@@ -590,22 +708,11 @@ func TestTableResolveUsesProviderQualifiedModel(t *testing.T) {
 	}
 }
 
-func TestCodexResolutionUsesOwnPublishedSolRate(t *testing.T) {
-	table := Table{
-		"gpt-5.6":     {Input: 2},
-		"gpt-5.6-sol": {Input: 3},
-	}
-
-	key, pricing, _, ok := table.ResolveCodex("gpt-5.6-sol", "gpt-5")
-	if !ok || key != "gpt-5.6-sol" || pricing.Input != 3 {
-		t.Fatalf("ResolveCodex() = %q, %#v, %v", key, pricing, ok)
-	}
-}
-
 func TestCodexResolutionReportsExactness(t *testing.T) {
 	table := Table{
 		"gpt-5":          {Input: 1},
 		"gpt-5.7":        {Input: 2},
+		"gpt-5.6":        {Input: 8},
 		"gpt-5.6-sol":    {Input: 3},
 		"openai/gpt-5.5": {Input: 4},
 		"gpt-5.3-codex":  {Input: 5},
@@ -618,7 +725,8 @@ func TestCodexResolutionReportsExactness(t *testing.T) {
 		wantKey   string
 		wantExact bool
 	}{
-		{name: "sol entry", model: "gpt-5.6-sol", wantKey: "gpt-5.6-sol", wantExact: true},
+		{name: "public entry", model: "gpt-5.6", wantKey: "gpt-5.6", wantExact: true},
+		{name: "own sol entry over base", model: "gpt-5.6-sol", wantKey: "gpt-5.6-sol", wantExact: true},
 		{name: "provider-prefixed entry", model: "gpt-5.5", wantKey: "openai/gpt-5.5", wantExact: true},
 		{name: "codex entry", model: "gpt-5.3-codex", wantKey: "gpt-5.3-codex", wantExact: true},
 		{name: "luna entry", model: "gpt-5.6-luna", wantKey: "gpt-5.6-luna", wantExact: true},
@@ -629,38 +737,11 @@ func TestCodexResolutionReportsExactness(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			key, _, exact, ok := table.ResolveCodex(test.model, "gpt-5")
+			key, exact, ok := table.ResolveCodex(test.model, "gpt-5")
 			if !ok || key != test.wantKey || exact != test.wantExact {
 				t.Fatalf("ResolveCodex(%q) = %q, exact %t, ok %t; want %q, exact %t, ok true",
 					test.model, key, exact, ok, test.wantKey, test.wantExact)
 			}
 		})
-	}
-}
-
-func TestCodexResolutionKeepsPublicGPT5Models(t *testing.T) {
-	table := Table{"gpt-5.4": {Input: 2}}
-
-	key, _, _, ok := table.ResolveCodex("gpt-5.4", "gpt-5")
-	if !ok || key != "gpt-5.4" {
-		t.Fatalf("ResolveCodex() = %q, _, %v, want public model", key, ok)
-	}
-}
-
-func TestCodexResolutionStripsPrivateGPT5Variant(t *testing.T) {
-	table := Table{"gpt-5.4": {Input: 2}}
-
-	key, _, _, ok := table.ResolveCodex("gpt-5.4-sol", "gpt-5")
-	if !ok || key != "gpt-5.4" {
-		t.Fatalf("ResolveCodex() = %q, _, %v, want base public model", key, ok)
-	}
-}
-
-func TestCodexResolutionUsesConfiguredDefault(t *testing.T) {
-	table := Table{"gpt-5": {Input: 2}}
-
-	key, _, _, ok := table.ResolveCodex("future-codex-model", "gpt-5")
-	if !ok || key != "gpt-5" {
-		t.Fatalf("ResolveCodex() = %q, _, %v, want configured default", key, ok)
 	}
 }

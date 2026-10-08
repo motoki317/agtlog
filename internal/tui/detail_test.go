@@ -885,18 +885,18 @@ func TestOverviewModelBlocksRenderWithinNarrowWidths(t *testing.T) {
 }
 
 func TestOverviewWordWrappingKeepsRatesAndCurrencyAtomic(t *testing.T) {
-	inputAbove272K := 0.000010
-	calculator := cost.NewCalculator(cost.Table{"gpt-5.6": {Input: 0.000005, InputAbove272K: &inputAbove272K}})
-	usage := model.Usage{Model: "gpt-5.6-sol", InputTokens: 450_000}
-	breakdown := calculator.BreakdownCodex(usage, "gpt-5.6")
-	calculated := calculator.CalculateCodex(usage, "gpt-5.6")
+	calculator := cost.NewCalculator(cost.Table{"gpt-5.6": {
+		Input: 0.000005, Tiers: []cost.PriceTier{{Threshold: 272_000, Input: 0.000010}},
+	}})
+	// One request below the threshold and one above it give the input line two rate terms.
+	base := model.Usage{Model: "gpt-5.6-sol", InputTokens: 200_000}
+	tiered := model.Usage{Model: "gpt-5.6-sol", InputTokens: 450_000}
 	session := &model.Session{
-		Agent:               model.AgentCodex,
-		Usage:               []model.Usage{usage},
-		ModelCosts:          map[string]float64{"gpt-5.6-sol": calculated.USD},
-		ModelCostBreakdowns: map[string]model.CostBreakdown{"gpt-5.6-sol": breakdown},
-		Cost:                calculated,
+		Agent:    model.AgentCodex,
+		Usage:    []model.Usage{base, tiered},
+		Requests: []model.RequestUsage{{Usage: base}, {Usage: tiered}},
 	}
+	calculator.ApplySessionCodex(session, "gpt-5.6")
 	currency := formatCost(session.Cost)
 
 	for _, width := range []int{40, 80} {
@@ -904,7 +904,7 @@ func TestOverviewWordWrappingKeepsRatesAndCurrencyAtomic(t *testing.T) {
 		detail.tab = tabOverview
 		detail.rebuild()
 		detail.update(tea.KeyMsg{Type: tea.KeySpace})
-		for _, atom := range []string{"272k × $5/Mtok", "178k × $10/Mtok", currency} {
+		for _, atom := range []string{"200k × $5/Mtok", "450k × $10/Mtok", currency} {
 			found := false
 			for _, row := range detail.rendered {
 				found = found || strings.Contains(ansi.Strip(row.text), atom)
@@ -917,14 +917,15 @@ func TestOverviewWordWrappingKeepsRatesAndCurrencyAtomic(t *testing.T) {
 }
 
 func TestOverviewModelMathAggregatesRealRateBucketsAcrossRecords(t *testing.T) {
-	inputAbove272K, cacheRead, cacheReadAbove272K := 0.000010, 0.0000005, 0.000001
 	calculator := cost.NewCalculator(cost.Table{"gpt-5.6": {
-		Input: 0.000005, InputAbove272K: &inputAbove272K,
-		CacheRead: &cacheRead, CacheReadAbove272K: &cacheReadAbove272K,
+		Input: 0.000005, CacheRead: new(0.0000005),
+		Tiers: []cost.PriceTier{{Threshold: 272_000, Input: 0.000010, CacheRead: new(0.000001)}},
 	}})
+	// The first prompt stays below the threshold on the base card. The second
+	// crosses it, so each line mixes two real rates.
 	usage := []model.Usage{
-		{Model: "gpt-5.6-sol", InputTokens: 1_350_000, CacheReadTokens: 1_000_000, InputIncludesCacheRead: true},
-		{Model: "gpt-5.6-sol", InputTokens: 25_100_000, CacheReadTokens: 25_000_000, InputIncludesCacheRead: true},
+		{Model: "gpt-5.6-sol", InputTokens: 200_000, CacheReadTokens: 50_000, InputIncludesCacheRead: true},
+		{Model: "gpt-5.6-sol", InputTokens: 25_078_000, CacheReadTokens: 25_000_000, InputIncludesCacheRead: true},
 	}
 	var breakdown model.CostBreakdown
 	var total model.Cost
@@ -941,8 +942,8 @@ func TestOverviewModelMathAggregatesRealRateBucketsAcrossRecords(t *testing.T) {
 
 	text := strings.Join(ownModelCostLinesForTest(session), "\n")
 	for _, want := range []string{
-		"372k × $5/Mtok +  78k × $10/Mtok",
-		"544k × $0.5/Mtok +  25M × $1/Mtok",
+		"150k × $5/Mtok +  78k × $10/Mtok",
+		" 50k × $0.5/Mtok +  25M × $1/Mtok",
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("real-rate breakdown missing %q:\n%s", want, text)
@@ -954,15 +955,14 @@ func TestOverviewModelMathAggregatesRealRateBucketsAcrossRecords(t *testing.T) {
 }
 
 func TestOverviewModelMathRendersCacheWriteBaseRatesBeforeAboveTierRates(t *testing.T) {
-	baseInput, highInput := 0.000002, 0.000003
-	baseWrite, highWrite := 0.000006, 0.000007
 	calculator := cost.NewCalculator(cost.Table{"model-a": {
-		Input: baseInput, InputAbove200K: &highInput,
-		CacheWrite: &baseWrite, CacheWriteAbove200K: &highWrite,
+		Input: 0.000002, CacheWrite: new(0.000006),
+		Tiers: []cost.PriceTier{{Threshold: 200_000, Input: 0.000003, CacheWrite: new(0.000007)}},
 	}})
+	// The tiered record comes first, so the base bucket must move ahead of it.
 	usage := []model.Usage{
 		{Model: "model-a", CacheCreation5mTokens: 250_000},
-		{Model: "model-a", CacheCreation1hTokens: 250_000},
+		{Model: "model-a", CacheCreation1hTokens: 150_000},
 	}
 	var breakdown model.CostBreakdown
 	var total float64
@@ -977,7 +977,7 @@ func TestOverviewModelMathRendersCacheWriteBaseRatesBeforeAboveTierRates(t *test
 	}
 
 	text := strings.Join(ownModelCostLinesForTest(session), "\n")
-	want := "250k × $6/Mtok + 200k × $4/Mtok +  50k × $7/Mtok"
+	want := "150k × $4/Mtok + 250k × $7/Mtok"
 	if !strings.Contains(text, want) {
 		t.Fatalf("cache-write rates not rendered base-first; missing %q:\n%s", want, text)
 	}
