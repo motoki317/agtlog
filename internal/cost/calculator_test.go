@@ -419,6 +419,11 @@ func TestPricingAppliesOneCardToTheWholeRequest(t *testing.T) {
 			},
 		},
 		{
+			name:  "inclusive input below its cache read leaves no uncached input",
+			usage: model.Usage{Model: "inclusive-input", InputTokens: 10, CacheReadTokens: 40, InputIncludesCacheRead: true},
+			want:  model.CostBreakdown{CacheRead: buckets(0.125, 40, false)},
+		},
+		{
 			name: "fast request without a -fast entry takes the base entry and its multiplier",
 			usage: model.Usage{
 				Model: "full-tier", Speed: "fast", InputTokens: 10, OutputTokens: 3, CacheReadTokens: 4, InputIncludesCacheRead: true,
