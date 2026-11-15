@@ -27,7 +27,7 @@ func NewParser(calculator cost.Calculator, defaultPricingModel string) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "codex-parser-v29"
+	return "codex-parser-v30"
 }
 
 type tokenUsage struct {
@@ -59,6 +59,7 @@ type logRecord struct {
 		ParentThreadID string          `json:"parent_thread_id"`
 		Item           codexItemRecord `json:"item"`
 		ForkedFromID   string          `json:"forked_from_id"`
+		HistoryMode    json.RawMessage `json:"history_mode"`
 		Kind           string          `json:"kind"`
 		ThreadSource   string          `json:"thread_source"`
 		Git            struct {
@@ -566,7 +567,7 @@ func scanSummaryPrefix(ctx context.Context, file *os.File) (string, bool, error)
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return "", false, err
 	}
-	var isForked bool
+	var replayPossible bool
 	var replayCandidates []string
 	replayCandidateInvalid := false
 	metaSeen := false
@@ -583,7 +584,9 @@ func scanSummaryPrefix(ctx context.Context, file *os.File) (string, bool, error)
 		}
 		if record.Type == "session_meta" && !metaSeen {
 			metaSeen = true
-			isForked = record.Payload.ThreadSource == "subagent" || record.Payload.ForkedFromID != ""
+			var historyMode string
+			paginated := jsonl.Unmarshal(record.Payload.HistoryMode, &historyMode) == nil && historyMode == "paginated"
+			replayPossible = !paginated && (record.Payload.ThreadSource == "subagent" || record.Payload.ForkedFromID != "")
 		}
 		second, validSecond := codexTimestampSecond(record.Timestamp)
 		if len(replayCandidates) < 2 && record.Type == "event_msg" && record.Payload.Type == "token_count" &&
@@ -591,7 +594,7 @@ func scanSummaryPrefix(ctx context.Context, file *os.File) (string, bool, error)
 			replayCandidates = append(replayCandidates, strings.Clone(second))
 			replayCandidateInvalid = replayCandidateInvalid || !validSecond
 		}
-		if metaSeen && (!isForked || len(replayCandidates) == 2) {
+		if metaSeen && (!replayPossible || len(replayCandidates) == 2) {
 			scanComplete = true
 			prefixReusable = metadata.Terminated
 			stopScan()
@@ -605,7 +608,7 @@ func scanSummaryPrefix(ctx context.Context, file *os.File) (string, bool, error)
 	// Detection needs the first two token_count records in one second, so a replay
 	// with spaced timestamps counts as child usage. Revisit this when real logs
 	// show such replays, and do not read the parent rollout to find the boundary.
-	if isForked && !replayCandidateInvalid && len(replayCandidates) == 2 && replayCandidates[0] == replayCandidates[1] {
+	if replayPossible && !replayCandidateInvalid && len(replayCandidates) == 2 && replayCandidates[0] == replayCandidates[1] {
 		replaySecond = replayCandidates[0]
 	}
 	return replaySecond, prefixReusable, nil

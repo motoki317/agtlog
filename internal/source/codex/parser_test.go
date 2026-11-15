@@ -84,8 +84,8 @@ func assertCleanRequests(t *testing.T, session *model.Session, want ...model.Usa
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); got != "codex-parser-v29" {
-		t.Fatalf("CacheFingerprint() = %q, want usage record v29 fingerprint", got)
+	if got := testParser().CacheFingerprint(); got != "codex-parser-v30" {
+		t.Fatalf("CacheFingerprint() = %q, want paginated replay boundary v30 fingerprint", got)
 	}
 }
 
@@ -1131,6 +1131,7 @@ func TestResumableParseMatchesFullParseAcrossAppendedChunks(t *testing.T) {
 	cases = append(cases,
 		parityCase{name: "generated/usage-records", content: []byte(strings.Join(usageRecordFixtureLines(), "\n") + "\n")},
 		parityCase{name: "generated/resumed-usage-records", content: []byte(strings.Join(resumedUsageRecordFixtureLines(), "\n") + "\n")},
+		parityCase{name: "generated/paginated-subagent", content: []byte(strings.Join(paginatedSubagentFixtureLines(), "\n") + "\n")},
 		parityCase{name: "generated/crlf-unicode", content: []byte(strings.Join([]string{
 			`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-unicode","cwd":"/workspace/nebula"}}`,
 			`{"timestamp":"2026-01-02T03:04:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
@@ -1867,6 +1868,33 @@ func TestParseExcludesForkReplayMessagesAndSubagents(t *testing.T) {
 	if len(session.Subagents) != 1 || session.Subagents[0].ID != "thread-mapper" {
 		t.Fatalf("Parse().Subagents = %#v, want only fork-owned mapper", session.Subagents)
 	}
+}
+
+func paginatedSubagentFixtureLines() []string {
+	return []string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-scout","thread_source":"subagent","agent_path":"/root/scout","history_mode":"paginated"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"turn_context","payload":{"model":"gpt-5.6"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.010Z","type":"event_msg","payload":{"type":"user_message","message":"Chart the child route"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.020Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"call-scout","arguments":"{}"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"total_tokens":100},"last_token_usage":{"input_tokens":100,"total_tokens":100}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.200Z","type":"event_msg","payload":{"type":"turn_aborted"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"total_tokens":100},"last_token_usage":{"input_tokens":100,"total_tokens":100}}}}`,
+	}
+}
+
+func TestParsePaginatedSubagentKeepsSameSecondRequest(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-paginated.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(paginatedSubagentFixtureLines(), "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.TotalUsage().InputTokens != 100 || session.Messages != 1 || session.ToolCalls != 1 {
+		t.Fatalf("summary = tokens %d, messages %d, tools %d; want 100, 1, 1", session.TotalUsage().InputTokens, session.Messages, session.ToolCalls)
+	}
+	assertCleanRequests(t, session, model.Usage{Model: "gpt-5.6", InputTokens: 100, InputIncludesCacheRead: true})
 }
 
 func TestParseUsesLastReplayTotalAsBaseline(t *testing.T) {
