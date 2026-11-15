@@ -36,38 +36,42 @@ the adapter's payload as raw JSON. The registry checks the envelope and the `max
 limit.
 
 The adapter owns the payload. An adapter that implements `ParseWithPartsContext` receives a `load`
-and a `store` callback for each parse. The Claude payload holds the file's stat (path, mtime, and
-size) and the `parseFile` result. The parser stats the file before and after `parseFile`, and it
-stores the part only if the two stats match. On load, it ignores a part whose stored stat differs
-from the file's current stat.
+and a `store` callback for each parse. Only the Claude adapter implements it. The parser stats the
+file before and after the parse, and it stores the part only if the two stats match.
 
-The parser encodes the payload as soon as `parseFile` returns. Tree assembly renames colliding
-titles, raises a parent's `UpdatedAt`, and sets `SpawnCallID`, so an encoding after it stores values
-that come from other files. Each load decodes a fresh copy, because tree assembly mutates the nodes.
+This record set the Claude payload to the file's stat (path, mtime, and size) and the `parseFile`
+result. On load, the parser ignored a part whose stored stat differed from the file's current stat.
+[Claude part checkpoints](./20261115-claude-part-checkpoints.md) replaces this payload and this load
+rule.
+
+The parser encodes the payload before tree assembly. Tree assembly renames colliding titles, raises
+a parent's `UpdatedAt`, and sets `SpawnCallID`, so an encoding after it stores values that come
+from other files. Each load decodes a fresh copy, because tree assembly mutates the nodes.
 
 The summary entry and its fingerprint do not change, and they stay the fast path for an unchanged
 session.
 
 # Consequences
 
-On the measured session, one appended main line takes 0.9 s, and one appended subagent line takes
-0.4 s. The Claude cache namespace for that session grows from 3.6 MB to 7.4 MB, because each
-transcript's `parseFile` result is stored in its part and again inside the summary entry.
+On the measured session, one appended main line took 0.9 s, and one appended subagent line took
+0.4 s. The Claude cache namespace for that session grew from 3.6 MB to 7.4 MB, because it
+held each transcript's `parseFile` result twice: in its part and inside the summary entry.
+[Claude part checkpoints](./20261115-claude-part-checkpoints.md) gives the times and sizes after
+its change.
 
 # Impact
 
 Parts of deleted transcripts stay on disk. Follow mode removes the summary entry of a removed
-session, but not its parts. Codex does not implement `ParseWithPartsContext`. Parts live in the
-namespace that `CacheFingerprint` selects. A bump of the fingerprint therefore abandons the old parts
-on disk together with the old summaries.
+session, but not its parts. Parts live in the namespace that `CacheFingerprint` selects. A bump of
+the fingerprint therefore abandons the old parts on disk together with the old summaries.
 
 # Alternatives
 
 We rejected reusing subagent nodes from the stale summary entry. Those nodes come out of tree
 assembly, so the parser cannot recover the `parseFile` result from them.
 
-We rejected a stat check in the registry. We plan to let the Claude adapter resume a grown
-transcript from its old part, and that needs the part of a file whose stat changed.
+We rejected a stat check in the registry. It keeps an adapter from resuming a grown transcript from
+its old part, which [Claude part checkpoints](./20261115-claude-part-checkpoints.md) does.
 
 We rejected passing the `load` and `store` callbacks through a `context.Context` value or through an
 interface type declared in `internal/source`. Either one makes the Claude adapter import

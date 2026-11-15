@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -190,56 +191,10 @@ func (p Parser) ParseWithPartsContext(ctx context.Context, path string, report f
 	return p.parseSummary(ctx, path, report, partCache{load: load, store: store})
 }
 
-type partFingerprint struct {
-	Path    string `json:"path"`
-	ModTime int64  `json:"mtime"`
-	Size    int64  `json:"size"`
-}
-
-type filePart struct {
-	Fingerprint   partFingerprint   `json:"fingerprint"`
-	Session       *model.Session    `json:"session"`
-	WorkflowNames map[string]string `json:"workflowNames"`
-	TitlePrompt   string            `json:"titlePrompt"`
-}
-
 type partCache struct {
-	load  func(string) ([]byte, bool)
-	store func(string, []byte)
-}
-
-func fingerprintPart(path string) (partFingerprint, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return partFingerprint{}, err
-	}
-	return partFingerprint{Path: path, ModTime: info.ModTime().UnixNano(), Size: info.Size()}, nil
-}
-
-func (c partCache) parseFile(ctx context.Context, path string, parse func(context.Context, string) (*model.Session, map[string]string, string, error)) (*model.Session, map[string]string, string, error) {
-	if c.load == nil || c.store == nil {
-		return parse(ctx, path)
-	}
-	before, statErr := fingerprintPart(path)
-	if statErr == nil {
-		if data, ok := c.load(path); ok {
-			var part filePart
-			if jsonl.Unmarshal(data, &part) == nil && part.Fingerprint == before && part.Session != nil && part.Session.Path == path && part.Session.Agent == model.AgentClaude && len(part.Session.Subagents) == 0 {
-				return part.Session, part.WorkflowNames, part.TitlePrompt, ctx.Err()
-			}
-		}
-	}
-	session, workflowNames, titlePrompt, err := parse(ctx, path)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	if after, err := fingerprintPart(path); statErr == nil && err == nil && before == after && ctx.Err() == nil {
-		data, err := json.Marshal(filePart{Fingerprint: after, Session: session, WorkflowNames: workflowNames, TitlePrompt: titlePrompt})
-		if err == nil && ctx.Err() == nil {
-			c.store(path, data)
-		}
-	}
-	return session, workflowNames, titlePrompt, nil
+	load       func(string) ([]byte, bool)
+	store      func(string, []byte)
+	afterParse func(previous, part *filePart)
 }
 
 func (p Parser) parseSummary(ctx context.Context, path string, report func(string, error), parts partCache) (*model.Session, error) {
@@ -971,7 +926,7 @@ func (p Parser) parse(ctx context.Context, path string, depth int, visited map[s
 	visited[absolute] = true
 	defer delete(visited, absolute)
 
-	session, workflowNames, titlePrompt, err := parts.parseFile(ctx, path, p.parseFile)
+	session, workflowNames, titlePrompt, err := p.parseFileWithParts(ctx, path, parts)
 	if err != nil {
 		return nil, err
 	}
@@ -1399,122 +1354,144 @@ func (p Parser) parseFile(ctx context.Context, path string) (*model.Session, map
 	}
 	defer file.Close()
 
-	session := &model.Session{Agent: model.AgentClaude, Path: path}
-	workflowNames := make(map[string]string)
-	var titlePrompt string
-	hasAITitle := false
-	var usageRecords []usageRecord
-	err = jsonl.ForEachContext(ctx, file, func(line []byte) {
-		var envelope struct {
-			Type      string `json:"type"`
-			Timestamp string `json:"timestamp"`
-		}
-		if jsonl.Unmarshal(line, &envelope) != nil {
-			return
-		}
-		if timestamp, parseErr := time.Parse(time.RFC3339Nano, envelope.Timestamp); parseErr == nil {
-			if session.StartedAt.IsZero() {
-				session.StartedAt = timestamp
-			}
-			if session.UpdatedAt.IsZero() || timestamp.After(session.UpdatedAt) {
-				session.UpdatedAt = timestamp
-			}
-		}
-		hasUsage := bytes.Contains(line, []byte(`"usage"`))
-		if envelope.Type != "user" && envelope.Type != "ai-title" && envelope.Type != "assistant" &&
-			(envelope.Type != "attachment" || !bytes.Contains(line, []byte(`"queued_command"`))) {
-			return
-		}
-		var record logRecord
-		if jsonl.Unmarshal(line, &record) != nil {
-			return
-		}
-		if runID := toolResultRunID(record.ToolUseResult); runID != "" {
-			if title := toolResultWorkflowName(record.ToolUseResult); title != "" {
-				workflowNames[runID] = model.CleanTitle(title)
-			}
-		}
-		switch record.Type {
-		case "ai-title":
-			if title := model.CleanTitle(record.AITitle); title != "" {
-				session.Title = title
-				hasAITitle = true
-				titlePrompt = ""
-			}
-		case "user", "attachment":
-			var text string
-			if record.Type == "attachment" {
-				if command, ok := parseQueuedCommand(record.Attachment); ok {
-					text = userText(command.Prompt)
-				}
-			} else {
-				var content userContentRecord
-				if jsonl.Unmarshal(line, &content) == nil {
-					text = userText(content.Message.Content)
-				}
-			}
-			if text != "" {
-				session.Messages++
-				if session.Title == "" && !hasAITitle {
-					session.Title = model.CleanTitle(text)
-					if session.Title != "" {
-						titlePrompt = retainedTitlePrompt(text)
-					}
-				}
-			}
-		case "assistant":
-			messages, toolCalls := assistantBlockCounts(record.Message.Content)
-			session.Messages += messages
-			session.ToolCalls += toolCalls
-		}
-		if record.Type == "assistant" && (record.IsAPIErrorMessage || meaningfulJSON(record.Error) || meaningfulJSON(record.APIErrorStatus)) {
-			session.HasError = true
-		}
-		if session.ID == "" {
-			if record.AgentID != "" {
-				session.ID = record.AgentID
-			} else {
-				session.ID = record.SessionID
-			}
-		}
-		if session.CWD == "" && record.CWD != "" {
-			session.CWD = record.CWD
-			session.Project = filepath.Base(record.CWD)
-		}
-		if session.GitBranch == "" {
-			session.GitBranch = record.GitBranch
-		}
-		if record.Type == "assistant" && hasUsage && record.Message.Model != "" && record.Message.Model != "<synthetic>" {
-			usage := claudeUsage(record.Message.Model, record.Message.Usage)
-			usage.CostUSD = record.CostUSD
-			if !validUsage(usage) {
-				return
-			}
-			usageRecords = append(usageRecords, usageRecord{
-				MessageID:   record.Message.ID,
-				RequestID:   record.RequestID,
-				IsSidechain: record.IsSidechain,
-				Usage:       usage,
-			})
-			for index, advisor := range claudeAdvisorUsages(record.Message.Usage) {
-				var messageID string
-				if record.Message.ID != "" {
-					messageID = fmt.Sprintf("%s\x00advisor\x00%d", record.Message.ID, index)
-				}
-				usageRecords = append(usageRecords, usageRecord{
-					MessageID:   messageID,
-					RequestID:   record.RequestID,
-					IsSidechain: record.IsSidechain,
-					Usage:       advisor,
-				})
-			}
-		}
-	})
-	if err != nil {
+	accumulator := newFileAccumulator(path)
+	if err := jsonl.ForEachContext(ctx, file, accumulator.ingest); err != nil {
 		return nil, nil, "", err
 	}
+	return accumulator.finish(ctx)
+}
+
+type fileAccumulator struct {
+	Session       model.Session     `json:"session"`
+	WorkflowNames map[string]string `json:"workflowNames"`
+	TitlePrompt   string            `json:"titlePrompt"`
+	UsageRecords  []usageRecord     `json:"usageRecords"`
+}
+
+func newFileAccumulator(path string) *fileAccumulator {
+	return &fileAccumulator{
+		Session:       model.Session{Agent: model.AgentClaude, Path: path},
+		WorkflowNames: make(map[string]string),
+	}
+}
+
+func (a *fileAccumulator) ingest(line []byte) {
+	session := &a.Session
+	var envelope struct {
+		Type      string `json:"type"`
+		Timestamp string `json:"timestamp"`
+	}
+	if jsonl.Unmarshal(line, &envelope) != nil {
+		return
+	}
+	if timestamp, parseErr := time.Parse(time.RFC3339Nano, envelope.Timestamp); parseErr == nil {
+		if session.StartedAt.IsZero() {
+			session.StartedAt = timestamp
+		}
+		if session.UpdatedAt.IsZero() || timestamp.After(session.UpdatedAt) {
+			session.UpdatedAt = timestamp
+		}
+	}
+	hasUsage := bytes.Contains(line, []byte(`"usage"`))
+	if envelope.Type != "user" && envelope.Type != "ai-title" && envelope.Type != "assistant" &&
+		(envelope.Type != "attachment" || !bytes.Contains(line, []byte(`"queued_command"`))) {
+		return
+	}
+	var record logRecord
+	if jsonl.Unmarshal(line, &record) != nil {
+		return
+	}
+	if runID := toolResultRunID(record.ToolUseResult); runID != "" {
+		if title := toolResultWorkflowName(record.ToolUseResult); title != "" {
+			a.WorkflowNames[runID] = model.CleanTitle(title)
+		}
+	}
+	switch record.Type {
+	case "ai-title":
+		if title := model.CleanTitle(record.AITitle); title != "" {
+			session.Title = title
+			a.TitlePrompt = ""
+		}
+	case "user", "attachment":
+		var text string
+		if record.Type == "attachment" {
+			if command, ok := parseQueuedCommand(record.Attachment); ok {
+				text = userText(command.Prompt)
+			}
+		} else {
+			var content userContentRecord
+			if jsonl.Unmarshal(line, &content) == nil {
+				text = userText(content.Message.Content)
+			}
+		}
+		if text != "" {
+			session.Messages++
+			if session.Title == "" {
+				session.Title = model.CleanTitle(text)
+				if session.Title != "" {
+					a.TitlePrompt = retainedTitlePrompt(text)
+				}
+			}
+		}
+	case "assistant":
+		messages, toolCalls := assistantBlockCounts(record.Message.Content)
+		session.Messages += messages
+		session.ToolCalls += toolCalls
+	}
+	if record.Type == "assistant" && (record.IsAPIErrorMessage || meaningfulJSON(record.Error) || meaningfulJSON(record.APIErrorStatus)) {
+		session.HasError = true
+	}
+	if session.ID == "" {
+		if record.AgentID != "" {
+			session.ID = record.AgentID
+		} else {
+			session.ID = record.SessionID
+		}
+	}
+	if session.CWD == "" && record.CWD != "" {
+		session.CWD = record.CWD
+		session.Project = filepath.Base(record.CWD)
+	}
+	if session.GitBranch == "" {
+		session.GitBranch = record.GitBranch
+	}
+	if record.Type == "assistant" && hasUsage && record.Message.Model != "" && record.Message.Model != "<synthetic>" {
+		usage := claudeUsage(record.Message.Model, record.Message.Usage)
+		usage.CostUSD = record.CostUSD
+		if !validUsage(usage) {
+			return
+		}
+		a.UsageRecords = append(a.UsageRecords, usageRecord{
+			MessageID:   record.Message.ID,
+			RequestID:   record.RequestID,
+			IsSidechain: record.IsSidechain,
+			Usage:       usage,
+		})
+		for index, advisor := range claudeAdvisorUsages(record.Message.Usage) {
+			var messageID string
+			if record.Message.ID != "" {
+				messageID = fmt.Sprintf("%s\x00advisor\x00%d", record.Message.ID, index)
+			}
+			a.UsageRecords = append(a.UsageRecords, usageRecord{
+				MessageID:   messageID,
+				RequestID:   record.RequestID,
+				IsSidechain: record.IsSidechain,
+				Usage:       advisor,
+			})
+		}
+	}
+}
+
+func (a *fileAccumulator) finish(ctx context.Context) (*model.Session, map[string]string, string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, "", err
+	}
+	session := a.Session
+	session.Usage = nil
+	session.Requests = nil
+	session.Models = nil
 	seenModels := make(map[string]bool)
-	deduplicated, err := deduplicateContext(ctx, usageRecords)
+	deduplicated, err := deduplicateContext(ctx, a.UsageRecords)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -1533,7 +1510,7 @@ func (p Parser) parseFile(ctx context.Context, path string) (*model.Session, map
 			seenModels[record.Usage.Model] = true
 		}
 	}
-	return session, workflowNames, titlePrompt, nil
+	return &session, maps.Clone(a.WorkflowNames), a.TitlePrompt, nil
 }
 
 func retainedTitlePrompt(prompt string) string {

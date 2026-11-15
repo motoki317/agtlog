@@ -1952,6 +1952,9 @@ func TestQueuedCommandsAppearAsUserTurns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	parts := newMemoryParts()
+	assertPartsParity(t, parser, path, parts)
+	session = assertResumedPartsParity(t, parser, path, parts)
 	if session.Messages != 4 || session.ToolCalls != 1 || session.Title != "Survey the grove" {
 		t.Fatalf("summary = messages %d, tools %d, title %q, want 4, 1, original prompt", session.Messages, session.ToolCalls, session.Title)
 	}
@@ -2041,6 +2044,10 @@ func TestQueuedCommandTextAndHarness(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			parts := newMemoryParts()
+			assertPartsParity(t, parser, path, parts)
+			session = assertResumedPartsParity(t, parser, path, parts)
+			assertChunkedPartsParity(t, []byte(line+"\n"))
 			wantMessages := 0
 			if test.wantText != "" {
 				wantMessages = 1
@@ -2093,6 +2100,10 @@ func TestInvalidAttachmentKeepsTimestampsAndNormalRecords(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			parts := newMemoryParts()
+			assertPartsParity(t, parser, path, parts)
+			session = assertResumedPartsParity(t, parser, path, parts)
+			assertChunkedPartsParity(t, []byte(strings.Join(lines, "\n")+"\n"))
 			wantMessages := 2
 			if attachment.queuedText != "" {
 				wantMessages++

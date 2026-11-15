@@ -95,16 +95,9 @@ type summaryAccumulator struct {
 	metaSeen             bool
 }
 
-const summaryCheckpointHeadBytes = 4 << 10
-
 type summaryCheckpoint struct {
-	accumulator   *summaryAccumulator
-	size          int64
-	headLength    int64
-	headHash      [sha256.Size]byte
-	resumeAt      int64
-	lastLineBytes int64
-	lastLineHash  [sha256.Size]byte
+	jsonl.Checkpoint
+	accumulator *summaryAccumulator
 }
 
 func newSummaryAccumulator(parser Parser, path, replaySecond string) *summaryAccumulator {
@@ -431,13 +424,13 @@ func (p Parser) parseResumableContextAfterValidation(ctx context.Context, path s
 	lastLineHash := [sha256.Size]byte{}
 	prefixReusable := false
 	resumed := false
-	if valid, validationErr := checkpointValid(ctx, file, path, info.Size(), checkpoint); validationErr != nil {
+	if valid, validationErr := checkpoint.valid(ctx, file, path, info.Size()); validationErr != nil {
 		return nil, nil, validationErr
 	} else if valid {
 		accumulator = checkpoint.accumulator.clone()
-		resumeAt = checkpoint.resumeAt
-		lastLineBytes = checkpoint.lastLineBytes
-		lastLineHash = checkpoint.lastLineHash
+		resumeAt = checkpoint.ResumeAt
+		lastLineBytes = checkpoint.LastLineBytes
+		lastLineHash = checkpoint.LastLineHash
 		prefixReusable = true
 		resumed = true
 		if afterValidation != nil {
@@ -456,7 +449,7 @@ func (p Parser) parseResumableContextAfterValidation(ctx context.Context, path s
 	var resumedRangeHash [sha256.Size]byte
 	reader := io.Reader(file)
 	if resumed {
-		resumedRangeHash, err = fileRangeHash(ctx, file, resumeAt, info.Size()-resumeAt)
+		resumedRangeHash, err = jsonl.FileRangeHash(ctx, file, resumeAt, info.Size()-resumeAt)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, nil, ctx.Err()
@@ -490,20 +483,20 @@ func (p Parser) parseResumableContextAfterValidation(ctx context.Context, path s
 		lastLineBytes = metadata.NextOffset - metadata.Offset
 		lastLineNeedsHash = metadata.Oversized
 		if !metadata.Oversized {
-			lastLineBytes, lastLineHash = terminatedLineHash(line, metadata)
+			lastLineBytes, lastLineHash = jsonl.TerminatedLineHash(line, metadata)
 		}
 	})
 	if err != nil {
 		return nil, nil, err
 	}
 	if lastLineNeedsHash {
-		lastLineHash, err = fileRangeHash(ctx, file, lastLineOffset, lastLineBytes)
+		lastLineHash, err = jsonl.FileRangeHash(ctx, file, lastLineOffset, lastLineBytes)
 		if err != nil {
 			return nil, nil, err
 		}
 	}
 	if resumed {
-		postScanRangeHash, hashErr := fileRangeHash(ctx, file, resumeAt, info.Size()-resumeAt)
+		postScanRangeHash, hashErr := jsonl.FileRangeHash(ctx, file, resumeAt, info.Size()-resumeAt)
 		if hashErr != nil {
 			if ctx.Err() != nil {
 				return nil, nil, ctx.Err()
@@ -514,7 +507,7 @@ func (p Parser) parseResumableContextAfterValidation(ctx context.Context, path s
 		if statErr != nil {
 			return nil, nil, statErr
 		}
-		valid, validationErr := checkpointValid(ctx, file, path, postScanInfo.Size(), checkpoint)
+		valid, validationErr := checkpoint.valid(ctx, file, path, postScanInfo.Size())
 		if validationErr != nil {
 			return nil, nil, validationErr
 		}
@@ -547,19 +540,16 @@ func (p Parser) parseResumableContextAfterValidation(ctx context.Context, path s
 	if pathErr != nil || !os.SameFile(info, pathInfo) {
 		return session, nil, nil
 	}
-	headLength := min(sourceSize, int64(summaryCheckpointHeadBytes))
-	headHash, err := fileHeadHash(ctx, file, headLength)
+	headLength, headHash, err := jsonl.CheckpointHead(ctx, file, sourceSize)
 	if err != nil {
 		return nil, nil, err
 	}
 	return session, &summaryCheckpoint{
-		accumulator:   accumulator,
-		size:          sourceSize,
-		headLength:    headLength,
-		headHash:      headHash,
-		resumeAt:      lastCompleteOffset,
-		lastLineBytes: lastLineBytes,
-		lastLineHash:  lastLineHash,
+		accumulator: accumulator,
+		Checkpoint: jsonl.Checkpoint{
+			Size: sourceSize, HeadLength: headLength, HeadHash: headHash,
+			ResumeAt: lastCompleteOffset, LastLineBytes: lastLineBytes, LastLineHash: lastLineHash,
+		},
 	}, nil
 }
 
@@ -614,98 +604,11 @@ func scanSummaryPrefix(ctx context.Context, file *os.File) (string, bool, error)
 	return replaySecond, prefixReusable, nil
 }
 
-func checkpointValid(ctx context.Context, file *os.File, path string, currentSize int64, checkpoint *summaryCheckpoint) (bool, error) {
-	if checkpoint == nil || checkpoint.accumulator == nil || checkpoint.accumulator.session == nil || checkpoint.accumulator.session.Path != path {
+func (c *summaryCheckpoint) valid(ctx context.Context, file *os.File, path string, currentSize int64) (bool, error) {
+	if c == nil || c.accumulator == nil || c.accumulator.session == nil || c.accumulator.session.Path != path {
 		return false, nil
 	}
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	if currentSize < checkpoint.size || checkpoint.resumeAt < 0 || checkpoint.resumeAt > currentSize ||
-		checkpoint.headLength < 0 || checkpoint.headLength > summaryCheckpointHeadBytes || checkpoint.headLength > checkpoint.size {
-		return false, nil
-	}
-	headHash, err := fileHeadHash(ctx, file, checkpoint.headLength)
-	if err != nil {
-		if ctx.Err() != nil {
-			return false, ctx.Err()
-		}
-		return false, nil
-	}
-	if headHash != checkpoint.headHash {
-		return false, nil
-	}
-	if checkpoint.resumeAt == 0 {
-		return checkpoint.lastLineBytes == 0, nil
-	}
-	if checkpoint.lastLineBytes <= 0 || checkpoint.lastLineBytes > checkpoint.resumeAt {
-		return false, nil
-	}
-	terminator := []byte{0}
-	if _, err := file.ReadAt(terminator, checkpoint.resumeAt-1); err != nil {
-		if ctx.Err() != nil {
-			return false, ctx.Err()
-		}
-		return false, nil
-	}
-	if terminator[0] != '\n' {
-		return false, nil
-	}
-	boundaryHash, err := fileRangeHash(ctx, file, checkpoint.resumeAt-checkpoint.lastLineBytes, checkpoint.lastLineBytes)
-	if err != nil {
-		if ctx.Err() != nil {
-			return false, ctx.Err()
-		}
-		return false, nil
-	}
-	return boundaryHash == checkpoint.lastLineHash, nil
-}
-
-func fileHeadHash(ctx context.Context, file *os.File, length int64) ([sha256.Size]byte, error) {
-	return fileRangeHash(ctx, file, 0, length)
-}
-
-func fileRangeHash(ctx context.Context, file *os.File, offset, length int64) ([sha256.Size]byte, error) {
-	if err := ctx.Err(); err != nil {
-		return [sha256.Size]byte{}, err
-	}
-	hasher := sha256.New()
-	reader := io.NewSectionReader(file, offset, length)
-	buffer := make([]byte, min(length, int64(64<<10)))
-	for reader.Size() > 0 {
-		if err := ctx.Err(); err != nil {
-			return [sha256.Size]byte{}, err
-		}
-		read, err := reader.Read(buffer)
-		if read > 0 {
-			_, _ = hasher.Write(buffer[:read])
-		}
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return [sha256.Size]byte{}, err
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return [sha256.Size]byte{}, err
-	}
-	var digest [sha256.Size]byte
-	copy(digest[:], hasher.Sum(nil))
-	return digest, nil
-}
-
-func terminatedLineHash(line []byte, metadata jsonl.LineMetadata) (int64, [sha256.Size]byte) {
-	terminatorLength := metadata.NextOffset - metadata.Offset - metadata.Length
-	hasher := sha256.New()
-	_, _ = hasher.Write(line)
-	if terminatorLength == 2 {
-		_, _ = hasher.Write([]byte{'\r'})
-	}
-	_, _ = hasher.Write([]byte{'\n'})
-	var digest [sha256.Size]byte
-	copy(digest[:], hasher.Sum(nil))
-	return metadata.NextOffset - metadata.Offset, digest
+	return jsonl.CheckpointValid(ctx, file, currentSize, c.Checkpoint)
 }
 
 func validSummaryJSON(line []byte) bool {
