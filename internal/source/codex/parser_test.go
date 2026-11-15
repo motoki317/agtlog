@@ -19,6 +19,7 @@ import (
 
 	"github.com/motoki317/agtlog/internal/cost"
 	"github.com/motoki317/agtlog/internal/model"
+	"github.com/motoki317/agtlog/internal/source/jsonl"
 )
 
 func testParser() Parser {
@@ -1217,8 +1218,8 @@ func TestResumableParseMatchesFullParseAcrossAppendedChunks(t *testing.T) {
 				}
 				if checkpoint != nil {
 					wantResumeAt := int64(bytes.LastIndexByte(test.content[:end], '\n') + 1)
-					if checkpoint.resumeAt != wantResumeAt {
-						t.Fatalf("chunk %d ending at %d: checkpoint offset = %d, want last complete line at %d", chunk, end, checkpoint.resumeAt, wantResumeAt)
+					if checkpoint.ResumeAt != wantResumeAt {
+						t.Fatalf("chunk %d ending at %d: checkpoint offset = %d, want last complete line at %d", chunk, end, checkpoint.ResumeAt, wantResumeAt)
 					}
 				}
 				previousEnd = end
@@ -1384,14 +1385,14 @@ func TestSummaryCheckpointHashesLargeBoundaryWithoutRetainingIt(t *testing.T) {
 	}
 	lastNewline := bytes.LastIndexByte(content[:len(content)-1], '\n')
 	wantBoundaryBytes := int64(len(content) - lastNewline - 1)
-	if checkpoint.lastLineBytes != wantBoundaryBytes || checkpoint.lastLineBytes < 1<<20 {
-		t.Fatalf("checkpoint boundary length = %d, want %d without retained line bytes", checkpoint.lastLineBytes, wantBoundaryBytes)
+	if checkpoint.LastLineBytes != wantBoundaryBytes || checkpoint.LastLineBytes < 1<<20 {
+		t.Fatalf("checkpoint boundary length = %d, want %d without retained line bytes", checkpoint.LastLineBytes, wantBoundaryBytes)
 	}
 }
 
 func TestResumableParseFallsBackWhenCheckpointIsInvalid(t *testing.T) {
 	meta := `{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-root","cwd":"/workspace/nebula"}}` + "\n"
-	filler := strings.Repeat(" ", summaryCheckpointHeadBytes) + "\n"
+	filler := strings.Repeat(" ", jsonl.CheckpointHeadBytes) + "\n"
 	last := `{"timestamp":"2026-01-02T03:04:01Z","type":"event_msg","payload":{"type":"user_message","message":"Original task"}}` + "\n"
 	base := []byte(meta + filler + last)
 	appendLine := []byte(`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"agent_message","message":"Done"}}` + "\n")
@@ -2224,8 +2225,8 @@ func TestSummaryCheckpointAdvancesPastCompletedOversizedLine(t *testing.T) {
 		t.Fatalf("ParseResumableContext() = checkpoint %#v, error %v", checkpoint, err)
 	}
 	wantSize := int64(len(meta) + len(oversized))
-	if checkpoint.resumeAt != wantSize || checkpoint.lastLineBytes != int64(len(oversized)) {
-		t.Fatalf("checkpoint = resume %d, boundary %d; want %d, %d", checkpoint.resumeAt, checkpoint.lastLineBytes, wantSize, len(oversized))
+	if checkpoint.ResumeAt != wantSize || checkpoint.LastLineBytes != int64(len(oversized)) {
+		t.Fatalf("checkpoint = resume %d, boundary %d; want %d, %d", checkpoint.ResumeAt, checkpoint.LastLineBytes, wantSize, len(oversized))
 	}
 }
 
