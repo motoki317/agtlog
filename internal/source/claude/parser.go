@@ -140,24 +140,80 @@ func (p Parser) CacheFingerprint() string {
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
-	return p.parseSummary(context.Background(), path, nil)
+	return p.parseSummary(context.Background(), path, nil, partCache{})
 }
 
 func (p Parser) ParseContext(ctx context.Context, path string) (*model.Session, error) {
-	return p.parseSummary(ctx, path, nil)
+	return p.parseSummary(ctx, path, nil, partCache{})
 }
 
 func (p Parser) ParseWithDiagnostics(path string, report func(string, error)) (*model.Session, error) {
-	return p.parseSummary(context.Background(), path, report)
+	return p.parseSummary(context.Background(), path, report, partCache{})
 }
 
 func (p Parser) ParseWithDiagnosticsContext(ctx context.Context, path string, report func(string, error)) (*model.Session, error) {
-	return p.parseSummary(ctx, path, report)
+	return p.parseSummary(ctx, path, report, partCache{})
 }
 
-func (p Parser) parseSummary(ctx context.Context, path string, report func(string, error)) (*model.Session, error) {
+func (p Parser) ParseWithPartsContext(ctx context.Context, path string, report func(string, error), load func(string) ([]byte, bool), store func(string, []byte)) (*model.Session, error) {
+	return p.parseSummary(ctx, path, report, partCache{load: load, store: store})
+}
+
+type partFingerprint struct {
+	Path    string `json:"path"`
+	ModTime int64  `json:"mtime"`
+	Size    int64  `json:"size"`
+}
+
+type filePart struct {
+	Fingerprint   partFingerprint   `json:"fingerprint"`
+	Session       *model.Session    `json:"session"`
+	WorkflowNames map[string]string `json:"workflowNames"`
+	TitlePrompt   string            `json:"titlePrompt"`
+}
+
+type partCache struct {
+	load  func(string) ([]byte, bool)
+	store func(string, []byte)
+}
+
+func fingerprintPart(path string) (partFingerprint, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return partFingerprint{}, err
+	}
+	return partFingerprint{Path: path, ModTime: info.ModTime().UnixNano(), Size: info.Size()}, nil
+}
+
+func (c partCache) parseFile(ctx context.Context, path string, parse func(context.Context, string) (*model.Session, map[string]string, string, error)) (*model.Session, map[string]string, string, error) {
+	if c.load == nil || c.store == nil {
+		return parse(ctx, path)
+	}
+	before, statErr := fingerprintPart(path)
+	if statErr == nil {
+		if data, ok := c.load(path); ok {
+			var part filePart
+			if jsonl.Unmarshal(data, &part) == nil && part.Fingerprint == before && part.Session != nil && part.Session.Path == path && part.Session.Agent == model.AgentClaude && len(part.Session.Subagents) == 0 {
+				return part.Session, part.WorkflowNames, part.TitlePrompt, ctx.Err()
+			}
+		}
+	}
+	session, workflowNames, titlePrompt, err := parse(ctx, path)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	if after, err := fingerprintPart(path); statErr == nil && err == nil && before == after && ctx.Err() == nil {
+		data, err := json.Marshal(filePart{Fingerprint: after, Session: session, WorkflowNames: workflowNames, TitlePrompt: titlePrompt})
+		if err == nil && ctx.Err() == nil {
+			c.store(path, data)
+		}
+	}
+	return session, workflowNames, titlePrompt, nil
+}
+
+func (p Parser) parseSummary(ctx context.Context, path string, report func(string, error), parts partCache) (*model.Session, error) {
 	titlePrompts := make(map[*model.Session]string)
-	session, err := p.parse(ctx, path, 0, make(map[string]bool), report, titlePrompts)
+	session, err := p.parse(ctx, path, 0, make(map[string]bool), report, titlePrompts, parts)
 	if err == nil && ctx.Err() == nil {
 		resolveSubagentTitleCollisions(session.Subagents, titlePrompts)
 		p.calculator.ApplySession(session)
@@ -846,7 +902,7 @@ type flatClaudeSubagent struct {
 	parentID   string
 }
 
-func (p Parser) parse(ctx context.Context, path string, depth int, visited map[string]bool, report func(string, error), titlePrompts map[*model.Session]string) (*model.Session, error) {
+func (p Parser) parse(ctx context.Context, path string, depth int, visited map[string]bool, report func(string, error), titlePrompts map[*model.Session]string, parts partCache) (*model.Session, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -870,7 +926,7 @@ func (p Parser) parse(ctx context.Context, path string, depth int, visited map[s
 	visited[absolute] = true
 	defer delete(visited, absolute)
 
-	session, workflowNames, titlePrompt, err := p.parseFile(ctx, path)
+	session, workflowNames, titlePrompt, err := parts.parseFile(ctx, path, p.parseFile)
 	if err != nil {
 		return nil, err
 	}
@@ -901,7 +957,7 @@ func (p Parser) parse(ctx context.Context, path string, depth int, visited map[s
 					return filepath.SkipDir
 				}
 				if subagentPath != subagentDir && subagentTranscriptCandidate(subagentPath, subagentDir) {
-					if _, parseErr := p.parse(ctx, subagentPath, depth+1, visited, report, titlePrompts); parseErr != nil {
+					if _, parseErr := p.parse(ctx, subagentPath, depth+1, visited, report, titlePrompts, parts); parseErr != nil {
 						if err := ctx.Err(); err != nil {
 							return err
 						}
@@ -917,7 +973,7 @@ func (p Parser) parse(ctx context.Context, path string, depth int, visited map[s
 				return nil
 			}
 			parentDir := filepath.Dir(subagentPath)
-			subagent, parseErr := p.parse(ctx, subagentPath, depth+1, visited, report, titlePrompts)
+			subagent, parseErr := p.parse(ctx, subagentPath, depth+1, visited, report, titlePrompts, parts)
 			if parseErr != nil {
 				if err := ctx.Err(); err != nil {
 					return err
@@ -972,7 +1028,7 @@ func (p Parser) parse(ctx context.Context, path string, depth int, visited map[s
 			if sessionIDFromFileContext(ctx, legacyPath) != session.ID {
 				continue
 			}
-			subagent, parseErr := p.parse(ctx, legacyPath, depth+1, visited, report, titlePrompts)
+			subagent, parseErr := p.parse(ctx, legacyPath, depth+1, visited, report, titlePrompts, parts)
 			if parseErr == nil {
 				attachSubagent(session, subagent)
 			} else if err := ctx.Err(); err != nil {

@@ -8,11 +8,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
-)
 
-import "github.com/motoki317/agtlog/internal/model"
+	"github.com/motoki317/agtlog/internal/cost"
+	"github.com/motoki317/agtlog/internal/model"
+	"github.com/motoki317/agtlog/internal/source/claude"
+)
 
 type partCountingSource struct {
 	countingSource
@@ -199,5 +202,66 @@ func TestRegistryPartParserRequiresCacheRoot(t *testing.T) {
 	}
 	if adapter.parses != 1 || adapter.partParses != 0 {
 		t.Fatalf("cache disabled: parses = %d, part parses = %d", adapter.parses, adapter.partParses)
+	}
+}
+
+type countingClaudeParts struct {
+	claude.Source
+	stores map[string]int
+}
+
+func (s countingClaudeParts) ParseWithPartsContext(ctx context.Context, path string, report func(string, error), load func(string) ([]byte, bool), store func(string, []byte)) (*model.Session, error) {
+	return s.Source.ParseWithPartsContext(ctx, path, report, load, func(path string, data []byte) {
+		s.stores[path]++
+		store(path, data)
+	})
+}
+
+func TestRegistryClaudePartsSurviveRestartAndMainAppend(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.CopyFS(dir, os.DirFS(filepath.Join("claude", "testdata", "project-alpha"))); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "session-main.jsonl")
+	adapter := countingClaudeParts{
+		Source: claude.NewSource(claude.NewParser(cost.NewCalculator(cost.Table{
+			"claude-opus-4-8": {Input: 1, Output: 2},
+			"claude-fable-5":  {Input: 2, Output: 3},
+			"claude-sonnet-5": {Input: 3, Output: 4},
+		})), []string{dir}),
+		stores: make(map[string]int),
+	}
+	options := Options{Workers: 1, CacheDir: t.TempDir()}
+	registry := NewRegistry([]Source{adapter}, options)
+	if _, _, err := registry.discoverSession(adapter, path); err != nil {
+		t.Fatal(err)
+	}
+	if len(adapter.stores) != 3 {
+		t.Fatalf("cold part stores = %v, want main and two children", adapter.stores)
+	}
+	clear(adapter.stores)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, writeErr := file.WriteString(`{"type":"user","timestamp":"2026-06-07T08:09:10Z","message":{"content":"Check warm parts"}}` + "\n")
+	closeErr := file.Close()
+	if writeErr != nil || closeErr != nil {
+		t.Fatalf("append: write = %v, close = %v", writeErr, closeErr)
+	}
+	registry = NewRegistry([]Source{adapter}, options)
+	got, _, err := registry.discoverSession(adapter, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := adapter.ParseContext(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("registry part parse differs from full Claude parse")
+	}
+	if len(adapter.stores) != 1 || adapter.stores[path] != 1 {
+		t.Fatalf("stores after main append = %v, want only main", adapter.stores)
 	}
 }
