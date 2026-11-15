@@ -84,8 +84,8 @@ func assertCleanRequests(t *testing.T, session *model.Session, want ...model.Usa
 }
 
 func TestParserFingerprintInvalidatesCodexPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); got != "codex-parser-v28" {
-		t.Fatalf("CacheFingerprint() = %q, want sidecar boundary v28 fingerprint", got)
+	if got := testParser().CacheFingerprint(); got != "codex-parser-v29" {
+		t.Fatalf("CacheFingerprint() = %q, want usage record v29 fingerprint", got)
 	}
 }
 
@@ -767,6 +767,302 @@ func TestParseFinalizesCleanRequestLedger(t *testing.T) {
 	}
 }
 
+func usageRecordFixtureLines() []string {
+	return []string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-nebula","cwd":"/workspace/nebula"}}`,
+		`{"timestamp":"2026-01-02T03:04:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		`{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"type":"user_message","message":"Chart the nebula"}}`,
+		`{"timestamp":"2026-01-02T03:04:03Z","type":"event_msg","payload":{"type":"agent_message","message":"Checking the star chart"}}`,
+		`{"timestamp":"2026-01-02T03:04:04Z","type":"token_usage_record","payload":{"thread_id":"thread-nebula","response_id":"response-chart","usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120}}}`,
+		`{"timestamp":"2026-01-02T03:04:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120},"last_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20,"reasoning_output_tokens":5,"total_tokens":120}}}}`,
+		`{"timestamp":"2026-01-02T03:04:05Z","type":"turn_context","payload":{"model":"gpt-5.6"}}`,
+		`{"timestamp":"2026-01-02T03:04:06Z","type":"response_item","payload":{"type":"function_call","call_id":"call-chart","name":"exec_command","arguments":"{\"cmd\":\"echo nebula\"}"}}`,
+		`{"timestamp":"2026-01-02T03:04:07Z","type":"token_usage_record","payload":{"thread_id":"thread-nebula","response_id":"response-tool","usage":{"input_tokens":200,"cached_input_tokens":80,"output_tokens":40,"reasoning_output_tokens":10,"total_tokens":240}}}`,
+		`{"timestamp":"2026-01-02T03:04:07Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"cached_input_tokens":120,"output_tokens":60,"reasoning_output_tokens":15,"total_tokens":360},"last_token_usage":{"input_tokens":200,"cached_input_tokens":80,"output_tokens":40,"reasoning_output_tokens":10,"total_tokens":240}}}}`,
+		`{"timestamp":"2026-01-02T03:04:08Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-chart","output":"nebula"}}`,
+		`{"timestamp":"2026-01-02T03:04:09Z","type":"compacted","payload":{"compaction_response_id":"response-compact"}}`,
+		`{"timestamp":"2026-01-02T03:04:09Z","type":"token_usage_record","payload":{"thread_id":"thread-nebula","response_id":"response-compact","usage":{"input_tokens":30,"output_tokens":5,"reasoning_output_tokens":2,"total_tokens":35}}}`,
+		`{"timestamp":"2026-01-02T03:04:09Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"cached_input_tokens":120,"output_tokens":60,"reasoning_output_tokens":15,"total_tokens":360},"last_token_usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}}}`,
+		`{"timestamp":"2026-01-02T03:04:10Z","type":"event_msg","payload":{"type":"agent_message","message":"The nebula is charted"}}`,
+		`{"timestamp":"2026-01-02T03:04:11Z","type":"token_usage_record","payload":{"thread_id":"thread-nebula","response_id":"response-final","usage":{"input_tokens":40,"cached_input_tokens":10,"output_tokens":8,"reasoning_output_tokens":3,"total_tokens":48}}}`,
+		`{"timestamp":"2026-01-02T03:04:12Z","type":"token_usage_record","payload":{"thread_id":"thread-comet","response_id":"response-foreign","usage":{"input_tokens":900,"output_tokens":90,"total_tokens":990}}}`,
+	}
+}
+
+func TestParseBillsOwnThreadUsageRecords(t *testing.T) {
+	lines := usageRecordFixtureLines()
+	path := filepath.Join(t.TempDir(), "rollout-records.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantUsage := []model.Usage{
+		{Model: "gpt-5.4", InputTokens: 100, CacheReadTokens: 40, OutputTokens: 20, InputIncludesCacheRead: true},
+		{Model: "gpt-5.6", InputTokens: 270, CacheReadTokens: 90, OutputTokens: 53, InputIncludesCacheRead: true},
+	}
+	if !reflect.DeepEqual(session.Usage, wantUsage) || session.TotalUsage().TotalTokens() != 443 || session.Cost.USD != 664 {
+		t.Fatalf("summary = usage %#v, tokens %d, cost %v, want %#v, 443, 664", session.Usage, session.TotalUsage().TotalTokens(), session.Cost.USD, wantUsage)
+	}
+	wantRequests := []model.RequestUsage{
+		{Usage: wantUsage[0], USD: 100},
+		{Usage: model.Usage{Model: "gpt-5.6", InputTokens: 200, CacheReadTokens: 80, OutputTokens: 40, InputIncludesCacheRead: true}, USD: 400},
+		{Usage: model.Usage{Model: "gpt-5.6", InputTokens: 30, OutputTokens: 5, InputIncludesCacheRead: true}, USD: 75},
+		{Usage: model.Usage{Model: "gpt-5.6", InputTokens: 40, CacheReadTokens: 10, OutputTokens: 8, InputIncludesCacheRead: true}, USD: 89},
+	}
+	for i, lineIndex := range []int{4, 8, 12, 15} {
+		wantRequests[i].Offset = int64(len(strings.Join(lines[:lineIndex], "\n")) + 1)
+	}
+	if !reflect.DeepEqual(session.Requests, wantRequests) {
+		t.Fatalf("Requests = %#v, want record offsets and usages %#v", session.Requests, wantRequests)
+	}
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	wantKinds := []model.EventKind{model.EventUser, model.EventAssistantText, model.EventToolCall, model.EventToolResult, model.EventCompact, model.EventUsage, model.EventAssistantText}
+	if len(session.Events) != len(wantKinds) {
+		t.Fatalf("events = %#v, want kinds %v", session.Events, wantKinds)
+	}
+	requestIndex := 0
+	for i, event := range session.Events {
+		if event.Kind != wantKinds[i] {
+			t.Fatalf("event %d kind = %s, want %s", i, event.Kind, wantKinds[i])
+		}
+		if i != 1 && i != 2 && i != 5 && i != 6 {
+			if event.Usage != nil {
+				t.Fatalf("event %d carries unexpected usage %#v", i, event.Usage)
+			}
+			continue
+		}
+		request := wantRequests[requestIndex]
+		if event.Usage == nil || *event.Usage != request.Usage || !event.Priced || event.Cost.Total() != request.USD {
+			t.Fatalf("event %d = %#v, want usage %#v and cost %v", i, event, request.Usage, request.USD)
+		}
+		if event.Kind == model.EventUsage {
+			wantRef := model.RecordRef{Path: path, Offset: request.Offset, Length: int64(len(lines[12])), Digest: sha256.Sum256([]byte(lines[12]))}
+			if event.RecordRef != wantRef || !event.Timestamp.Equal(time.Date(2026, 1, 2, 3, 4, 9, 0, time.UTC)) {
+				t.Fatalf("compaction usage reference/time = %#v/%v, want %#v at 03:04:09Z", event.RecordRef, event.Timestamp, wantRef)
+			}
+		}
+		requestIndex++
+	}
+}
+
+func resumedUsageRecordFixtureLines() []string {
+	lines := usageRecordFixtureLines()
+	return append(lines[:4:4], lines[5:10]...)
+}
+
+func TestParseKeepsTokenCountLedgerAcrossFormatUpgrade(t *testing.T) {
+	lines := resumedUsageRecordFixtureLines()
+	path := filepath.Join(t.TempDir(), "rollout-upgraded.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRequests := []model.RequestUsage{
+		{Usage: model.Usage{Model: "gpt-5.4", InputTokens: 100, CacheReadTokens: 40, OutputTokens: 20, InputIncludesCacheRead: true}, USD: 100},
+		{Usage: model.Usage{Model: "gpt-5.6", InputTokens: 200, CacheReadTokens: 80, OutputTokens: 40, InputIncludesCacheRead: true}, USD: 400},
+	}
+	for i, lineIndex := range []int{4, 8} {
+		wantRequests[i].Offset = int64(len(strings.Join(lines[:lineIndex], "\n")) + 1)
+	}
+	if !reflect.DeepEqual(session.Requests, wantRequests) || session.TotalUsage().TotalTokens() != 360 || session.Cost.USD != 500 {
+		t.Fatalf("summary = requests %#v, tokens %d, cost %v, want count ledger %#v, 360, 500", session.Requests, session.TotalUsage().TotalTokens(), session.Cost.USD, wantRequests)
+	}
+	if err := testParser().LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Events) != 3 || session.Events[0].Kind != model.EventUser || session.Events[0].Usage != nil || session.Events[1].Kind != model.EventAssistantText || session.Events[2].Kind != model.EventToolCall {
+		t.Fatalf("events = %#v, want user, assistant text, tool call", session.Events)
+	}
+	for i, request := range wantRequests {
+		event := session.Events[i+1]
+		if event.Usage == nil || *event.Usage != request.Usage || !event.Priced || event.Cost.Total() != request.USD {
+			t.Errorf("event %d = %#v, want count usage %#v and cost %v", i+1, event, request.Usage, request.USD)
+		}
+	}
+}
+
+func TestReplayedCountsDoNotBlockUsageRecordLedger(t *testing.T) {
+	lines := []string{
+		`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-nebula","thread_source":"subagent","agent_path":"/root/scout"}}`,
+		`{"timestamp":"2026-01-02T03:05:00.100Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10},"last_token_usage":{"input_tokens":10}}}}`,
+		`{"timestamp":"2026-01-02T03:05:00.900Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20},"last_token_usage":{"input_tokens":10}}}}`,
+		`{"timestamp":"2026-01-02T03:05:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
+		strings.Replace(usageRecordFixtureLines()[4], "03:04:04", "03:05:02", 1),
+	}
+	path := filepath.Join(t.TempDir(), "rollout-replayed.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := testParser().Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantOffset := int64(len(strings.Join(lines[:4], "\n")) + 1)
+	if session.TotalUsage().TotalTokens() != 120 || len(session.Requests) != 1 || session.Requests[0].Offset != wantOffset {
+		t.Fatalf("summary = tokens %d, requests %#v, want record's 120 tokens at %d", session.TotalUsage().TotalTokens(), session.Requests, wantOffset)
+	}
+}
+
+func TestParseRejectsInvalidUsageRecords(t *testing.T) {
+	for name, payload := range map[string]string{
+		"foreign thread":     `{"thread_id":"thread-foreign","usage":{"input_tokens":99}}`,
+		"missing thread":     `{"usage":{"input_tokens":99}}`,
+		"missing usage":      `{"thread_id":"thread-nebula"}`,
+		"null usage":         `{"thread_id":"thread-nebula","usage":null}`,
+		"zero usage":         `{"thread_id":"thread-nebula","usage":{}}`,
+		"negative input":     `{"thread_id":"thread-nebula","usage":{"input_tokens":-1}}`,
+		"negative cache":     `{"thread_id":"thread-nebula","usage":{"cached_input_tokens":-1}}`,
+		"negative output":    `{"thread_id":"thread-nebula","usage":{"output_tokens":-1}}`,
+		"negative reasoning": `{"thread_id":"thread-nebula","usage":{"reasoning_output_tokens":-1}}`,
+		"negative total":     `{"thread_id":"thread-nebula","usage":{"total_tokens":-1}}`,
+		"cache above input":  `{"thread_id":"thread-nebula","usage":{"input_tokens":1,"cached_input_tokens":2}}`,
+		"malformed usage":    `{"thread_id":"thread-nebula","usage":"unknown"}`,
+		"out of range":       `{"thread_id":"thread-nebula","usage":{"input_tokens":9223372036854775808}}`,
+	} {
+		for _, ownRecord := range []bool{false, true} {
+			t.Run(name+"/own-record-"+strconv.FormatBool(ownRecord), func(t *testing.T) {
+				lines := []string{
+					usageRecordFixtureLines()[0],
+					usageRecordFixtureLines()[1],
+					`{"timestamp":"2026-01-02T03:04:03Z","type":"token_usage_record","payload":` + payload + `}`,
+				}
+				wantIndex, wantInput := 3, int64(7)
+				if ownRecord {
+					lines = append(lines, `{"timestamp":"2026-01-02T03:04:04Z","type":"token_usage_record","payload":{"thread_id":"thread-nebula","usage":{"input_tokens":10}}}`)
+					wantInput = 10
+				}
+				lines = append(lines, segmentTokenLine("04:05", &tokenUsage{InputTokens: 7}, &tokenUsage{InputTokens: 7}))
+				path := filepath.Join(t.TempDir(), "rollout-invalid.jsonl")
+				if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				session, err := testParser().Parse(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantOffset := int64(len(strings.Join(lines[:wantIndex], "\n")) + 1)
+				if len(session.Requests) != 1 || session.Requests[0].Offset != wantOffset || session.TotalUsage().InputTokens != wantInput {
+					t.Fatalf("requests = %#v, want only %d tokens at %d", session.Requests, wantInput, wantOffset)
+				}
+			})
+		}
+	}
+}
+
+func TestParseIgnoresUsageShapesOutsideTokenUsageRecords(t *testing.T) {
+	for name, record := range map[string]struct {
+		line      string
+		messages  int
+		toolCalls int
+	}{
+		"user message": {
+			line:     `{"timestamp":"2026-01-02T03:04:02Z","type":"event_msg","payload":{"usage":"other-format","thread_id":{},"type":"user_message","message":"Chart the moon"}}`,
+			messages: 1,
+		},
+		"tool call": {
+			line:      `{"timestamp":"2026-01-02T03:04:02Z","type":"response_item","payload":{"usage":"other-format","thread_id":{},"type":"function_call","name":"exec_command","call_id":"call-moon","arguments":"{}"}}`,
+			toolCalls: 1,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			lines := append(usageRecordFixtureLines()[:2:2], record.line)
+			path := filepath.Join(t.TempDir(), "rollout-other-usage.jsonl")
+			if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			session, err := testParser().Parse(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantUpdated := time.Date(2026, 1, 2, 3, 4, 2, 0, time.UTC)
+			if !session.UpdatedAt.Equal(wantUpdated) || session.Messages != record.messages || session.ToolCalls != record.toolCalls {
+				t.Fatalf("summary = updated %v, messages %d, tools %d; want %v, %d, %d", session.UpdatedAt, session.Messages, session.ToolCalls, wantUpdated, record.messages, record.toolCalls)
+			}
+		})
+	}
+}
+
+func TestLoadEventsIgnoresRejectedUsageRecords(t *testing.T) {
+	for _, ownRecord := range []bool{false, true} {
+		t.Run("own-record-"+strconv.FormatBool(ownRecord), func(t *testing.T) {
+			fixtureLines := usageRecordFixtureLines()
+			lines := append(fixtureLines[:2:2], fixtureLines[3], fixtureLines[16],
+				`{"type":"token_usage_record","payload":{"thread_id":"thread-nebula","usage":{"input_tokens":-1}}}`,
+				`{"type":"token_usage_record","payload":{"thread_id":"thread-nebula","usage":{}}}`,
+			)
+			if ownRecord {
+				lines = append(lines, fixtureLines[4])
+			}
+			lines = append(lines, fixtureLines[5])
+			path := filepath.Join(t.TempDir(), "rollout-rejected-records.jsonl")
+			if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			session, err := testParser().Parse(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := testParser().LoadEvents(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			if len(session.Events) != 1 || session.Events[0].Kind != model.EventAssistantText || session.Events[0].Usage == nil || session.Events[0].Usage.InputTokens != 100 {
+				t.Fatalf("events = %#v, want only the assistant with 100 input tokens", session.Events)
+			}
+		})
+	}
+}
+
+func TestParseRejectsUsageRecordOverflow(t *testing.T) {
+	for name, first := range map[string]tokenUsage{
+		"input":     {InputTokens: math.MaxInt64},
+		"cache":     {InputTokens: math.MaxInt64, CachedInputTokens: math.MaxInt64},
+		"output":    {OutputTokens: math.MaxInt64},
+		"reasoning": {ReasoningOutputTokens: math.MaxInt64},
+		"total":     {TotalTokens: math.MaxInt64},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rejected := first
+			rejected.InputTokens = 9
+			rejected.CachedInputTokens = 0
+			if first.InputTokens > 0 {
+				rejected.InputTokens = 1
+			}
+			accepted := tokenUsage{OutputTokens: 2}
+			if first.OutputTokens > 0 {
+				accepted = tokenUsage{InputTokens: 2}
+			}
+			lines := []string{usageRecordFixtureLines()[0], usageRecordFixtureLines()[1]}
+			for i, usage := range []tokenUsage{first, rejected, accepted} {
+				encoded, err := json.Marshal(usage)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lines = append(lines, `{"type":"token_usage_record","payload":{"thread_id":"thread-nebula","usage":`+string(encoded)+`}}`)
+				if i == 0 {
+					lines = append(lines, `{"type":"turn_context","payload":{"model":"gpt-5.6"}}`)
+				}
+			}
+			path := filepath.Join(t.TempDir(), "rollout-overflow.jsonl")
+			if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			session, err := testParser().Parse(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertCleanRequests(t, session, codexUsage("gpt-5.4", first), codexUsage("gpt-5.6", accepted))
+		})
+	}
+}
+
 func TestSummaryAccumulatorFinishRebuildsDerivedSlices(t *testing.T) {
 	lines := []string{
 		`{"timestamp":"2026-01-02T03:04:00Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
@@ -833,6 +1129,8 @@ func TestResumableParseMatchesFullParseAcrossAppendedChunks(t *testing.T) {
 		t.Fatal(err)
 	}
 	cases = append(cases,
+		parityCase{name: "generated/usage-records", content: []byte(strings.Join(usageRecordFixtureLines(), "\n") + "\n")},
+		parityCase{name: "generated/resumed-usage-records", content: []byte(strings.Join(resumedUsageRecordFixtureLines(), "\n") + "\n")},
 		parityCase{name: "generated/crlf-unicode", content: []byte(strings.Join([]string{
 			`{"timestamp":"2026-01-02T03:04:00Z","type":"session_meta","payload":{"id":"thread-unicode","cwd":"/workspace/nebula"}}`,
 			`{"timestamp":"2026-01-02T03:04:01Z","type":"turn_context","payload":{"model":"gpt-5.4"}}`,
