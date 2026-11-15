@@ -3,7 +3,6 @@ package claude
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -49,11 +48,33 @@ func appendPartRecord(t *testing.T, path string) {
 
 func assertPartsParity(t *testing.T, parser Parser, path string, parts *memoryParts) *model.Session {
 	t.Helper()
+	return assertPartsParityWithCache(t, parser, path, partCache{load: parts.load, store: parts.store})
+}
+
+func assertResumedPartsParity(t *testing.T, parser Parser, path string, parts *memoryParts) *model.Session {
+	t.Helper()
+	resumed := false
+	session := assertPartsParityWithCache(t, parser, path, partCache{
+		load: parts.load, store: parts.store, afterParse: func(previous, part *filePart) {
+			if previous == nil || previous.Accumulator == nil || part == nil || part.Accumulator != previous.Accumulator {
+				t.Fatal("cached part did not retain resumed accumulator")
+			}
+			resumed = true
+		},
+	})
+	if !resumed {
+		t.Fatal("cached part did not resume")
+	}
+	return session
+}
+
+func assertPartsParityWithCache(t *testing.T, parser Parser, path string, parts partCache) *model.Session {
+	t.Helper()
 	want, err := parser.Parse(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := parser.ParseWithPartsContext(context.Background(), path, nil, parts.load, parts.store)
+	got, err := parser.parseSummary(context.Background(), path, nil, parts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,50 +198,64 @@ func TestPartCacheRereadsAssemblyInputs(t *testing.T) {
 	}
 }
 
-func TestPartCacheReusesOnlyUnchangedFiles(t *testing.T) {
+func TestPartCacheResumesValidFiles(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.CopyFS(dir, os.DirFS(filepath.Join("testdata", "project-alpha"))); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "session-main.jsonl")
 	childPath := filepath.Join(dir, "session-main", "subagents", "agent-scout.jsonl")
-	parser, parts := testParser(), newMemoryParts()
-	cache := partCache{load: parts.load, store: parts.store}
-	calls := make(map[string]int)
-	parse := func(ctx context.Context, path string) (*model.Session, map[string]string, string, error) {
-		calls[path]++
-		return parser.parseFile(ctx, path)
-	}
-	for range 2 {
-		for _, file := range []string{path, childPath} {
-			if _, _, _, err := cache.parseFile(context.Background(), file, parse); err != nil {
+	for _, file := range []string{path, childPath} {
+		_, previous, err := parseFilePart(context.Background(), file, nil, nil)
+		if err != nil || previous == nil {
+			t.Fatalf("cold parse: part = %v, error = %v", previous, err)
+		}
+		if file == path {
+			appendPartRecord(t, file)
+		} else {
+			info, err := os.Stat(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(file, info.ModTime(), info.ModTime().Add(time.Second)); err != nil {
 				t.Fatal(err)
 			}
 		}
-	}
-	appendPartRecord(t, path)
-	for _, file := range []string{path, childPath} {
-		if _, _, _, err := cache.parseFile(context.Background(), file, parse); err != nil {
-			t.Fatal(err)
+		resumed := false
+		result, next, err := parseFilePart(context.Background(), file, previous, func() { resumed = true })
+		if err != nil || next == nil || !resumed {
+			t.Fatalf("resume: part = %v, resumed = %v, error = %v", next, resumed, err)
+		}
+		got, names, title, err := result.finish(context.Background())
+		want, wantNames, wantTitle, wantErr := testParser().parseFile(context.Background(), file)
+		if err != nil || wantErr != nil || !reflect.DeepEqual(got, want) || !reflect.DeepEqual(names, wantNames) || title != wantTitle {
+			t.Fatalf("resumed parse differs: %v, %v", err, wantErr)
 		}
 	}
-	if calls[path] != 2 || calls[childPath] != 1 {
-		t.Fatalf("parse calls = %v, want main twice and child once", calls)
+}
+
+func TestPartCacheDoesNotRewriteTouchedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-touched.jsonl")
+	if err := os.WriteFile(path, []byte(`{"type":"user","message":{"content":"Survey river"}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	info, err := os.Stat(childPath)
+	parser, parts := testParser(), newMemoryParts()
+	assertPartsParity(t, parser, path, parts)
+	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chtimes(childPath, info.ModTime(), info.ModTime().Add(time.Second)); err != nil {
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime().Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, err := cache.parseFile(context.Background(), childPath, parse); err != nil || calls[childPath] != 2 {
-		t.Fatalf("mtime-only change: calls = %v, error = %v", calls, err)
+	assertPartsParity(t, parser, path, parts)
+	if parts.stores[path] != 1 {
+		t.Fatalf("touch rewrote the part: stores = %d, want 1", parts.stores[path])
 	}
 }
 
 func TestPartCacheRejectsInvalidPayload(t *testing.T) {
-	for _, shape := range []string{"path", "mtime", "size", "session path", "agent", "missing session", "subagents", "invalid JSON", "trailing JSON"} {
+	for _, shape := range []string{"size", "session path", "agent", "missing accumulator", "subagents", "workflow map", "head length", "offset", "invalid JSON", "trailing JSON", "legacy part"} {
 		t.Run(shape, func(t *testing.T) {
 			parser, parts := testParser(), newMemoryParts()
 			path := mainFixture()
@@ -230,20 +265,22 @@ func TestPartCacheRejectsInvalidPayload(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch shape {
-			case "path":
-				part.Fingerprint.Path += ".other"
-			case "mtime":
-				part.Fingerprint.ModTime++
 			case "size":
-				part.Fingerprint.Size++
+				part.Checkpoint.Size++
 			case "session path":
-				part.Session.Path += ".other"
+				part.Accumulator.Session.Path += ".other"
 			case "agent":
-				part.Session.Agent = model.AgentCodex
-			case "missing session":
-				part.Session = nil
+				part.Accumulator.Session.Agent = model.AgentCodex
+			case "missing accumulator":
+				part.Accumulator = nil
 			case "subagents":
-				part.Session.Subagents = []*model.Session{{ID: "unexpected-child"}}
+				part.Accumulator.Session.Subagents = []*model.Session{{ID: "unexpected-child"}}
+			case "workflow map":
+				part.Accumulator.WorkflowNames = nil
+			case "head length":
+				part.Checkpoint.HeadLength = 0
+			case "offset":
+				part.Checkpoint.ResumeAt = part.Checkpoint.Size + 1
 			}
 			data, err := json.Marshal(part)
 			if err != nil {
@@ -253,6 +290,22 @@ func TestPartCacheRejectsInvalidPayload(t *testing.T) {
 				data = []byte(`{`)
 			} else if shape == "trailing JSON" {
 				data = append(data, []byte(`{}`)...)
+			} else if shape == "legacy part" {
+				info, err := os.Stat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				session, names, prompt, err := parser.parseFile(context.Background(), path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				data, err = json.Marshal(map[string]any{
+					"fingerprint": map[string]any{"path": path, "mtime": info.ModTime().UnixNano(), "size": info.Size()},
+					"session":     session, "workflowNames": names, "titlePrompt": prompt,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			parts.data[path] = data
 			assertPartsParity(t, parser, path, parts)
@@ -264,18 +317,19 @@ func TestPartCacheRejectsInvalidPayload(t *testing.T) {
 }
 
 func TestPartCacheDoesNotStoreUnstableOrFailedParse(t *testing.T) {
-	for _, scenario := range []string{"append", "removed", "parse error", "canceled"} {
+	for _, scenario := range []string{"append", "removed", "canceled"} {
 		t.Run(scenario, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "session.jsonl")
 			if err := os.WriteFile(path, []byte(`{"type":"user","message":{"content":"Check stability"}}`+"\n"), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			parser, parts := testParser(), newMemoryParts()
-			cache := partCache{load: parts.load, store: parts.store}
+			_, previous, err := parseFilePart(context.Background(), path, nil, nil)
+			if err != nil || previous == nil {
+				t.Fatalf("initial parse: %v, %v", previous, err)
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			parse := func(ctx context.Context, path string) (*model.Session, map[string]string, string, error) {
-				session, names, title, err := parser.parseFile(ctx, path)
+			_, next, err := parseFilePart(ctx, path, previous, func() {
 				switch scenario {
 				case "append":
 					appendPartRecord(t, path)
@@ -283,18 +337,14 @@ func TestPartCacheDoesNotStoreUnstableOrFailedParse(t *testing.T) {
 					if err := os.Remove(path); err != nil {
 						t.Fatal(err)
 					}
-				case "parse error":
-					err = errors.New("fixture parse error")
 				case "canceled":
 					cancel()
 				}
-				return session, names, title, err
+			})
+			if scenario != "append" && err == nil {
+				t.Fatal("parse failure was swallowed")
 			}
-			_, _, _, err := cache.parseFile(ctx, path, parse)
-			if scenario == "parse error" && err == nil {
-				t.Fatal("parse error was swallowed")
-			}
-			if len(parts.data) != 0 {
+			if next != nil {
 				t.Fatal("stored an unstable or failed part")
 			}
 		})
