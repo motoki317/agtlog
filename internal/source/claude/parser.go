@@ -37,6 +37,7 @@ type logRecord struct {
 	IsSidechain       bool            `json:"isSidechain"`
 	CostUSD           *float64        `json:"costUSD"`
 	ToolUseResult     json.RawMessage `json:"toolUseResult"`
+	Attachment        json.RawMessage `json:"attachment"`
 	Error             json.RawMessage `json:"error"`
 	APIErrorStatus    json.RawMessage `json:"apiErrorStatus"`
 	IsAPIErrorMessage bool            `json:"isApiErrorMessage"`
@@ -127,6 +128,36 @@ type userContentRecord struct {
 	} `json:"message"`
 }
 
+type claudeUserOrigin struct {
+	Kind string `json:"kind"`
+}
+
+type queuedCommand struct {
+	Prompt json.RawMessage
+	IsMeta bool
+	Origin *claudeUserOrigin
+}
+
+func parseQueuedCommand(raw json.RawMessage) (queuedCommand, bool) {
+	var attachment struct {
+		Type   string          `json:"type"`
+		Prompt json.RawMessage `json:"prompt"`
+		IsMeta json.RawMessage `json:"isMeta"`
+		Origin json.RawMessage `json:"origin"`
+	}
+	if jsonl.Unmarshal(raw, &attachment) != nil || attachment.Type != "queued_command" {
+		return queuedCommand{}, false
+	}
+	command := queuedCommand{Prompt: attachment.Prompt}
+	if jsonl.Unmarshal(attachment.IsMeta, &command.IsMeta) != nil {
+		command.IsMeta = false
+	}
+	if jsonl.Unmarshal(attachment.Origin, &command.Origin) != nil {
+		command.Origin = nil
+	}
+	return command, true
+}
+
 func NewParser(calculator cost.Calculator) Parser {
 	return Parser{
 		calculator:           calculator,
@@ -136,7 +167,7 @@ func NewParser(calculator cost.Calculator) Parser {
 }
 
 func (p Parser) CacheFingerprint() string {
-	return "claude-parser-v21"
+	return "claude-parser-v22"
 }
 
 func (p Parser) Parse(path string) (*model.Session, error) {
@@ -292,6 +323,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 				Usage   claudeUsageJSON `json:"usage"`
 			} `json:"message"`
 			ToolUseResult   json.RawMessage `json:"toolUseResult"`
+			Attachment      json.RawMessage `json:"attachment"`
 			CompactMetadata struct {
 				Trigger    string `json:"trigger"`
 				PostTokens int64  `json:"postTokens"`
@@ -317,11 +349,19 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 			}
 			return
 		}
-		if record.Type != "user" && record.Type != "assistant" {
-			return
-		}
-		if record.Type == "user" {
-			if text := userText(record.Message.Content); text != "" {
+		var text string
+		var harness bool
+		switch record.Type {
+		case "attachment":
+			command, ok := parseQueuedCommand(record.Attachment)
+			if !ok {
+				return
+			}
+			text = userText(command.Prompt)
+			harness = claudeUserIsHarness(command.IsMeta, false, "", command.Origin, text)
+		case "user":
+			text = userText(record.Message.Content)
+			if text != "" {
 				// A separate decode keeps a malformed marker from dropping a
 				// readable record. Tool results have no text, so only prompts
 				// reach this decode, and prompts are small.
@@ -332,20 +372,27 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 					Origin           json.RawMessage `json:"origin"`
 				}
 				_ = jsonl.Unmarshal(line, &markers)
-				var origin *struct {
-					Kind string `json:"kind"`
-				}
+				var origin *claudeUserOrigin
 				if jsonl.Unmarshal(markers.Origin, &origin) != nil {
 					origin = nil
 				}
-				session.Events = append(session.Events, model.Event{
-					Timestamp: timestamp,
-					Kind:      model.EventUser,
-					Text:      model.ElideEncrypted(text),
-					Harness:   claudeUserIsHarness(markers.IsMeta, markers.IsCompactSummary, markers.PromptSource, origin, text),
-					RecordRef: recordRef,
-				})
+				harness = claudeUserIsHarness(markers.IsMeta, markers.IsCompactSummary, markers.PromptSource, origin, text)
 			}
+		case "assistant":
+		default:
+			return
+		}
+		if text != "" {
+			session.Events = append(session.Events, model.Event{
+				Timestamp: timestamp,
+				Kind:      model.EventUser,
+				Text:      model.ElideEncrypted(text),
+				Harness:   harness,
+				RecordRef: recordRef,
+			})
+		}
+		if record.Type == "attachment" {
+			return
 		}
 		var blocks []struct {
 			Type      string          `json:"type"`
@@ -603,9 +650,7 @@ func claudeResultSummary(toolName, result string, isError bool) string {
 	return "exit 0"
 }
 
-func claudeUserIsHarness(isMeta, isCompactSummary bool, promptSource string, origin *struct {
-	Kind string `json:"kind"`
-}, text string) bool {
+func claudeUserIsHarness(isMeta, isCompactSummary bool, promptSource string, origin *claudeUserOrigin, text string) bool {
 	if isMeta || isCompactSummary || promptSource == "system" {
 		return true
 	}
@@ -1376,7 +1421,8 @@ func (p Parser) parseFile(ctx context.Context, path string) (*model.Session, map
 			}
 		}
 		hasUsage := bytes.Contains(line, []byte(`"usage"`))
-		if envelope.Type != "user" && envelope.Type != "ai-title" && envelope.Type != "assistant" {
+		if envelope.Type != "user" && envelope.Type != "ai-title" && envelope.Type != "assistant" &&
+			(envelope.Type != "attachment" || !bytes.Contains(line, []byte(`"queued_command"`))) {
 			return
 		}
 		var record logRecord
@@ -1395,16 +1441,24 @@ func (p Parser) parseFile(ctx context.Context, path string) (*model.Session, map
 				hasAITitle = true
 				titlePrompt = ""
 			}
-		case "user":
-			var content userContentRecord
-			if jsonl.Unmarshal(line, &content) == nil {
-				if text := userText(content.Message.Content); text != "" {
-					session.Messages++
-					if session.Title == "" && !hasAITitle {
-						session.Title = model.CleanTitle(text)
-						if session.Title != "" {
-							titlePrompt = retainedTitlePrompt(text)
-						}
+		case "user", "attachment":
+			var text string
+			if record.Type == "attachment" {
+				if command, ok := parseQueuedCommand(record.Attachment); ok {
+					text = userText(command.Prompt)
+				}
+			} else {
+				var content userContentRecord
+				if jsonl.Unmarshal(line, &content) == nil {
+					text = userText(content.Message.Content)
+				}
+			}
+			if text != "" {
+				session.Messages++
+				if session.Title == "" && !hasAITitle {
+					session.Title = model.CleanTitle(text)
+					if session.Title != "" {
+						titlePrompt = retainedTitlePrompt(text)
 					}
 				}
 			}

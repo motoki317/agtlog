@@ -1,11 +1,13 @@
 package claude
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -15,8 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/motoki317/agtlog/internal/cli"
 	"github.com/motoki317/agtlog/internal/cost"
 	"github.com/motoki317/agtlog/internal/model"
+	"github.com/motoki317/agtlog/internal/source"
 )
 
 func testParser() Parser {
@@ -148,8 +152,8 @@ func parseFlatSidecarBaseline(t *testing.T) *model.Session {
 }
 
 func TestParserFingerprintInvalidatesRawPresentation(t *testing.T) {
-	if got := testParser().CacheFingerprint(); got != "claude-parser-v21" {
-		t.Fatalf("CacheFingerprint() = %q, want spawn-call v21 fingerprint", got)
+	if got := testParser().CacheFingerprint(); got != "claude-parser-v22" {
+		t.Fatalf("CacheFingerprint() = %q, want queued-command v22 fingerprint", got)
 	}
 }
 
@@ -1922,6 +1926,195 @@ func TestLoadEventsClassifiesClaudeUserTurns(t *testing.T) {
 			}
 			if got := session.Events[0].Harness; got != test.wantHarness {
 				t.Errorf("Event.Harness = %t, want %t", got, test.wantHarness)
+			}
+		})
+	}
+}
+
+func queuedCommandFixtureLines() []string {
+	return []string{
+		`{"type":"user","timestamp":"2026-01-02T03:00:00Z","sessionId":"session-grove","message":{"content":"Survey the grove"}}`,
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:01Z","message":{"id":"message-survey","model":"claude-opus-4-8","content":[{"type":"tool_use","id":"call-survey","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":10,"output_tokens":5}}}`,
+		`{"type":"attachment","timestamp":"2026-01-02T03:00:02Z","attachment":{"type":"queued_command","prompt":"Mark the amber trail","isMeta":false,"origin":{"kind":"human"},"commandMode":"prompt"}}`,
+		`{"type":"attachment","timestamp":"2026-01-02T03:00:03Z","attachment":{"type":"queued_command","prompt":[{"type":"text","text":"The grove scout finished"},{"type":"text","text":"Check the eastern gate"}],"origin":{"kind":"task-notification"}}}`,
+		`{"type":"assistant","timestamp":"2026-01-02T03:00:04Z","message":{"content":[{"type":"text","text":"Trail marked"}]}}`,
+	}
+}
+
+func TestQueuedCommandsAppearAsUserTurns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-grove.jsonl")
+	lines := queuedCommandFixtureLines()
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parser := testParser()
+	session, err := parser.Parse(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if session.Messages != 4 || session.ToolCalls != 1 || session.Title != "Survey the grove" {
+		t.Fatalf("summary = messages %d, tools %d, title %q, want 4, 1, original prompt", session.Messages, session.ToolCalls, session.Title)
+	}
+	if err := parser.LoadEvents(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	wantKinds := []model.EventKind{model.EventUser, model.EventToolCall, model.EventUser, model.EventUser, model.EventAssistantText}
+	if len(session.Events) != len(wantKinds) {
+		t.Fatalf("events = %#v, want %d events", session.Events, len(wantKinds))
+	}
+	var offset int64
+	for i, event := range session.Events {
+		if event.Kind != wantKinds[i] {
+			t.Errorf("event %d kind = %s, want %s", i, event.Kind, wantKinds[i])
+		}
+		wantTime := time.Date(2026, 1, 2, 3, 0, i, 0, time.UTC)
+		if !event.Timestamp.Equal(wantTime) {
+			t.Errorf("event %d timestamp = %s, want %s", i, event.Timestamp, wantTime)
+		}
+		wantRef := model.RecordRef{Path: path, Offset: offset, Length: int64(len(lines[i])), Digest: sha256.Sum256([]byte(lines[i]))}
+		if event.RecordRef != wantRef {
+			t.Errorf("event %d record = %#v, want %#v", i, event.RecordRef, wantRef)
+		}
+		offset += int64(len(lines[i]) + 1)
+	}
+	if event := session.Events[2]; event.Text != "Mark the amber trail" || event.Harness || event.Usage != nil {
+		t.Errorf("human queued event = %#v, want human prompt without usage", event)
+	}
+	if event := session.Events[3]; event.Text != "The grove scout finished\nCheck the eastern gate" || !event.Harness || event.Usage != nil {
+		t.Errorf("notification queued event = %#v, want harness prompt without usage", event)
+	}
+	if got := session.TotalUsage().TotalTokens(); got != 15 || session.Events[1].Usage == nil || session.Events[1].Usage.TotalTokens() != got {
+		t.Errorf("usage = %d, tool event = %#v, want original request's 15 tokens", got, session.Events[1])
+	}
+	registry := source.NewRegistry([]source.Source{NewSource(parser, []string{filepath.Dir(path)})}, source.Options{})
+	for _, index := range []int{2, 3} {
+		var output bytes.Buffer
+		pattern := session.Events[index].Text
+		err := cli.Execute(context.Background(), []string{"search", pattern, "--agent", "claude"}, &output, io.Discard,
+			func(context.Context, cli.Options) (cli.Registry, error) { return registry, nil })
+		if err != nil {
+			t.Fatalf("search %q error = %v", pattern, err)
+		}
+		var response cli.SearchResponse
+		if err := json.Unmarshal(output.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if len(response.Warnings) != 0 || len(response.Hits) != 1 || response.Hits[0].Event.Kind != "user" || response.Hits[0].Event.Index != index {
+			t.Errorf("search %q = %#v, want one user hit at index %d", pattern, response, index)
+		}
+	}
+}
+
+func TestQueuedCommandTextAndHarness(t *testing.T) {
+	tests := []struct {
+		name        string
+		attachment  string
+		wantText    string
+		wantHarness bool
+	}{
+		{name: "absent origin", attachment: `{"type":"queued_command","prompt":"Survey the northern grove"}`, wantText: "Survey the northern grove"},
+		{name: "human origin", attachment: `{"type":"queued_command","prompt":"Survey the southern grove","origin":{"kind":"human"}}`, wantText: "Survey the southern grove"},
+		{name: "peer origin", attachment: `{"type":"queued_command","prompt":"Survey the western grove","origin":{"kind":"peer"}}`, wantText: "Survey the western grove", wantHarness: true},
+		{name: "coordinator origin", attachment: `{"type":"queued_command","prompt":"Survey the eastern grove","origin":{"kind":"coordinator"}}`, wantText: "Survey the eastern grove", wantHarness: true},
+		{name: "meta", attachment: `{"type":"queued_command","prompt":"Inspect the seedlings","isMeta":true,"origin":{"kind":"human"}}`, wantText: "Inspect the seedlings", wantHarness: true},
+		{name: "malformed meta before prompt", attachment: `{"isMeta":{},"type":"queued_command","prompt":"Inspect the saplings"}`, wantText: "Inspect the saplings"},
+		{name: "valid origin after malformed meta", attachment: `{"isMeta":"true","type":"queued_command","prompt":"Inspect the canopy","origin":{"kind":"peer"}}`, wantText: "Inspect the canopy", wantHarness: true},
+		{name: "malformed origin before prompt", attachment: `{"origin":[],"type":"queued_command","prompt":"Inspect the roots"}`, wantText: "Inspect the roots"},
+		{name: "malformed origin kind", attachment: `{"origin":{"kind":[]},"type":"queued_command","prompt":"Inspect the soil"}`, wantText: "Inspect the soil"},
+		{name: "valid meta after malformed origin", attachment: `{"origin":"human","prompt":"Inspect the clearing","type":"queued_command","isMeta":true}`, wantText: "Inspect the clearing", wantHarness: true},
+		{name: "wrapper after cleaning", attachment: `{"type":"queued_command","prompt":[{"type":"text","text":"<system-reminder>Hidden metadata</system-reminder>"},{"type":"text","text":"<command-name>survey</command-name>"}]}`, wantText: "<command-name>survey</command-name>", wantHarness: true},
+		{name: "empty", attachment: `{"type":"queued_command","prompt":" "}`},
+		{name: "missing", attachment: `{"type":"queued_command"}`},
+		{name: "null", attachment: `{"type":"queued_command","prompt":null}`},
+		{name: "non-text blocks", attachment: `{"type":"queued_command","prompt":[{"type":"image","source":{}}]}`},
+		{name: "hard noise", attachment: `{"type":"queued_command","prompt":"<system-reminder>Hidden metadata</system-reminder>"}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session-grove.jsonl")
+			line := `{"type":"attachment","isMeta":true,"isCompactSummary":true,"promptSource":"system","origin":{"kind":"peer"},"timestamp":"2026-01-02T03:00:00Z","attachment":` + test.attachment + `}`
+			if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			parser := testParser()
+			session, err := parser.Parse(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantMessages := 0
+			if test.wantText != "" {
+				wantMessages = 1
+			}
+			if session.Messages != wantMessages || session.Title != model.CleanTitle(test.wantText) {
+				t.Errorf("summary = %d messages, title %q, want %d, %q", session.Messages, session.Title, wantMessages, model.CleanTitle(test.wantText))
+			}
+			if err := parser.LoadEvents(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			if len(session.Events) != wantMessages {
+				t.Fatalf("events = %#v, want %d", session.Events, wantMessages)
+			}
+			if wantMessages > 0 {
+				event := session.Events[0]
+				if event.Kind != model.EventUser || event.Text != test.wantText || event.Harness != test.wantHarness {
+					t.Errorf("event = %#v, want user text %q, harness %t", event, test.wantText, test.wantHarness)
+				}
+			}
+		})
+	}
+}
+
+func TestInvalidAttachmentKeepsTimestampsAndNormalRecords(t *testing.T) {
+	attachments := []struct {
+		raw        string
+		queuedText string
+	}{
+		{raw: `{"type":"image","prompt":{},"origin":"camera","isMeta":[],"note":"queued_command"}`},
+		{raw: `{"type":"image","prompt":"Not a queued prompt"}`},
+		{raw: `{"type":"queued_command","prompt":{}}`},
+		{raw: `{"type":"queued_command","prompt":"Unreadable marker","origin":[]}`, queuedText: "Unreadable marker"},
+		{raw: `{"type":"queued_command","prompt":"Unreadable marker","isMeta":{}}`, queuedText: "Unreadable marker"},
+		{raw: `{"type":[],"prompt":"queued_command"}`},
+		{raw: `"queued_command"`},
+	}
+	for _, attachment := range attachments {
+		t.Run(attachment.raw, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session-grove.jsonl")
+			lines := []string{
+				`{"attachment":` + attachment.raw + `,"type":"user","timestamp":"2026-01-02T03:00:00Z","message":{"content":"Survey the grove"}}`,
+				`{"attachment":` + attachment.raw + `,"type":"assistant","timestamp":"2026-01-02T03:01:00Z","message":{"id":"message-survey","model":"claude-opus-4-8","content":[{"type":"text","text":"Survey underway"},{"type":"tool_use","id":"call-survey","name":"Bash","input":{"command":"ls"}}],"usage":{"input_tokens":5,"output_tokens":2}}}`,
+				`{"attachment":` + attachment.raw + `,"type":"attachment","timestamp":"2026-01-02T03:02:00Z"}`,
+			}
+			if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			parser := testParser()
+			session, err := parser.Parse(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantMessages := 2
+			if attachment.queuedText != "" {
+				wantMessages++
+			}
+			if session.Messages != wantMessages || session.ToolCalls != 1 || session.TotalUsage().TotalTokens() != 7 || session.Title != "Survey the grove" {
+				t.Errorf("summary = %#v, want %d messages and normal usage/tool counts", session, wantMessages)
+			}
+			start := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+			if !session.StartedAt.Equal(start) || !session.UpdatedAt.Equal(start.Add(2*time.Minute)) {
+				t.Errorf("timestamps = %s..%s, want %s..%s", session.StartedAt, session.UpdatedAt, start, start.Add(2*time.Minute))
+			}
+			if err := parser.LoadEvents(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			if len(session.Events) != wantMessages+1 || session.Events[0].Kind != model.EventUser || session.Events[1].Kind != model.EventAssistantText || session.Events[2].Kind != model.EventToolCall {
+				t.Fatalf("events = %#v, want normal user, assistant text, tool call, plus readable queued text", session.Events)
+			}
+			if attachment.queuedText != "" {
+				event := session.Events[3]
+				if event.Kind != model.EventUser || event.Text != attachment.queuedText || event.Harness {
+					t.Errorf("queued event = %#v, want human prompt %q", event, attachment.queuedText)
+				}
 			}
 		})
 	}
