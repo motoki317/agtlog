@@ -34,6 +34,15 @@ type cacheDiagnostic struct {
 	Message string `json:"message"`
 }
 
+type partEntry struct {
+	Version int             `json:"version"`
+	Agent   model.AgentKind `json:"agent"`
+	Path    string          `json:"path"`
+	Data    json.RawMessage `json:"data"`
+}
+
+const partCacheVersion = 1
+
 // cacheVersion covers the cacheEntry envelope. A change to what a parser stores
 // in the Session payload bumps that adapter's CacheFingerprint instead. See
 // docs/ADR/20260815-summary-cache-repricing.md.
@@ -57,41 +66,39 @@ type contextFingerprinter interface {
 	FingerprintContext(context.Context, string) (string, error)
 }
 
-func loadCachedFromRootContext(ctx context.Context, root *os.Root, adapter Source, path, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool) {
+func loadCacheDataFromRootContext(ctx context.Context, root *os.Root, adapter Source, entryPath string) ([]byte, bool) {
 	if ctx.Err() != nil || root == nil {
-		return nil, nil, false
+		return nil, false
 	}
 	namespace, ok := cacheNamespace(adapter)
 	if !ok {
-		return nil, nil, false
+		return nil, false
 	}
 	info, err := root.Lstat(namespace)
 	if err != nil {
-		return nil, nil, false
+		return nil, false
 	}
 	namespaceRoot, opened := openCacheDirectory(root, namespace, info)
 	if !opened {
-		return nil, nil, false
+		return nil, false
 	}
 	defer func() { _ = namespaceRoot.Close() }()
-	return loadCacheEntryContext(ctx, namespaceRoot, cacheEntryName(adapter, path), path, adapter, fingerprint)
+	info, err = namespaceRoot.Lstat(entryPath)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() > maxSummaryCacheBytes {
+		return nil, false
+	}
+	data, err := readRootFileContext(ctx, namespaceRoot, entryPath, info.Size())
+	return data, err == nil
 }
 
-func loadCacheEntryContext(ctx context.Context, root *os.Root, entryPath, sourcePath string, adapter Source, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool) {
-	if ctx.Err() != nil {
-		return nil, nil, false
-	}
-	info, err := root.Lstat(entryPath)
-	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() > maxSummaryCacheBytes {
-		return nil, nil, false
-	}
-	data, err := readRootFileContext(ctx, root, entryPath, info.Size())
-	if err != nil {
+func loadCachedFromRootContext(ctx context.Context, root *os.Root, adapter Source, path, fingerprint string) (*model.Session, []DiscoveryDiagnostic, bool) {
+	data, ok := loadCacheDataFromRootContext(ctx, root, adapter, cacheEntryName(adapter, path))
+	if !ok {
 		return nil, nil, false
 	}
 	var entry cacheEntry
 	decoder := cacheJSON.NewDecoder(&contextReader{ctx: ctx, reader: bytes.NewReader(data)})
-	if decoder.Decode(&entry) != nil || decoder.Decode(&struct{}{}) != io.EOF || entry.Version != cacheVersion || entry.Agent != adapter.Agent() || entry.Fingerprint != fingerprint || entry.Session == nil || entry.Session.Path != sourcePath {
+	if decoder.Decode(&entry) != nil || decoder.Decode(&struct{}{}) != io.EOF || entry.Version != cacheVersion || entry.Agent != adapter.Agent() || entry.Fingerprint != fingerprint || entry.Session == nil || entry.Session.Path != path {
 		return nil, nil, false
 	}
 	diagnostics := make([]DiscoveryDiagnostic, 0, len(entry.Diagnostics))
@@ -102,6 +109,19 @@ func loadCacheEntryContext(ctx context.Context, root *os.Root, entryPath, source
 		diagnostics = append(diagnostics, DiscoveryDiagnostic{Agent: adapter.Agent(), Path: diagnostic.Path, Err: errors.New(diagnostic.Message)})
 	}
 	return entry.Session, diagnostics, true
+}
+
+func loadPartFromRootContext(ctx context.Context, root *os.Root, adapter Source, path string) ([]byte, bool) {
+	data, ok := loadCacheDataFromRootContext(ctx, root, adapter, partEntryName(adapter, path))
+	if !ok {
+		return nil, false
+	}
+	var entry partEntry
+	decoder := cacheJSON.NewDecoder(&contextReader{ctx: ctx, reader: bytes.NewReader(data)})
+	if decoder.Decode(&entry) != nil || decoder.Decode(&struct{}{}) != io.EOF || entry.Version != partCacheVersion || entry.Agent != adapter.Agent() || entry.Path != path || len(entry.Data) == 0 {
+		return nil, false
+	}
+	return entry.Data, true
 }
 
 type contextReader struct {
@@ -149,10 +169,6 @@ func storeCachedToRootContext(ctx context.Context, root *os.Root, adapter Source
 	if ctx.Err() != nil || root == nil {
 		return
 	}
-	namespace, ok := cacheNamespace(adapter)
-	if !ok {
-		return
-	}
 	cachedDiagnostics := make([]cacheDiagnostic, 0, len(diagnostics))
 	for _, diagnostic := range diagnostics {
 		if ctx.Err() != nil {
@@ -161,10 +177,29 @@ func storeCachedToRootContext(ctx context.Context, root *os.Root, adapter Source
 		cachedDiagnostics = append(cachedDiagnostics, cacheDiagnostic{Path: diagnostic.Path, Message: diagnostic.Err.Error()})
 	}
 	data, err := json.Marshal(cacheEntry{Version: cacheVersion, Agent: adapter.Agent(), Fingerprint: fingerprint, Session: session, Diagnostics: cachedDiagnostics})
-	if err != nil || len(data) > maxSummaryCacheBytes {
+	if err != nil {
 		return
 	}
-	if ctx.Err() != nil {
+	storeCacheDataToRootContext(ctx, root, adapter, cacheEntryName(adapter, path), data)
+}
+
+func storePartToRootContext(ctx context.Context, root *os.Root, adapter Source, path string, payload []byte) {
+	if ctx.Err() != nil || root == nil || len(payload) > maxSummaryCacheBytes {
+		return
+	}
+	data, err := json.Marshal(partEntry{Version: partCacheVersion, Agent: adapter.Agent(), Path: path, Data: payload})
+	if err != nil {
+		return
+	}
+	storeCacheDataToRootContext(ctx, root, adapter, partEntryName(adapter, path), data)
+}
+
+func storeCacheDataToRootContext(ctx context.Context, root *os.Root, adapter Source, entryPath string, data []byte) {
+	if ctx.Err() != nil || root == nil || len(data) > maxSummaryCacheBytes {
+		return
+	}
+	namespace, ok := cacheNamespace(adapter)
+	if !ok {
 		return
 	}
 	if !ensureCacheDirectory(root, namespace) {
@@ -204,7 +239,7 @@ func storeCachedToRootContext(ctx context.Context, root *os.Root, adapter Source
 	if ctx.Err() != nil {
 		return
 	}
-	_ = namespaceRoot.Rename(temporaryPath, cacheEntryName(adapter, path))
+	_ = namespaceRoot.Rename(temporaryPath, entryPath)
 }
 
 func writeFileContext(ctx context.Context, file io.Writer, data []byte) error {
@@ -618,7 +653,7 @@ func parseAndCacheToRootContext(ctx context.Context, root *os.Root, adapter Sour
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	session, diagnostics, err := parseSessionWithDiagnosticsContext(ctx, adapter, path)
+	session, diagnostics, err := parseSessionWithDiagnosticsContext(ctx, root, adapter, path)
 	if err != nil {
 		return nil, diagnostics, err
 	}
@@ -645,17 +680,27 @@ type diagnosticContextParser interface {
 	ParseWithDiagnosticsContext(context.Context, string, func(string, error)) (*model.Session, error)
 }
 
-func parseSessionWithDiagnosticsContext(ctx context.Context, adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
-	parser, ok := adapter.(diagnosticContextParser)
-	if !ok {
-		session, err := adapter.ParseContext(ctx, path)
-		return session, nil, err
-	}
+func parseSessionWithDiagnosticsContext(ctx context.Context, root *os.Root, adapter Source, path string) (*model.Session, []DiscoveryDiagnostic, error) {
 	var diagnostics []DiscoveryDiagnostic
-	session, err := parser.ParseWithDiagnosticsContext(ctx, path, func(diagnosticPath string, diagnosticErr error) {
+	report := func(diagnosticPath string, diagnosticErr error) {
 		diagnostics = append(diagnostics, DiscoveryDiagnostic{Agent: adapter.Agent(), Path: diagnosticPath, Err: diagnosticErr})
-	})
-	return session, diagnostics, err
+	}
+	if parser, ok := adapter.(partContextParser); ok && root != nil {
+		if _, cacheable := cacheNamespace(adapter); cacheable {
+			session, err := parser.ParseWithPartsContext(ctx, path, report, func(partPath string) ([]byte, bool) {
+				return loadPartFromRootContext(ctx, root, adapter, partPath)
+			}, func(partPath string, data []byte) {
+				storePartToRootContext(ctx, root, adapter, partPath, data)
+			})
+			return session, diagnostics, err
+		}
+	}
+	if parser, ok := adapter.(diagnosticContextParser); ok {
+		session, err := parser.ParseWithDiagnosticsContext(ctx, path, report)
+		return session, diagnostics, err
+	}
+	session, err := adapter.ParseContext(ctx, path)
+	return session, nil, err
 }
 
 func sourceFingerprintContext(ctx context.Context, adapter Source, path string) (string, error) {
@@ -690,6 +735,11 @@ func isCacheNamespaceName(name string) bool {
 
 func cacheEntryName(adapter Source, path string) string {
 	hash := sha256.Sum256([]byte(string(adapter.Agent()) + "\x00" + path))
+	return hex.EncodeToString(hash[:]) + ".json"
+}
+
+func partEntryName(adapter Source, path string) string {
+	hash := sha256.Sum256([]byte("part\x00" + string(adapter.Agent()) + "\x00" + path))
 	return hex.EncodeToString(hash[:]) + ".json"
 }
 
