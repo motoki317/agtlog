@@ -19,6 +19,10 @@ The other two each contained one segment whose request usage did not reconcile.
 
 # Decision
 
+Counter segments apply only to a rollout that
+[Codex token usage records](./20261115-codex-token-usage-records.md) leaves on the `token_count`
+ledger.
+
 The parser tracks a running maximum of each cumulative counter component. A valid cumulative record
 whose `total_tokens` is strictly below the running maximum of `total_tokens` closes the current
 segment and opens the next one. The next segment starts with every running maximum at zero, and the
@@ -80,3 +84,4 @@ Some Codex rollouts also log `token_usage_record` records, which form an exact r
 rejected adopting them in this change because 0.149–0.151 rollouts lack them. Their ledger needs a
 separate policy for files written by mixed CLI versions. agtlog reads usage only from `token_count`
 records, so usage that those records omit stays uncounted.
+[Codex token usage records](./20261115-codex-token-usage-records.md) replaces this passage.

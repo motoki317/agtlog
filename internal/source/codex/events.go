@@ -154,6 +154,37 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 			session.Events = append(session.Events, model.Event{Timestamp: timestamp, Kind: model.EventCompact, Text: "context compacted", RecordRef: recordRef, Model: currentModel})
 			return
 		}
+		if record.Type == "token_usage_record" || (record.Type == "event_msg" && record.Payload.Type == "token_count") {
+			request, matched := requestsByOffset[offset]
+			if matched {
+				delete(requestsByOffset, offset)
+				usage := request.Usage
+				if waitingForBridge {
+					preBridgeUsage = append(preBridgeUsage, pendingUsage{event: model.Event{
+						Timestamp: timestamp,
+						Kind:      model.EventUsage,
+						Text:      "unattributed usage",
+						RecordRef: recordRef,
+						Model:     usage.Model,
+					}, usage: usage})
+				}
+				if candidateIndex >= 0 {
+					p.setCodexEventUsage(&session.Events[candidateIndex], usage)
+				} else {
+					p.appendCodexUsageEvent(session, model.Event{
+						Timestamp: timestamp,
+						Kind:      model.EventUsage,
+						Text:      "unattributed usage",
+						RecordRef: recordRef,
+						Model:     usage.Model,
+					}, usage)
+				}
+			}
+			if matched || record.Type == "event_msg" {
+				candidateIndex = -1
+			}
+			return
+		}
 		event := model.Event{Timestamp: timestamp, Model: currentModel, RecordRef: recordRef}
 		eventCount := len(session.Events)
 		preferredMessage := true
@@ -190,33 +221,6 @@ func (p Parser) loadEventsRecursive(ctx context.Context, session *model.Session,
 				default:
 					return
 				}
-			case "token_count":
-				if request, ok := requestsByOffset[offset]; ok {
-					delete(requestsByOffset, offset)
-					usage := request.Usage
-					if waitingForBridge {
-						preBridgeUsage = append(preBridgeUsage, pendingUsage{event: model.Event{
-							Timestamp: timestamp,
-							Kind:      model.EventUsage,
-							Text:      "unattributed usage",
-							RecordRef: recordRef,
-							Model:     usage.Model,
-						}, usage: usage})
-					}
-					if candidateIndex >= 0 {
-						p.setCodexEventUsage(&session.Events[candidateIndex], usage)
-					} else {
-						p.appendCodexUsageEvent(session, model.Event{
-							Timestamp: timestamp,
-							Kind:      model.EventUsage,
-							Text:      "unattributed usage",
-							RecordRef: recordRef,
-							Model:     usage.Model,
-						}, usage)
-					}
-				}
-				candidateIndex = -1
-				return
 			default:
 				return
 			}

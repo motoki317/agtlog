@@ -35,10 +35,13 @@ one ledger entry per accepted request, located by the byte offset of its `token_
 unclean partition stores authoritative aggregate entries with a negative offset, and we neither
 price nor redistribute its individual request deltas.
 [Codex counter segments](./20260905-codex-counter-segments.md) applies the partition rule to each
-cumulative-counter segment.
+cumulative-counter segment. For the rollouts that
+[Codex token usage records](./20261115-codex-token-usage-records.md) selects, the ledger comes from
+`token_usage_record` lines, and each entry sits at the offset of its record.
 
 `Parse` also records the number of source bytes that it consumed in `SourceSize`. Timeline loading
 reads only that many bytes and matches physical `token_count` records to ledger entries by offset.
+For a rollout billed from its `token_usage_record` lines, loading matches those records instead.
 `SourceSize` is zero for a subagent placeholder that the parser builds from a spawn announcement.
 The placeholder has no ledger entries, so its timeline shows no usage. If its `Path` points to a
 sibling rollout, loading reads that whole file. If its `Path` ends in `#<agent path>`, loading
@@ -64,6 +67,9 @@ sidecar, whose first `session_meta` record has `thread_source` set to `subagent`
 `last_token_usage`. If both share one timestamp second, it treats the records in that second as
 replayed. We deferred the choice between that heuristic and the structural bridge as the billing
 boundary, and `Parse` still uses the heuristic. It does not read the parent rollout.
+[Codex token usage records](./20261115-codex-token-usage-records.md) sets the billing boundary by
+`thread_id` for the rollouts that it bills from records, and it skips the heuristic for a
+paginated rollout.
 
 # Consequences
 
