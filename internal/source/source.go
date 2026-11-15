@@ -19,3 +19,7 @@ type resumableContextParser interface {
 	Source
 	ParseResumableContext(context.Context, string, any) (*model.Session, any, error)
 }
+
+type partContextParser interface {
+	ParseWithPartsContext(context.Context, string, func(string, error), func(string) ([]byte, bool), func(string, []byte)) (*model.Session, error)
+}

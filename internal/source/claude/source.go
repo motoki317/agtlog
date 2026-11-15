@@ -131,6 +131,10 @@ func (s Source) ParseWithDiagnosticsContext(ctx context.Context, path string, re
 	return s.parser.ParseWithDiagnosticsContext(ctx, path, report)
 }
 
+func (s Source) ParseWithPartsContext(ctx context.Context, path string, report func(string, error), load func(string) ([]byte, bool), store func(string, []byte)) (*model.Session, error) {
+	return s.parser.ParseWithPartsContext(ctx, path, report, load, store)
+}
+
 func (s Source) LoadEvents(ctx context.Context, session *model.Session) error {
 	return s.parser.LoadEvents(ctx, session)
 }
