@@ -2016,6 +2016,10 @@ func TestQueuedCommandTextAndHarness(t *testing.T) {
 		wantHarness bool
 	}{
 		{name: "absent origin", attachment: `{"type":"queued_command","prompt":"Survey the northern grove"}`, wantText: "Survey the northern grove"},
+		{name: "notification mode without origin", attachment: `{"type":"queued_command","commandMode":"task-notification","prompt":"Grove survey complete"}`, wantText: "Grove survey complete", wantHarness: true},
+		{name: "notification mode with human origin", attachment: `{"type":"queued_command","commandMode":"task-notification","origin":{"kind":"human"},"prompt":"Soil survey complete"}`, wantText: "Soil survey complete", wantHarness: true},
+		{name: "prompt mode without origin", attachment: `{"type":"queued_command","commandMode":"prompt","prompt":"<task-notification>Check the grove"}`, wantText: "<task-notification>Check the grove"},
+		{name: "malformed mode before prompt", attachment: `{"commandMode":{},"type":"queued_command","prompt":"Check the canopy"}`, wantText: "Check the canopy"},
 		{name: "human origin", attachment: `{"type":"queued_command","prompt":"Survey the southern grove","origin":{"kind":"human"}}`, wantText: "Survey the southern grove"},
 		{name: "peer origin", attachment: `{"type":"queued_command","prompt":"Survey the western grove","origin":{"kind":"peer"}}`, wantText: "Survey the western grove", wantHarness: true},
 		{name: "coordinator origin", attachment: `{"type":"queued_command","prompt":"Survey the eastern grove","origin":{"kind":"coordinator"}}`, wantText: "Survey the eastern grove", wantHarness: true},
