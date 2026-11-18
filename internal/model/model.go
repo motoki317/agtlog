@@ -258,8 +258,8 @@ type Event struct {
 	PricingModel  string `json:"-"`
 	// Harness marks a user-role record that the agent harness injected, not text
 	// that a person typed: skill bodies, task notifications, compaction
-	// summaries, and slash-command echoes. Both agents log these records as user
-	// turns, so the timeline needs the flag to label them.
+	// summaries, and command output. Both agents log these records as user turns,
+	// so the timeline needs the flag to label them.
 	Harness bool
 	// CompactTrigger ("manual" or "auto") and CompactPostTokens, the context size
 	// in tokens after the compaction, describe an EventCompact boundary. The log

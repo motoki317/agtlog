@@ -12,8 +12,10 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/motoki317/agtlog/internal/cost"
 	"github.com/motoki317/agtlog/internal/model"
@@ -317,10 +319,10 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 			if !ok {
 				return
 			}
-			text = userText(command.Prompt)
+			text = typedSlashCommand(userText(command.Prompt))
 			harness = command.CommandMode == "task-notification" || claudeUserIsHarness(command.IsMeta, false, "", command.Origin, text)
 		case "user":
-			text = userText(record.Message.Content)
+			text = typedSlashCommand(userText(record.Message.Content))
 			if text != "" {
 				// A separate decode keeps a malformed marker from dropping a
 				// readable record. Tool results have no text, so only prompts
@@ -608,6 +610,29 @@ func claudeResultSummary(toolName, result string, isError bool) string {
 		return "error"
 	}
 	return "exit 0"
+}
+
+// Built-ins put the message after the name. Skills put it first. Arguments
+// contain raw user text, so an XML decoder would alter or reject them.
+const optionalCommandMessage = `(?:<command-message>[^<]*</command-message>\s*)?`
+
+var commandWrapper = regexp.MustCompile(`(?s)^` + optionalCommandMessage +
+	`<command-name>([^<>]+)</command-name>\s*` + optionalCommandMessage +
+	`(?:<command-args>(.*)</command-args>)?$`)
+
+func typedSlashCommand(text string) string {
+	match := commandWrapper.FindStringSubmatch(text)
+	if match == nil {
+		return text
+	}
+	name := strings.TrimSpace(match[1])
+	if !strings.HasPrefix(name, "/") || len(name) == 1 || strings.IndexFunc(name, unicode.IsSpace) >= 0 {
+		return text
+	}
+	if args := strings.TrimSpace(match[2]); args != "" {
+		return name + " " + args
+	}
+	return name
 }
 
 func claudeUserIsHarness(isMeta, isCompactSummary bool, promptSource string, origin *claudeUserOrigin, text string) bool {
