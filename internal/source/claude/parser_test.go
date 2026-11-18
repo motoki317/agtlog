@@ -1973,6 +1973,80 @@ func TestSlashCommandText(t *testing.T) {
 	}
 }
 
+func TestSlashCommandTwins(t *testing.T) {
+	const plain = `"message":{"content":"/compact"}`
+	const wrapped = `"message":{"content":"<command-name>/compact</command-name>"}`
+	const queued = `"attachment":{"type":"queued_command","prompt":"<command-name>/compact</command-name>"}`
+	record := func(kind, stamp, body string) string {
+		return `{"type":"` + kind + `","timestamp":"` + stamp + `",` + body + `}`
+	}
+	const start = "2026-01-02T03:00:00Z"
+	tests := []struct {
+		name      string
+		lines     []string
+		wantLines []int
+	}{
+		{"compaction between twins", []string{
+			record("user", start, plain),
+			record("system", "2026-01-02T03:05:00Z", `"subtype":"compact_boundary"`),
+			record("user", "2026-01-02T03:05:01Z", `"isCompactSummary":true,"message":{"content":"Survey summary"}`),
+			record("user", "2026-01-02T03:00:00.074Z", wrapped),
+		}, []int{0, 1, 2}},
+		{"inclusive second across input paths", []string{
+			record("user", start, plain), record("attachment", "2026-01-02T03:00:01Z", queued),
+		}, []int{0}},
+		{"outside window", []string{
+			record("user", start, plain), record("user", "2026-01-02T03:00:01.001Z", wrapped),
+		}, []int{0, 1}},
+		{"consecutive wrappers", []string{
+			record("user", start, wrapped), record("attachment", start, queued),
+		}, []int{0, 1}},
+		{"plain marked as harness", []string{
+			record("user", start, `"isMeta":true,`+plain), record("user", start, wrapped),
+		}, []int{0, 1}},
+		{"different command at same time", []string{
+			record("user", start, `"message":{"content":"/compact the grove"}`), record("user", start, wrapped),
+		}, []int{0, 1}},
+		{"tool result beside twin", []string{
+			record("user", start, plain),
+			record("user", start, `"message":{"content":[{"type":"text","text":"<command-name>/compact</command-name>"},{"type":"tool_result","content":"route clear"}]}`),
+		}, []int{0, 1}},
+		{"earlier record stamped later", []string{
+			record("user", "2026-01-02T03:00:00.001Z", plain), record("user", start, wrapped),
+		}, []int{0, 1}},
+		{"equal timestamp despite intervening plain command", []string{
+			record("user", start, plain), record("user", "2026-01-02T03:02:00Z", plain),
+			record("user", start, wrapped),
+		}, []int{0, 1}},
+		{"missing timestamps", []string{
+			record("user", "", plain), record("user", "", wrapped),
+		}, []int{0, 1}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			if err := os.WriteFile(path, []byte(strings.Join(test.lines, "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			session := &model.Session{Path: path}
+			if err := testParser().LoadEvents(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			if len(session.Events) != len(test.wantLines) {
+				t.Fatalf("got %d events, want %d", len(session.Events), len(test.wantLines))
+			}
+			for i, line := range test.wantLines {
+				if session.Events[i].RecordRef.Digest != sha256.Sum256([]byte(test.lines[line])) {
+					t.Errorf("event %d should point to fixture record %d", i, line)
+				}
+				if strings.Contains(test.lines[line], `"tool_result"`) && session.Events[i].Kind != model.EventToolResult {
+					t.Errorf("event %d = %s, want tool result", i, session.Events[i].Kind)
+				}
+			}
+		})
+	}
+}
+
 func queuedCommandFixtureLines() []string {
 	return []string{
 		`{"type":"user","timestamp":"2026-01-02T03:00:00Z","sessionId":"session-grove","message":{"content":"Survey the grove"}}`,

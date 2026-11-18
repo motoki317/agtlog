@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -255,6 +256,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 
 	session.Events = nil
 	calls := make(map[string]int)
+	plainCommands := make(plainCommandTimes)
 	linkedSubagents := make(map[*model.Session]bool)
 	// Claude Code writes one line per content block of a response, and each line
 	// repeats the usage. Streaming re-logs a request with growing counts. Each
@@ -297,7 +299,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 			return
 		}
 		recordRef := model.RecordRef{Path: session.Path, Offset: offset, Length: length, Digest: sha256.Sum256(line)}
-		timestamp, _ := time.Parse(time.RFC3339Nano, record.Timestamp)
+		timestamp, timestampErr := time.Parse(time.RFC3339Nano, record.Timestamp)
 		if record.Type == "system" {
 			if record.Subtype == "compact_boundary" {
 				session.Events = append(session.Events, model.Event{
@@ -312,17 +314,17 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 			return
 		}
 		var text string
-		var harness bool
+		var harness, wrapped bool
 		switch record.Type {
 		case "attachment":
 			command, ok := parseQueuedCommand(record.Attachment)
 			if !ok {
 				return
 			}
-			text = typedSlashCommand(userText(command.Prompt))
+			text, wrapped = typedSlashCommand(userText(command.Prompt))
 			harness = command.CommandMode == "task-notification" || claudeUserIsHarness(command.IsMeta, false, "", command.Origin, text)
 		case "user":
-			text = typedSlashCommand(userText(record.Message.Content))
+			text, wrapped = typedSlashCommand(userText(record.Message.Content))
 			if text != "" {
 				// A separate decode keeps a malformed marker from dropping a
 				// readable record. Tool results have no text, so only prompts
@@ -344,7 +346,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 		default:
 			return
 		}
-		if text != "" {
+		if text != "" && (timestampErr != nil || plainCommands.keep(text, timestamp, wrapped, harness)) {
 			session.Events = append(session.Events, model.Event{
 				Timestamp: timestamp,
 				Kind:      model.EventUser,
@@ -620,19 +622,39 @@ var commandWrapper = regexp.MustCompile(`(?s)^` + optionalCommandMessage +
 	`<command-name>([^<>]+)</command-name>\s*` + optionalCommandMessage +
 	`(?:<command-args>(.*)</command-args>)?$`)
 
-func typedSlashCommand(text string) string {
+func typedSlashCommand(text string) (string, bool) {
 	match := commandWrapper.FindStringSubmatch(text)
 	if match == nil {
-		return text
+		return text, false
 	}
 	name := strings.TrimSpace(match[1])
 	if !strings.HasPrefix(name, "/") || len(name) == 1 || strings.IndexFunc(name, unicode.IsSpace) >= 0 {
-		return text
+		return text, false
 	}
 	if args := strings.TrimSpace(match[2]); args != "" {
-		return name + " " + args
+		return name + " " + args, true
 	}
-	return name
+	return name, true
+}
+
+// Claude Code writes the wrapper only after the compaction, so a plain command
+// typed later can sit between the wrapper and its plain copy in the file. The
+// lookup therefore goes by timestamp, not by file order.
+type plainCommandTimes map[string][]time.Time
+
+func (plain plainCommandTimes) keep(text string, stamp time.Time, wrapped, harness bool) bool {
+	if !strings.HasPrefix(text, "/") {
+		return true
+	}
+	times := plain[text]
+	i, exact := slices.BinarySearchFunc(times, stamp, time.Time.Compare)
+	if wrapped {
+		return !exact && (i == 0 || stamp.Sub(times[i-1]) > time.Second)
+	}
+	if !harness && !exact {
+		plain[text] = slices.Insert(times, i, stamp)
+	}
+	return true
 }
 
 func claudeUserIsHarness(isMeta, isCompactSummary bool, promptSource string, origin *claudeUserOrigin, text string) bool {
