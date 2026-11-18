@@ -58,3 +58,4 @@ links to the later record, and the later record names what it replaces.
 | 2026-11-15 | [Claude transcript parts](./20261115-claude-transcript-parts.md) | Cache each Claude transcript's parse result and reparse only the transcripts that changed |
 | 2026-11-15 | [Codex token usage records](./20261115-codex-token-usage-records.md) | Bill Codex rollouts from their own token_usage_record lines and keep token_count for older rollouts |
 | 2026-11-15 | [Claude part checkpoints](./20261115-claude-part-checkpoints.md) | Store resumable parse state in each Claude part and resume a grown transcript after its last validated complete line |
+| 2026-11-18 | [Typed Claude slash commands](./20261118-claude-slash-commands.md) | Show the typed name and arguments once when Claude logs a command as a wrapper, with or without a plain copy |

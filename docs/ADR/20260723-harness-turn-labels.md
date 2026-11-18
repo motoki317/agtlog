@@ -8,7 +8,9 @@ status: "accepted"
 
 Claude Code and Codex both log some harness-injected model input as user-role records. If every
 such record counts as human-authored, skill bodies, task notifications, compaction summaries, and
-slash-command echoes appear under the `you:` label.
+slash-command echoes appear under the `you:` label. For Claude slash commands,
+[Typed Claude slash commands](./20261118-claude-slash-commands.md) replaces this passage: the
+wrapper of a typed command is typed input.
 
 The two formats expose different classification signals. Claude records marker fields, an origin,
 and wrapper prefixes. Codex separates the human-facing `event_msg/user_message` from the rendered
