@@ -1899,8 +1899,8 @@ func TestLoadEventsClassifiesClaudeUserTurns(t *testing.T) {
 		{name: "compact summary", record: `{"type":"user","isCompactSummary":true,"message":{"content":"Prior conversation summary"}}`, wantHarness: true},
 		{name: "system prompt source", record: `{"type":"user","promptSource":"system","message":{"content":"Runtime instructions"}}`, wantHarness: true},
 		{name: "non-human origin", record: `{"type":"user","origin":{"kind":"task-notification"},"message":{"content":"Background task completed"}}`, wantHarness: true},
-		{name: "command wrapper", record: `{"type":"user","message":{"content":"<command-name>survey</command-name>"}}`, wantHarness: true},
-		{name: "command wrapper after hard noise", record: `{"type":"user","message":{"content":"<system-reminder>Hidden metadata</system-reminder>\n<command-name>survey</command-name>"}}`, wantHarness: true},
+		{name: "missing slash", record: `{"type":"user","message":{"content":"<command-name>survey</command-name>"}}`, wantHarness: true},
+		{name: "command wrapper after hard noise", record: `{"type":"user","message":{"content":"<system-reminder>Hidden metadata</system-reminder>\n<command-name>/survey</command-name>"}}`},
 		{name: "bash output wrapper", record: `{"type":"user","message":{"content":"<bash-stdout>route clear</bash-stdout>"}}`, wantHarness: true},
 		{name: "interruption notice", record: `{"type":"user","message":{"content":"[Request interrupted by user]"}}`, wantHarness: true},
 		{name: "typed prompt", record: `{"type":"user","promptSource":"typed","origin":{"kind":"human"},"message":{"content":"Survey the northern ridge"}}`},
@@ -1926,6 +1926,122 @@ func TestLoadEventsClassifiesClaudeUserTurns(t *testing.T) {
 			}
 			if got := session.Events[0].Harness; got != test.wantHarness {
 				t.Errorf("Event.Harness = %t, want %t", got, test.wantHarness)
+			}
+		})
+	}
+}
+
+func TestSlashCommandText(t *testing.T) {
+	tests := []struct {
+		name, text, markers, want string
+		harness                   bool
+	}{
+		{name: "built-in with args", text: "<command-name>\u00a0/goal\u00a0</command-name>\n   <command-message>goal</command-message>\n   <command-args>  compare a < b &amp; c  </command-args>", want: "/goal compare a < b &amp; c"},
+		{name: "built-in with empty args", text: "<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args> </command-args>", want: "/compact"},
+		{name: "skill with args", text: "<command-message>survey</command-message>\n<command-name>/survey</command-name>\n<command-args>inspect\nthe grove</command-args>", want: "/survey inspect\nthe grove"},
+		{name: "skill without args", text: "<command-message>survey</command-message>\n<command-name>/survey</command-name>", want: "/survey"},
+		{name: "missing name", text: "<command-message>survey</command-message>", harness: true},
+		{name: "empty name", text: "<command-name> </command-name>", harness: true},
+		{name: "unclosed name", text: "<command-name>/survey", harness: true},
+		{name: "quoted markup", text: "Explain <command-name>/survey</command-name>"},
+		{name: "meta", text: "<command-name>/survey</command-name>", markers: `"isMeta":true,`, want: "/survey", harness: true},
+		{name: "peer", text: "<command-name>/survey</command-name>", markers: `"origin":{"kind":"peer"},`, want: "/survey", harness: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			line := `{"type":"user",` + test.markers + `"message":{"content":` + strconv.Quote(test.text) + `}}`
+			if err := os.WriteFile(path, []byte(line+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			session := &model.Session{Path: path}
+			if err := testParser().LoadEvents(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			want := test.want
+			if want == "" {
+				want = test.text
+			}
+			if len(session.Events) != 1 {
+				t.Fatalf("got %d events, want one", len(session.Events))
+			}
+			event := session.Events[0]
+			if event.Kind != model.EventUser || event.Text != want || event.Harness != test.harness {
+				t.Errorf("got (%s, %q, harness %t), want user %q, harness %t", event.Kind, event.Text, event.Harness, want, test.harness)
+			}
+		})
+	}
+}
+
+func TestSlashCommandTwins(t *testing.T) {
+	const plain = `"message":{"content":"/compact"}`
+	const wrapped = `"message":{"content":"<command-name>/compact</command-name>"}`
+	const queued = `"attachment":{"type":"queued_command","prompt":"<command-name>/compact</command-name>"}`
+	record := func(kind, stamp, body string) string {
+		return `{"type":"` + kind + `","timestamp":"` + stamp + `",` + body + `}`
+	}
+	const start = "2026-01-02T03:00:00Z"
+	tests := []struct {
+		name      string
+		lines     []string
+		wantLines []int
+	}{
+		{"compaction between twins", []string{
+			record("user", start, plain),
+			record("system", "2026-01-02T03:05:00Z", `"subtype":"compact_boundary"`),
+			record("user", "2026-01-02T03:05:01Z", `"isCompactSummary":true,"message":{"content":"Survey summary"}`),
+			record("user", "2026-01-02T03:00:00.074Z", wrapped),
+		}, []int{0, 1, 2}},
+		{"inclusive second across input paths", []string{
+			record("user", start, plain), record("attachment", "2026-01-02T03:00:01Z", queued),
+		}, []int{0}},
+		{"outside window", []string{
+			record("user", start, plain), record("user", "2026-01-02T03:00:01.001Z", wrapped),
+		}, []int{0, 1}},
+		{"consecutive wrappers", []string{
+			record("user", start, wrapped), record("attachment", start, queued),
+		}, []int{0, 1}},
+		{"plain marked as harness", []string{
+			record("user", start, `"isMeta":true,`+plain), record("user", start, wrapped),
+		}, []int{0, 1}},
+		{"different command at same time", []string{
+			record("user", start, `"message":{"content":"/compact the grove"}`), record("user", start, wrapped),
+		}, []int{0, 1}},
+		{"tool result beside twin", []string{
+			record("user", start, plain),
+			record("user", start, `"message":{"content":[{"type":"text","text":"<command-name>/compact</command-name>"},{"type":"tool_result","content":"route clear"}]}`),
+		}, []int{0, 1}},
+		{"earlier record stamped later", []string{
+			record("user", "2026-01-02T03:00:00.001Z", plain), record("user", start, wrapped),
+		}, []int{0, 1}},
+		{"equal timestamp despite intervening plain command", []string{
+			record("user", start, plain), record("user", "2026-01-02T03:02:00Z", plain),
+			record("user", start, wrapped),
+		}, []int{0, 1}},
+		{"missing timestamps", []string{
+			record("user", "", plain), record("user", "", wrapped),
+		}, []int{0, 1}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "session.jsonl")
+			if err := os.WriteFile(path, []byte(strings.Join(test.lines, "\n")+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			session := &model.Session{Path: path}
+			if err := testParser().LoadEvents(context.Background(), session); err != nil {
+				t.Fatal(err)
+			}
+			if len(session.Events) != len(test.wantLines) {
+				t.Fatalf("got %d events, want %d", len(session.Events), len(test.wantLines))
+			}
+			for i, line := range test.wantLines {
+				if session.Events[i].RecordRef.Digest != sha256.Sum256([]byte(test.lines[line])) {
+					t.Errorf("event %d should point to fixture record %d", i, line)
+				}
+				if strings.Contains(test.lines[line], `"tool_result"`) && session.Events[i].Kind != model.EventToolResult {
+					t.Errorf("event %d = %s, want tool result", i, session.Events[i].Kind)
+				}
 			}
 		})
 	}
@@ -2013,6 +2129,7 @@ func TestQueuedCommandTextAndHarness(t *testing.T) {
 		name        string
 		attachment  string
 		wantText    string
+		wantTitle   string
 		wantHarness bool
 	}{
 		{name: "absent origin", attachment: `{"type":"queued_command","prompt":"Survey the northern grove"}`, wantText: "Survey the northern grove"},
@@ -2029,7 +2146,7 @@ func TestQueuedCommandTextAndHarness(t *testing.T) {
 		{name: "malformed origin before prompt", attachment: `{"origin":[],"type":"queued_command","prompt":"Inspect the roots"}`, wantText: "Inspect the roots"},
 		{name: "malformed origin kind", attachment: `{"origin":{"kind":[]},"type":"queued_command","prompt":"Inspect the soil"}`, wantText: "Inspect the soil"},
 		{name: "valid meta after malformed origin", attachment: `{"origin":"human","prompt":"Inspect the clearing","type":"queued_command","isMeta":true}`, wantText: "Inspect the clearing", wantHarness: true},
-		{name: "wrapper after cleaning", attachment: `{"type":"queued_command","prompt":[{"type":"text","text":"<system-reminder>Hidden metadata</system-reminder>"},{"type":"text","text":"<command-name>survey</command-name>"}]}`, wantText: "<command-name>survey</command-name>", wantHarness: true},
+		{name: "wrapper after cleaning", attachment: `{"type":"queued_command","prompt":[{"type":"text","text":"<system-reminder>Hidden metadata</system-reminder>"},{"type":"text","text":"<command-name>/survey</command-name>\n<command-args>the grove</command-args>"}]}`, wantText: "/survey the grove", wantTitle: "/survey"},
 		{name: "empty", attachment: `{"type":"queued_command","prompt":" "}`},
 		{name: "missing", attachment: `{"type":"queued_command"}`},
 		{name: "null", attachment: `{"type":"queued_command","prompt":null}`},
@@ -2056,8 +2173,12 @@ func TestQueuedCommandTextAndHarness(t *testing.T) {
 			if test.wantText != "" {
 				wantMessages = 1
 			}
-			if session.Messages != wantMessages || session.Title != model.CleanTitle(test.wantText) {
-				t.Errorf("summary = %d messages, title %q, want %d, %q", session.Messages, session.Title, wantMessages, model.CleanTitle(test.wantText))
+			wantTitle := test.wantTitle
+			if wantTitle == "" {
+				wantTitle = model.CleanTitle(test.wantText)
+			}
+			if session.Messages != wantMessages || session.Title != wantTitle {
+				t.Errorf("summary = %d messages, title %q, want %d, %q", session.Messages, session.Title, wantMessages, wantTitle)
 			}
 			if err := parser.LoadEvents(context.Background(), session); err != nil {
 				t.Fatal(err)

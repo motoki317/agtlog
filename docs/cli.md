@@ -218,6 +218,10 @@ Every event contains integer `index`, timestamp `timestamp`, string `kind`, stri
 and `local-command-caveat` blocks. `truncated` names each bounded field: `text`, `tool.summary`,
 `tool.input`, `tool.diff`, or `tool.output`.
 
+A Claude slash command that the user typed appears as one `user` event without `harness`. Its
+`text` is the command and its arguments, such as `/goal tidy the docs`, or the command alone, such
+as `/compact`.
+
 An event can also contain these fields:
 
 | Field | Type and presence | Meaning |
