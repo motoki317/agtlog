@@ -134,17 +134,19 @@ type claudeUserOrigin struct {
 }
 
 type queuedCommand struct {
-	Prompt json.RawMessage
-	IsMeta bool
-	Origin *claudeUserOrigin
+	Prompt      json.RawMessage
+	IsMeta      bool
+	Origin      *claudeUserOrigin
+	CommandMode string
 }
 
 func parseQueuedCommand(raw json.RawMessage) (queuedCommand, bool) {
 	var attachment struct {
-		Type   string          `json:"type"`
-		Prompt json.RawMessage `json:"prompt"`
-		IsMeta json.RawMessage `json:"isMeta"`
-		Origin json.RawMessage `json:"origin"`
+		Type        string          `json:"type"`
+		Prompt      json.RawMessage `json:"prompt"`
+		IsMeta      json.RawMessage `json:"isMeta"`
+		Origin      json.RawMessage `json:"origin"`
+		CommandMode json.RawMessage `json:"commandMode"`
 	}
 	if jsonl.Unmarshal(raw, &attachment) != nil || attachment.Type != "queued_command" {
 		return queuedCommand{}, false
@@ -155,6 +157,9 @@ func parseQueuedCommand(raw json.RawMessage) (queuedCommand, bool) {
 	}
 	if jsonl.Unmarshal(attachment.Origin, &command.Origin) != nil {
 		command.Origin = nil
+	}
+	if jsonl.Unmarshal(attachment.CommandMode, &command.CommandMode) != nil {
+		command.CommandMode = ""
 	}
 	return command, true
 }
@@ -313,7 +318,7 @@ func (p Parser) loadEvents(ctx context.Context, session *model.Session, depth in
 				return
 			}
 			text = userText(command.Prompt)
-			harness = claudeUserIsHarness(command.IsMeta, false, "", command.Origin, text)
+			harness = command.CommandMode == "task-notification" || claudeUserIsHarness(command.IsMeta, false, "", command.Origin, text)
 		case "user":
 			text = userText(record.Message.Content)
 			if text != "" {
